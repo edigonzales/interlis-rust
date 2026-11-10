@@ -10,7 +10,11 @@ fn real_cli_streams_files_and_request_errors() {
     let root = std::env::temp_dir().join(format!("interlis cli {}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let source = root.join("source with spaces.ili");
-    fs::write(&source, "INTERLIS 2.3;").unwrap();
+    fs::write(
+        &source,
+        "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = END A.",
+    )
+    .unwrap();
     let out = binary()
         .args(["probe", "--json"])
         .arg(&source)

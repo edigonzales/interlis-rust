@@ -22,6 +22,7 @@ native-cli = []
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
+logos = "0.16.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

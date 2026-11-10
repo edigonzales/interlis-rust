@@ -112,6 +112,12 @@ pub struct SourceLocation {
     pub end_column_utf16: u32,
 }
 
+impl Span {
+    pub(crate) fn sort_key(&self) -> (u32, u32, u32) {
+        (self.source, self.start, self.end)
+    }
+}
+
 impl SourceSet {
     /// Takes ownership without normalizing text or building text-sized auxiliary indices.
     /// Names are unique, 1–1024 UTF-8 bytes and contain no control characters.

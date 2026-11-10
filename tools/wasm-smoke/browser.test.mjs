@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { request, escapedRequest, limited, badRequests, verify } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax } from './cases.mjs';
 test('Chromium module worker loads generated web package and shares the core', { timeout: 45_000 }, async () => {
   const assets = new Map([
     ['/', [new URL('./index.html', import.meta.url), 'text/html']],
@@ -35,6 +35,10 @@ test('Chromium module worker loads generated web package and shares the core', {
     for (const [text, status] of [[request, 'incomplete'], [escapedRequest, 'incomplete'], [limited, 'limit_exceeded'], [request, 'incomplete']]) {
       const result = await page.evaluate((text) => window.callWorker(text), text);
       assert.equal(result.ok, true); verify(JSON.parse(result.response), status);
+    }
+    for(const [text,status,code] of syntaxCases) {
+      const r=await page.evaluate(input=>window.callWorker(input),JSON.stringify({sources:[{name:'syntax',text}]}));
+      assert.equal(r.ok,true);verifySyntax(JSON.parse(r.response),text,status,code);
     }
     assert.deepEqual(errors, []); assert.equal(requests.length, initialRequests, 'No network after initialization');
   } finally {

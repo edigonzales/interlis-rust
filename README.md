@@ -1,9 +1,18 @@
 # interlis-rust
 
 Experimental Rust foundation for an INTERLIS 2.3/2.4 compiler, shared by native
-and WebAssembly hosts. **Language analysis is not implemented yet.** Model
-requests return `incomplete`, `validationScope: "i0-subset"`,
+and WebAssembly hosts. **A bounded syntax parser is integrated; semantic checking is not implemented yet.**
+Syntactically supported model requests return `incomplete`, `validationScope: "i0-subset"`,
 `fullValidation: false`, and `model: null`. This is not a full model validator.
+
+The internal Logos lexer and Recursive Descent parser preserve typed syntax and
+original ranges for simple models, imports, topics, classes/structures, bounded
+TEXT/BOOLEAN/numeric domains and attributes. Domain dependencies use the narrow
+form `Alias EXTENDS Base = MANDATORY;`; direct `Alias = Base;` domain definitions
+are invalid. General inheritance, units, collections, views and constraints remain
+unsupported. The parser consumes the full input, bounds nested comments and
+container depth, and recovers at declaration separators. Syntax alone supplies
+no public model graph.
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,
@@ -33,13 +42,14 @@ must be valid Unicode and file contents must be strict UTF-8.
 Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,
 100 diagnostics, 4,096 numeric digits, absolute exponent 10,000, 1,000,000 semantic
 steps. Limits must be positive. Hard caps respectively: 8 MiB, 32 MiB, 1,000,000,
-256, 1,000, 16,384, 100,000, 10,000,000. Only source budgets are consumed by the
-current foundation; later language processing will consume the other budgets.
+256, 1,000, 16,384, 100,000, 10,000,000. Source, token, comment/container nesting and diagnostic budgets are consumed.
+Numeric and semantic budgets will be consumed by semantic checking.
 Limits are operational constraints, not language restrictions.
 
 CLI exits: 0 checked subset, 1 rejected, 2 invalid request/usage, 3 operational
-failure, 4 incomplete or limit exceeded. Currently only incomplete and source
-limit reports are produced. JSON stdout contains one report; host errors go to
+failure, 4 incomplete or limit exceeded. Syntax errors can produce rejected reports. Unsupported syntax and successful
+syntax without semantic checking produce incomplete reports; exhausted budgets
+produce limit_exceeded. JSON stdout contains one report; host errors go to
 stderr. No implicit repository lookup exists.
 
 ```sh

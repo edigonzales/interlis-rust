@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn exact_unicode_wire_location_and_honest_status() {
-        let text = "\u{feff}ä😀\r\nx";
+        let text = "\u{feff}!! ä😀\r\nINTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = END A.";
         let request = serde_json::json!({"sources":[{"name":"a","text":text}]}).to_string();
         let report: serde_json::Value =
             serde_json::from_str(&analyze_json(&request).unwrap()).unwrap();
@@ -114,9 +114,10 @@ mod tests {
         assert_eq!(report["validationScope"], "i0-subset");
         assert!(report["model"].is_null());
         let d = &report["diagnostics"][0];
-        assert_eq!(d["endByte"], 12);
+        assert_eq!(d["startByte"], 14);
+        assert_eq!(d["endByte"], 63);
         assert_eq!(d["endLine"], 2);
-        assert_eq!(d["endColumnUtf16"], 2);
+        assert_eq!(d["endColumnUtf16"], 50);
         let oversized = " ".repeat(MAX_WIRE_BYTES + 1);
         assert_eq!(
             analyze_json(&oversized).unwrap_err().code(),

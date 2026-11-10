@@ -1,8 +1,12 @@
 //! Experimental INTERLIS analysis. No request currently receives full validation.
 #![forbid(unsafe_code)]
 
+mod diagnostic;
+mod keywords;
+mod lexer;
 mod limits;
 mod source;
+mod syntax;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 mod wire;
@@ -103,11 +107,12 @@ pub const fn compiler_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Checks request structure and budgets, then returns an explicitly incomplete report.
-/// Language analysis is not implemented yet. Never reads files or opens URLs.
+/// Parses the supported syntax with deterministic budgets. Semantic checking is
+/// not implemented yet; syntax success remains incomplete. Never performs host I/O.
 pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
     request.limits.validate()?;
     let mut sources = SourceSet::new(request.sources)?;
+    let mut diagnostics = diagnostic::Diagnostics::new(&request.limits);
     let mut total = Some(0_u64);
     let mut over = false;
     for file in sources.files() {
@@ -117,32 +122,54 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
         over |= len > u64::from(request.limits.max_source_bytes);
     }
     over |= total.is_none_or(|n| n > u64::from(request.limits.max_total_source_bytes));
-    let (status, code, message, primary) = if over {
-        (
-            AnalysisStatus::LimitExceeded,
-            "ILI-LIMIT",
-            "Source byte budget exceeded",
-            None,
-        )
+    if over {
+        diagnostics.push("ILI-LIMIT", "Source byte budget exceeded", None);
     } else {
         sources.index_lines();
-        (
-            AnalysisStatus::Incomplete,
-            "ILI-UNSUPPORTED",
-            "Language analysis is not implemented yet",
-            sources.span(0, 0, sources.files()[0].text().len()),
-        )
+        let mut remaining = request.limits.max_tokens;
+        for file in 0..sources.files().len() {
+            let document = syntax::parse(
+                &sources,
+                file,
+                &request.limits,
+                &mut remaining,
+                &mut diagnostics,
+            );
+            if diagnostics.limited {
+                break;
+            }
+            if let Some(document) = document {
+                // Syntax alone never certifies even the supported semantic subset.
+                if !diagnostics.rejected {
+                    diagnostics.push(
+                        "ILI-UNSUPPORTED",
+                        "Semantic analysis is not implemented yet",
+                        Some(document.span),
+                    );
+                }
+            }
+        }
+    }
+    let status = if diagnostics.limited {
+        AnalysisStatus::LimitExceeded
+    } else if diagnostics.incomplete {
+        AnalysisStatus::Incomplete
+    } else if diagnostics.rejected {
+        AnalysisStatus::Rejected
+    } else {
+        AnalysisStatus::Incomplete
     };
+    diagnostics.entries.sort_by(|a, b| {
+        let location = |d: &Diagnostic| d.primary.as_ref().map(Span::sort_key);
+        location(a)
+            .cmp(&location(b))
+            .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.message.cmp(&b.message))
+    });
     Ok(AnalysisReport {
         sources,
         status,
-        diagnostics: vec![Diagnostic {
-            code: code.into(),
-            severity: Severity::Error,
-            message: message.into(),
-            primary,
-            related: vec![],
-        }],
+        diagnostics: diagnostics.entries,
     })
 }
 
@@ -161,11 +188,7 @@ mod tests {
 
     #[test]
     fn no_unsupported_source_claims_validation() {
-        for text in [
-            "",
-            "INTERLIS 2.3;",
-            "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = END A.",
-        ] {
+        for text in ["", "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = END A."] {
             let report = analyze(request(text)).unwrap();
             assert_eq!(report.status(), AnalysisStatus::Incomplete);
             assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");

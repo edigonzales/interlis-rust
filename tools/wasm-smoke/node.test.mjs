@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { request, escapedRequest, limited, badRequests, verify } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax } from './cases.mjs';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const wasm = createRequire(import.meta.url)(join(root, 'target/pkg-node/interlis.js'));
 test('generated Node package: boundary, Unicode, budget and subsequent calls', () => {
@@ -15,6 +15,7 @@ test('generated Node package: boundary, Unicode, budget and subsequent calls', (
   const result = JSON.parse(wasm.analyzeJson(request)); verify(result);
   assert.deepEqual(JSON.parse(wasm.analyzeJson(escapedRequest)), result);
   verify(JSON.parse(wasm.analyzeJson(limited)), 'limit_exceeded'); verify(JSON.parse(wasm.analyzeJson(request)));
+  for(const [text,status,code] of syntaxCases) verifySyntax(JSON.parse(wasm.analyzeJson(JSON.stringify({sources:[{name:'syntax',text}]}))),text,status,code);
   const temporary = mkdtempSync(join(tmpdir(), 'interlis-parity-'));
   try {
     const path = join(temporary, 'request.json'); writeFileSync(path, request);
