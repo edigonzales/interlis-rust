@@ -372,6 +372,10 @@ impl Parser<'_> {
     }
     fn declaration(&mut self, context: Context) -> Parsed<Vec<Declaration>> {
         let start = self.start();
+        if matches!(self.text(), ";" | "." | "," | "}" | ")" | "]" | ":=") {
+            return Err(Self::expected("Unexpected separator at declaration start"));
+        }
+
         if context == Context::Container {
             if keywords::reserved(self.text(), self.language) {
                 return Err(Self::unsupported(
@@ -1222,6 +1226,55 @@ mod definite_syntax_regressions {
                     );
                 }
                 assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stray_separator_tests {
+    use crate::{AnalysisStatus, CompileRequest, Limits, SourceInput, analyze};
+    #[test]
+    fn closing_symbols_do_not_create_a_missing_feature_in_supported_bodies() {
+        for version in ["2.3", "2.4"] {
+            for body in [
+                ";",
+                "DOMAIN ;",
+                "TOPIC T=; END T;",
+                "STRUCTURE S=; END S;",
+                "TOPIC T=CLASS C=; END C; END T;",
+                ")",
+                "]",
+                "}",
+                ",",
+                ".",
+                ":=",
+            ] {
+                let text = format!(
+                    "INTERLIS {version}; MODEL M AT \"https://example.invalid\" VERSION \"1\" = {body} END M."
+                );
+                let report = analyze(CompileRequest {
+                    sources: vec![SourceInput {
+                        name: "a".into(),
+                        text,
+                    }],
+                    limits: Limits::default(),
+                })
+                .unwrap();
+                assert_eq!(
+                    report.status(),
+                    AnalysisStatus::Rejected,
+                    "{body}: {:?}",
+                    report.diagnostics()
+                );
+                assert!(report.graph().is_none());
+                assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                assert!(
+                    !report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == "ILI-UNSUPPORTED")
+                );
             }
         }
     }
