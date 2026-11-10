@@ -1,4 +1,4 @@
-use crate::{Diagnostic, Limits, Severity, Span};
+use crate::{Diagnostic, Limits, RelatedLocation, Severity, Span};
 
 /// Run-local outcome flags are independent of the bounded visible buffer.
 pub(crate) struct Diagnostics {
@@ -19,6 +19,15 @@ impl Diagnostics {
         }
     }
     pub fn push(&mut self, code: &str, message: &str, primary: Option<Span>) {
+        self.push_related(code, message, primary, vec![]);
+    }
+    pub fn push_related(
+        &mut self,
+        code: &str,
+        message: &str,
+        primary: Option<Span>,
+        related: Vec<RelatedLocation>,
+    ) {
         match code {
             "ILI-LIMIT" => self.limited = true,
             "ILI-UNSUPPORTED" => self.incomplete = true,
@@ -33,7 +42,7 @@ impl Diagnostics {
             },
             message: message.into(),
             primary,
-            related: vec![],
+            related,
         };
         if self.entries.len() < self.cap {
             self.entries.push(diagnostic);

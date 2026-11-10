@@ -29,6 +29,7 @@ pub struct SourceFile {
     name: String,
     text: String,
     line_starts: Option<Vec<u32>>,
+    utf16_checkpoints: Option<Vec<(u32, u32)>>,
 }
 
 impl SourceFile {
@@ -67,11 +68,15 @@ impl SourceFile {
             (line, start)
         };
         let prefix = &self.text[start..offset];
-        let units = prefix
-            .chars()
-            .filter(|&c| c != '\r' && c != '\n')
-            .map(char::len_utf16)
-            .sum::<usize>();
+        let units = if self.utf16_checkpoints.is_some() {
+            self.units_before(byte)? - self.units_before(u32::try_from(start).ok()?)?
+        } else {
+            prefix
+                .chars()
+                .filter(|&c| c != '\r' && c != '\n')
+                .map(char::len_utf16)
+                .sum::<usize>()
+        };
         let bom = usize::from(start == 0 && prefix.starts_with('\u{feff}'));
         Some(Position {
             line,
@@ -79,6 +84,23 @@ impl SourceFile {
                 .ok()?
                 .checked_add(1)?,
         })
+    }
+    // Sparse checkpoints bound repeated graph-location projection on a long single
+    // line. Their allocation still occurs only after the source-byte budget check.
+    fn units_before(&self, byte: u32) -> Option<usize> {
+        let checkpoints = self.utf16_checkpoints.as_ref()?;
+        let i = checkpoints
+            .partition_point(|&(at, _)| at <= byte)
+            .checked_sub(1)?;
+        let (at, units) = checkpoints[i];
+        Some(
+            usize::try_from(units).ok()?
+                + self.text[usize::try_from(at).ok()?..usize::try_from(byte).ok()?]
+                    .chars()
+                    .filter(|&c| c != '\r' && c != '\n')
+                    .map(char::len_utf16)
+                    .sum::<usize>(),
+        )
     }
 }
 
@@ -160,6 +182,7 @@ impl SourceSet {
                     name: input.name,
                     text: input.text,
                     line_starts: None,
+                    utf16_checkpoints: None,
                 })
                 .collect(),
         })
@@ -202,6 +225,19 @@ impl SourceSet {
                 line_ends(&file.text).map(|end| u32::try_from(end).expect("bounded source")),
             );
             file.line_starts = Some(starts);
+            let mut checkpoints = vec![(0, 0)];
+            let mut units = 0_u32;
+            let mut last = 0;
+            for (byte, c) in file.text.char_indices() {
+                if byte - last >= 256 {
+                    checkpoints.push((u32::try_from(byte).expect("bounded source"), units));
+                    last = byte;
+                }
+                if c != '\r' && c != '\n' {
+                    units += u32::try_from(c.len_utf16()).expect("one UTF-16 character");
+                }
+            }
+            file.utf16_checkpoints = Some(checkpoints);
         }
     }
 
@@ -310,5 +346,40 @@ mod tests {
                 column_utf16: 1
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    #[test]
+    fn sparse_utf16_positions_match_unindexed_positions_after_long_lines() {
+        let text = format!("\u{feff}{}\r\n{}x", "😀".repeat(500), "ä".repeat(300));
+        let mut sources = SourceSet::new(vec![SourceInput {
+            name: "a".into(),
+            text,
+        }])
+        .unwrap();
+        for indexed in [false, true] {
+            if indexed {
+                sources.index_lines();
+            }
+            for (byte, line, column_utf16) in [
+                (0, 1, 1),
+                (3, 1, 1),
+                (1027, 1, 513),
+                (2003, 1, 1001),
+                (2004, 1, 1001),
+                (2005, 2, 1),
+                (2605, 2, 301),
+                (2606, 2, 302),
+            ] {
+                assert_eq!(
+                    sources.files()[0].position(byte),
+                    Some(Position { line, column_utf16 }),
+                    "{byte}"
+                );
+            }
+        }
     }
 }

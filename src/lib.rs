@@ -5,6 +5,9 @@ mod diagnostic;
 mod keywords;
 mod lexer;
 mod limits;
+mod model;
+mod number;
+mod semantic;
 mod source;
 mod syntax;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
@@ -12,6 +15,10 @@ mod wasm;
 mod wire;
 
 pub use limits::Limits;
+pub use model::{
+    DecimalInfo, Declaration, DeclarationKind, LanguageVersion, ModelGraph, ModelInfo, TypeInfo,
+    TypeReference,
+};
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json};
 
@@ -63,6 +70,7 @@ pub struct AnalysisReport {
     sources: SourceSet,
     status: AnalysisStatus,
     diagnostics: Vec<Diagnostic>,
+    graph: Option<ModelGraph>,
 }
 
 impl AnalysisReport {
@@ -71,6 +79,9 @@ impl AnalysisReport {
     }
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+    pub fn graph(&self) -> Option<&ModelGraph> {
+        self.graph.as_ref()
     }
     pub fn sources(&self) -> &SourceSet {
         &self.sources
@@ -107,8 +118,8 @@ pub const fn compiler_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Parses the supported syntax with deterministic budgets. Semantic checking is
-/// not implemented yet; syntax success remains incomplete. Never performs host I/O.
+/// Checks the declared syntax/semantic subset with deterministic budgets.
+/// Unknown constructs remain incomplete; no request receives full validation. No host I/O.
 pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
     request.limits.validate()?;
     let mut sources = SourceSet::new(request.sources)?;
@@ -122,40 +133,40 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
         over |= len > u64::from(request.limits.max_source_bytes);
     }
     over |= total.is_none_or(|n| n > u64::from(request.limits.max_total_source_bytes));
+    let mut graph = None;
     if over {
         diagnostics.push("ILI-LIMIT", "Source byte budget exceeded", None);
     } else {
         sources.index_lines();
         let mut remaining = request.limits.max_tokens;
+        let mut documents = Vec::new();
         for file in 0..sources.files().len() {
-            let document = syntax::parse(
+            if let Some(document) = syntax::parse(
                 &sources,
                 file,
                 &request.limits,
                 &mut remaining,
                 &mut diagnostics,
-            );
+            ) {
+                documents.push(document);
+            }
             if diagnostics.limited {
                 break;
             }
-            if let Some(document) = document {
-                // Syntax alone never certifies even the supported semantic subset.
-                if !diagnostics.rejected {
-                    diagnostics.push(
-                        "ILI-UNSUPPORTED",
-                        "Semantic analysis is not implemented yet",
-                        Some(document.span),
-                    );
-                }
-            }
+        }
+        if !diagnostics.limited && !diagnostics.incomplete && !diagnostics.rejected {
+            graph = semantic::analyze(&documents, &request.limits, &mut diagnostics);
         }
     }
+
     let status = if diagnostics.limited {
         AnalysisStatus::LimitExceeded
     } else if diagnostics.incomplete {
         AnalysisStatus::Incomplete
     } else if diagnostics.rejected {
         AnalysisStatus::Rejected
+    } else if graph.is_some() {
+        AnalysisStatus::CheckedSubset
     } else {
         AnalysisStatus::Incomplete
     };
@@ -170,6 +181,7 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
         sources,
         status,
         diagnostics: diagnostics.entries,
+        graph,
     })
 }
 
@@ -188,7 +200,7 @@ mod tests {
 
     #[test]
     fn no_unsupported_source_claims_validation() {
-        for text in ["", "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = END A."] {
+        for text in ["", "INTERLIS 2.2;"] {
             let report = analyze(request(text)).unwrap();
             assert_eq!(report.status(), AnalysisStatus::Incomplete);
             assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");

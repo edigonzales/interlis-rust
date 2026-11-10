@@ -6,11 +6,7 @@ use crate::{
     lexer::{self, Kind, Token},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Language {
-    V23,
-    V24,
-}
+pub(crate) use crate::model::LanguageVersion as Language;
 #[derive(Debug)]
 pub(crate) struct Located<T> {
     pub value: T,
@@ -18,26 +14,17 @@ pub(crate) struct Located<T> {
 }
 pub(crate) type Name = Located<String>;
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
-)]
 pub(crate) struct QualifiedName {
     pub segments: Vec<Name>,
     pub span: Span,
 }
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
-)]
 pub(crate) struct Document {
     pub language: Language,
     pub models: Vec<ModelDecl>,
     pub span: Span,
 }
 #[derive(Debug)]
-#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) struct ModelDecl {
     pub name: Name,
     pub language_tag: Option<Name>,
@@ -49,7 +36,6 @@ pub(crate) struct ModelDecl {
     pub span: Span,
 }
 #[derive(Debug)]
-#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) enum Declaration {
     Topic {
         name: Name,
@@ -83,16 +69,11 @@ pub(crate) enum ContainerKind {
     Structure,
 }
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
-)]
 pub(crate) enum DomainType {
     Concrete(TypeSyntax),
     MandatoryDerivation(QualifiedName),
 }
 #[derive(Debug)]
-#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) enum TypeSyntax {
     Text {
         max_length: Located<String>,
@@ -1224,7 +1205,22 @@ mod definite_syntax_regressions {
                     limits,
                 })
                 .unwrap();
-                assert_eq!(report.status(), AnalysisStatus::Incomplete);
+                assert_eq!(
+                    report.status(),
+                    if doc.models.is_empty() {
+                        AnalysisStatus::Rejected
+                    } else {
+                        AnalysisStatus::CheckedSubset
+                    }
+                );
+                if doc.models.is_empty() {
+                    assert!(
+                        report
+                            .diagnostics()
+                            .iter()
+                            .any(|d| d.code == "ILI-MODEL-MISSING")
+                    );
+                }
                 assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
             }
         }

@@ -54,3 +54,20 @@ impl Limits {
         Ok(())
     }
 }
+
+/// Actual deterministic semantic work: syntax collection/binding hops and numeric
+/// digits/alignment distance. Separate from source/token/parser budgets.
+pub(crate) struct WorkBudget {
+    remaining: u32,
+}
+impl WorkBudget {
+    pub fn new(limits: &Limits) -> Self {
+        Self {
+            remaining: limits.max_semantic_steps,
+        }
+    }
+    pub fn charge(&mut self, amount: u32) -> Result<(), ()> {
+        self.remaining = self.remaining.checked_sub(amount).ok_or(())?;
+        Ok(())
+    }
+}

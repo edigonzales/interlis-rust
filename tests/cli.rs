@@ -20,12 +20,12 @@ fn real_cli_streams_files_and_request_errors() {
         .arg(&source)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(out.status.code(), Some(0));
     assert!(out.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["status"], "incomplete");
+    assert_eq!(report["status"], "checked_subset");
     assert_eq!(report["fullValidation"], false);
-    assert!(report["model"].is_null());
+    assert_eq!(report["model"]["models"][0]["name"], "A");
     let duplicate = binary()
         .arg("probe")
         .arg(&source)
