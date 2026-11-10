@@ -17,6 +17,7 @@ export const syntaxCases = [
   [syntaxDocument, 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = DOMAIN Angle=0..360 CIRCULAR; END A.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT \"https://example.invalid\" VERSION \"1\" = END A.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" END A.', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument+' GARBAGE', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument+' /* outer /* inner */', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL A AT "😀" VERSION "1" = DOMAIN X=; Y=; END A.', 'rejected', 'ILI-SYNTAX'],

@@ -421,9 +421,6 @@ impl Parser<'_> {
         }
         if self.take("DOMAIN") {
             let mut items = vec![];
-            if self.is("END") || self.at == self.tokens.len() {
-                return Err(Self::expected("Empty DOMAIN section"));
-            }
             while self
                 .tokens
                 .get(self.at)
@@ -441,9 +438,24 @@ impl Parser<'_> {
                     let (ty, mandatory) = if self.take("EXTENDS") {
                         let base = self.qualified_name()?;
                         self.expect("=")?;
-                        if !self.take("MANDATORY") || !self.is(";") {
+                        if self.is(";") || self.is("END") || self.at == self.tokens.len() {
+                            return Err(Self::expected(
+                                "Expected a type or MANDATORY after derived domain '='",
+                            ));
+                        }
+                        if !self.take("MANDATORY") {
                             return Err(Self::unsupported(
                                 "Only EXTENDS Base = MANDATORY domain derivations are supported",
+                            ));
+                        }
+                        if self.is("END") || self.at == self.tokens.len() {
+                            return Err(Self::expected(
+                                "Expected ';' after mandatory domain derivation",
+                            ));
+                        }
+                        if !self.is(";") {
+                            return Err(Self::unsupported(
+                                "Refined inherited types are outside the supported subset",
                             ));
                         }
                         (DomainType::MandatoryDerivation(base), true)
@@ -472,9 +484,6 @@ impl Parser<'_> {
                     break;
                 }
             }
-            if items.is_empty() && !self.diagnostics.rejected {
-                return Err(Self::expected("Expected a DOMAIN definition"));
-            }
             return Ok(items);
         }
         let topic = self.is("TOPIC");
@@ -493,11 +502,12 @@ impl Parser<'_> {
                 }
             }
             let name = self.name(false)?;
-            if !self.take("=") {
+            if self.is("(") || self.is("EXTENDS") {
                 return Err(Self::unsupported(
                     "Container modifiers or inheritance are outside the supported subset",
                 ));
             }
+            self.expect("=")?;
             if self.depth >= self.limits.max_nesting {
                 self.diagnostics.push(
                     "ILI-LIMIT",
@@ -567,11 +577,12 @@ impl Parser<'_> {
         let issuer = self.quoted()?;
         self.expect("VERSION")?;
         let version = self.quoted()?;
-        if !self.take("=") {
+        if self.is("TRANSLATION") || self.source()[self.start()..].starts_with("//") {
             return Err(Self::unsupported(
                 "Additional model header options are outside the supported subset",
             ));
         }
+        self.expect("=")?;
         let mut imports = vec![];
         while self.take("IMPORTS") {
             imports.push(self.import_name()?);
@@ -610,13 +621,15 @@ impl Parser<'_> {
             return Err(Self::unsupported("Only INTERLIS 2.3 and 2.4 are supported"));
         };
         self.expect(";")?;
-        if self.at == self.tokens.len() {
-            return Err(Self::expected("Expected at least one MODEL"));
-        }
         let mut models = vec![];
         while self.at < self.tokens.len() && !self.diagnostics.limited {
             if !self.is("MODEL") {
-                if models.is_empty() || keywords::reserved(self.text(), self.language) {
+                if models.is_empty()
+                    || matches!(
+                        self.text(),
+                        "CONTRACTED" | "TYPE" | "REFSYSTEM" | "SYMBOLOGY"
+                    )
+                {
                     return Err(Self::unsupported(
                         "Model construction is outside the supported subset",
                     ));
@@ -1134,5 +1147,86 @@ mod continuation_regressions {
                 .collect::<Vec<_>>(),
             ["A", "INTERLIS"]
         );
+    }
+}
+
+#[cfg(test)]
+mod definite_syntax_regressions {
+    use super::*;
+    use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
+    #[test]
+    fn missing_supported_delimiters_are_rejected_instead_of_hidden() {
+        for version in ["2.3", "2.4"] {
+            let header =
+                format!("INTERLIS {version}; MODEL M AT \"https://example.invalid\" VERSION \"1\"");
+            for text in [
+                format!("{header} END M."),
+                format!("{header} = TOPIC T END T; END M."),
+                format!("{header} = TOPIC T = CLASS C END C; END T; END M."),
+                format!("{header} = STRUCTURE S END S; END M."),
+                format!("{header} = DOMAIN Base=BOOLEAN; D EXTENDS Base = ; END M."),
+                format!("{header} = DOMAIN Base=BOOLEAN; D EXTENDS Base = MANDATORY END M."),
+                format!("{header} = END M. END"),
+            ] {
+                let report = analyze(CompileRequest {
+                    sources: vec![SourceInput {
+                        name: "bad".into(),
+                        text: text.clone(),
+                    }],
+                    limits: Limits::default(),
+                })
+                .unwrap();
+                assert_eq!(report.status(), AnalysisStatus::Rejected, "{text}");
+                assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                assert!(
+                    !report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == "ILI-UNSUPPORTED")
+                );
+            }
+        }
+    }
+    #[test]
+    fn empty_domain_sections_and_header_only_sources_are_not_invented_errors() {
+        for version in ["2.3", "2.4"] {
+            for text in [
+                format!("INTERLIS {version};"),
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"https://example.invalid\" VERSION \"1\" = DOMAIN END M."
+                ),
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"https://example.invalid\" VERSION \"1\" = DOMAIN STRUCTURE S = END S; END M."
+                ),
+            ] {
+                let sources = SourceSet::new(vec![SourceInput {
+                    name: "a".into(),
+                    text: text.clone(),
+                }])
+                .unwrap();
+                let limits = Limits::default();
+                let mut diagnostics = Diagnostics::new(&limits);
+                let mut remaining = limits.max_tokens;
+                let doc = parse(&sources, 0, &limits, &mut remaining, &mut diagnostics).unwrap();
+                assert!(diagnostics.entries.is_empty(), "{text}");
+                if text.ends_with(';') {
+                    assert!(doc.models.is_empty());
+                } else if text.contains("STRUCTURE") {
+                    assert_eq!(doc.models[0].declarations.len(), 1);
+                } else {
+                    assert!(doc.models[0].declarations.is_empty());
+                }
+                let report = analyze(CompileRequest {
+                    sources: vec![SourceInput {
+                        name: "a".into(),
+                        text,
+                    }],
+                    limits,
+                })
+                .unwrap();
+                assert_eq!(report.status(), AnalysisStatus::Incomplete);
+                assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+            }
+        }
     }
 }
