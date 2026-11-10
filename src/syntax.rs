@@ -1,9 +1,4 @@
 //! Private syntax values. No parser-library type crosses this module's boundary.
-// The AST is produced in this phase; its semantic consumer follows independently.
-#![expect(
-    dead_code,
-    reason = "Typed syntax is retained for the next semantic phase"
-)]
 use crate::{
     Limits, SourceSet, Span,
     diagnostic::Diagnostics,
@@ -23,17 +18,26 @@ pub(crate) struct Located<T> {
 }
 pub(crate) type Name = Located<String>;
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
+)]
 pub(crate) struct QualifiedName {
     pub segments: Vec<Name>,
     pub span: Span,
 }
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
+)]
 pub(crate) struct Document {
     pub language: Language,
     pub models: Vec<ModelDecl>,
     pub span: Span,
 }
 #[derive(Debug)]
+#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) struct ModelDecl {
     pub name: Name,
     pub language_tag: Option<Name>,
@@ -45,6 +49,7 @@ pub(crate) struct ModelDecl {
     pub span: Span,
 }
 #[derive(Debug)]
+#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) enum Declaration {
     Topic {
         name: Name,
@@ -78,11 +83,16 @@ pub(crate) enum ContainerKind {
     Structure,
 }
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "AST fields receive their semantic consumer in P4")
+)]
 pub(crate) enum DomainType {
     Concrete(TypeSyntax),
     MandatoryDerivation(QualifiedName),
 }
 #[derive(Debug)]
+#[expect(dead_code, reason = "AST fields receive their semantic consumer in P4")]
 pub(crate) enum TypeSyntax {
     Text {
         max_length: Located<String>,
@@ -105,6 +115,7 @@ enum Context {
     Container,
 }
 struct Issue {
+    primary: Option<Span>,
     unsupported: bool,
     message: &'static str,
 }
@@ -165,12 +176,14 @@ impl Parser<'_> {
     }
     fn expected(message: &'static str) -> Issue {
         Issue {
+            primary: None,
             unsupported: false,
             message,
         }
     }
     fn unsupported(message: &'static str) -> Issue {
         Issue {
+            primary: None,
             unsupported: true,
             message,
         }
@@ -190,7 +203,7 @@ impl Parser<'_> {
                 "ILI-SYNTAX"
             },
             issue.message,
-            Some(self.current_span()),
+            Some(issue.primary.unwrap_or_else(|| self.current_span())),
         );
     }
     fn name(&mut self, builtin: bool) -> Parsed<Name> {
@@ -245,6 +258,11 @@ impl Parser<'_> {
                 segments.push(self.name(false)?);
             }
         }
+        if self.is("..") {
+            return Err(Self::expected(
+                "Expected a single dot between qualified name segments",
+            ));
+        }
         Ok(QualifiedName {
             segments,
             span: self.span(start, self.end()),
@@ -266,6 +284,27 @@ impl Parser<'_> {
         })
     }
     fn ty(&mut self, named: bool) -> Parsed<TypeSyntax> {
+        let ty = self.type_base(named)?;
+        if matches!(
+            self.text(),
+            "[" | "{"
+                | "<"
+                | "CIRCULAR"
+                | "CLOCKWISE"
+                | "COUNTERCLOCKWISE"
+                | "CONSTRAINTS"
+                | "WITH"
+                | "REFSYSTEM"
+                | "REFSYS"
+                | "FORMAT"
+        ) {
+            return Err(Self::unsupported(
+                "Type modifiers are outside the supported subset",
+            ));
+        }
+        Ok(ty)
+    }
+    fn type_base(&mut self, named: bool) -> Parsed<TypeSyntax> {
         let start = self.start();
         if self.take("TEXT") {
             if !self.take("*") {
@@ -274,12 +313,12 @@ impl Parser<'_> {
                 ));
             }
             let max_length = self.number()?;
-            if max_length
-                .value
-                .bytes()
-                .any(|b| !b.is_ascii_digit() && b != b'-' && b != b'+')
-            {
-                return Err(Self::expected("TEXT length must be an integer"));
+            if max_length.value.bytes().any(|b| !b.is_ascii_digit()) {
+                return Err(Issue {
+                    primary: Some(max_length.span),
+                    unsupported: false,
+                    message: "TEXT length must be an unsigned integer",
+                });
             }
             return Ok(TypeSyntax::Text {
                 max_length,
@@ -359,6 +398,11 @@ impl Parser<'_> {
                 ));
             }
             let name = self.name(false)?;
+            if self.is("(") {
+                return Err(Self::unsupported(
+                    "Attribute properties are outside the supported subset",
+                ));
+            }
             self.expect(":")?;
             let mandatory = self.take("MANDATORY");
             let ty = self.ty(true)?;
@@ -384,6 +428,11 @@ impl Parser<'_> {
                 let start = self.start();
                 let name = self.name(false)?;
                 let parsed = (|| {
+                    if self.is("(") {
+                        return Err(Self::unsupported(
+                            "Domain properties are outside the supported subset",
+                        ));
+                    }
                     let (ty, mandatory) = if self.take("EXTENDS") {
                         let base = self.qualified_name()?;
                         self.expect("=")?;
@@ -884,5 +933,86 @@ mod tests {
         let (_, doc, d) = parse_text(&format!("{HEADER}END A."), Limits::default());
         assert!(doc.is_some());
         assert!(!d.limited);
+    }
+}
+
+#[cfg(test)]
+mod unsupported_regressions {
+    use crate::{AnalysisStatus, CompileRequest, Limits, SourceInput, analyze};
+    #[test]
+    fn known_valid_extensions_are_incomplete_without_claiming_support() {
+        for language in ["2.3", "2.4"] {
+            for body in [
+                "DOMAIN Angle=0..360 CIRCULAR;",
+                "DOMAIN Length=0..100 [INTERLIS.m];",
+                "STRUCTURE S=value:0..100 [INTERLIS.m]; END S;",
+                "DOMAIN Code (FINAL)=TEXT*4;",
+                "DOMAIN Code (ABSTRACT)=TEXT*4;",
+                "DOMAIN Angle=0..360 CLOCKWISE;",
+                "DOMAIN Angle=0..360 COUNTERCLOCKWISE;",
+                r#"DOMAIN Code=TEXT*4 CONSTRAINTS OnlyX: THIS == "X";"#,
+            ] {
+                if language == "2.3" && body.contains("CONSTRAINTS") {
+                    continue;
+                }
+                let text = format!(
+                    "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
+                );
+                let report = analyze(CompileRequest {
+                    sources: vec![SourceInput {
+                        name: "a".into(),
+                        text,
+                    }],
+                    limits: Limits::default(),
+                })
+                .unwrap();
+                assert_eq!(
+                    report.status(),
+                    AnalysisStatus::Incomplete,
+                    "{body}: {:?}",
+                    report.diagnostics()
+                );
+                assert!(
+                    report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == "ILI-UNSUPPORTED" && d.primary.is_some())
+                );
+                assert!(
+                    !report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"),
+                    "{body}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn supported_syntax_errors_are_not_promoted_to_unsupported() {
+        for body in [
+            "DOMAIN A=TEXT*-5;",
+            "DOMAIN A=TEXT*+5;",
+            "DOMAIN A=TEXT*1.5;",
+            "DOMAIN A=0..;",
+            "DOMAIN A=TEXT*4 garbage;",
+        ] {
+            let text = format!(
+                "INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
+            );
+            let report = analyze(CompileRequest {
+                sources: vec![SourceInput {
+                    name: "a".into(),
+                    text,
+                }],
+                limits: Limits::default(),
+            })
+            .unwrap();
+            assert_eq!(report.status(), AnalysisStatus::Rejected, "{body}");
+            assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+            assert!(
+                !report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == "ILI-UNSUPPORTED")
+            );
+        }
     }
 }

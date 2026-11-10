@@ -26,7 +26,11 @@ impl Diagnostics {
         }
         let diagnostic = Diagnostic {
             code: code.into(),
-            severity: Severity::Error,
+            severity: if code == "ILI-UNSUPPORTED" {
+                Severity::Warning
+            } else {
+                Severity::Error
+            },
             message: message.into(),
             primary,
             related: vec![],

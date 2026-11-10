@@ -44,7 +44,10 @@ Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,
 steps. Limits must be positive. Hard caps respectively: 8 MiB, 32 MiB, 1,000,000,
 256, 1,000, 16,384, 100,000, 10,000,000. Source, token, comment/container nesting and diagnostic budgets are consumed.
 Numeric and semantic budgets will be consumed by semantic checking.
-Limits are operational constraints, not language restrictions.
+Limits are operational constraints, not language restrictions. Depth counts
+active blocks, including the outer comment or first topic/class/structure; the
+model header is not a nested container. Unsupported diagnostics are warnings;
+resource-limit errors mean analysis could not finish, without a language judgment.
 
 CLI exits: 0 checked subset, 1 rejected, 2 invalid request/usage, 3 operational
 failure, 4 incomplete or limit exceeded. Syntax errors can produce rejected reports. Unsupported syntax and successful
