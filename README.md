@@ -56,8 +56,19 @@ optional `limits` fields use the snake_case Rust field names. Unknown and duplic
 JSON fields are rejected. JSON input is limited to 16 MiB; encoded reports to
 32 MiB. Report-size failure is a controlled `REPORT_WIRE_SIZE` boundary error;
 no partial JSON is returned. The native Rust graph remains readable if encoding
-fails. The CLI reads at most 32 MiB of source files; duplicate canonical paths are
-usage errors. Source paths must be valid Unicode and contents strict UTF-8.
+fails. The CLI reads at most 32 MiB of source files. Repeated physical files,
+including symlinks and hardlinks, are usage errors; equal contents in distinct
+files remain separate sources. Native file identities use `same-file`, confined
+to the native CLI feature. Identity handles stay open for the read set; OS handle
+exhaustion is an operational error. Source paths must be valid Unicode and
+contents strict UTF-8.
+
+File-mode locations use `cli:///<argument-number>/<percent-encoded-basename>`;
+argument numbers start at one, so equal basenames in different directories remain
+distinct. Absolute and relative spellings of the same argument produce the same
+logical name. Local directory paths do not enter the analysis JSON. Request mode
+preserves the caller's exact logical names. Plain diagnostics show logical source,
+line and UTF-16 column; file I/O errors go to stderr.
 
 Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,
 100 diagnostics, 4,096 numeric digits, absolute exponent 10,000, 1,000,000 semantic
@@ -79,7 +90,7 @@ errors go to stderr. No implicit repository lookup exists.
 wasm-pack build --target nodejs --out-dir target/pkg-node --out-name interlis --no-opt --no-default-features --features wasm --locked
 wasm-pack build --target web --out-dir target/pkg-web --out-name interlis --no-opt --no-default-features --features wasm --locked
 cd tools/wasm-smoke
-npm ci
+npm ci --ignore-scripts
 npx playwright install chromium
 npm run test:node
 npm run test:browser
@@ -91,3 +102,7 @@ errors. Language outcomes are normal JSON reports. The browser test loads the
 real web package in a module worker over a local HTTP server; it has no UI.
 Smokes check actual model/type/origin data, big numbers, error recovery and native
 parity. Missing browsers/packages fail. Broad language tests run natively.
+
+CI defines native Linux/macOS/Windows checks and one Linux Node/Chromium-worker
+job. These hosted jobs have not been run for this candidate; local verification
+currently covers macOS, Node and Chromium. There are no release or publishing jobs.

@@ -18,7 +18,7 @@ required-features = ["native-cli"]
 
 [features]
 default = ["native-cli"]
-native-cli = []
+native-cli = ["dep:same-file"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
@@ -26,6 +26,9 @@ logos = "0.16.1"
 num-bigint = { version = "0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+same-file = { version = "1.0.6", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
