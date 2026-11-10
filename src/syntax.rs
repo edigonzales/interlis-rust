@@ -372,8 +372,12 @@ impl Parser<'_> {
     }
     fn declaration(&mut self, context: Context) -> Parsed<Vec<Declaration>> {
         let start = self.start();
-        if matches!(self.text(), ";" | "." | "," | "}" | ")" | "]" | ":=") {
-            return Err(Self::expected("Unexpected separator at declaration start"));
+        if self
+            .tokens
+            .get(self.at)
+            .is_some_and(|token| token.kind == Kind::Symbol)
+        {
+            return Err(Self::expected("Unexpected symbol at declaration start"));
         }
 
         if context == Context::Container {
@@ -1235,7 +1239,7 @@ mod definite_syntax_regressions {
 mod stray_separator_tests {
     use crate::{AnalysisStatus, CompileRequest, Limits, SourceInput, analyze};
     #[test]
-    fn closing_symbols_do_not_create_a_missing_feature_in_supported_bodies() {
+    fn symbols_cannot_start_declarations_in_supported_bodies() {
         for version in ["2.3", "2.4"] {
             for body in [
                 ";",
@@ -1249,6 +1253,28 @@ mod stray_separator_tests {
                 ",",
                 ".",
                 ":=",
+                "=",
+                "==",
+                "(",
+                "[",
+                "{",
+                "--",
+                "->",
+                "+",
+                "-",
+                "/",
+                ":",
+                "*",
+                "..",
+                "<",
+                ">",
+                "<=",
+                ">=",
+                "!=",
+                "<>",
+                "TOPIC T=( END T;",
+                "STRUCTURE S== END S;",
+                "TOPIC T=CLASS C=-> END C; END T;",
             ] {
                 let text = format!(
                     "INTERLIS {version}; MODEL M AT \"https://example.invalid\" VERSION \"1\" = {body} END M."

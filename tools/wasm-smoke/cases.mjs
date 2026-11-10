@@ -21,6 +21,7 @@ export const syntaxCases = [
   ['INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = DOMAIN ; END A.', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument+' GARBAGE', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument+' /* outer /* inner */', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 2.4; MODEL A AT "x" VERSION "1" = TOPIC T=CLASS C=-> END C; END T; END A.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL A AT "😀" VERSION "1" = DOMAIN X=; Y=; END A.', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument, 'checked_subset', null],
 ];

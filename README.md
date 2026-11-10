@@ -63,10 +63,13 @@ to the native CLI feature. Identity handles stay open for the read set; OS handl
 exhaustion is an operational error. Source paths must be valid Unicode and
 contents strict UTF-8.
 
-File-mode locations use `cli:///<argument-number>/<percent-encoded-basename>`;
-argument numbers start at one, so equal basenames in different directories remain
-distinct. Absolute and relative spellings of the same argument produce the same
-logical name. Local directory paths do not enter the analysis JSON. Request mode
+File-mode locations use `cli:///<source-number>/<percent-encoded-basename>`.
+Source numbers start at one and follow sorted canonical paths, so reordering the
+same file set preserves names and diagnostic order. Equal basenames remain
+distinct. Very long labels end with `~`, fitting the 1024-byte logical-name limit
+without splitting an encoded Unicode character; source numbers retain uniqueness.
+Absolute and relative spellings produce the same logical name. Local directory
+paths do not enter the analysis JSON. Request mode
 preserves the caller's exact logical names. Plain diagnostics show logical source,
 line and UTF-16 column; file I/O errors go to stderr.
 
@@ -106,3 +109,12 @@ parity. Missing browsers/packages fail. Broad language tests run natively.
 CI defines native Linux/macOS/Windows checks and one Linux Node/Chromium-worker
 job. These hosted jobs have not been run for this candidate; local verification
 currently covers macOS, Node and Chromium. There are no release or publishing jobs.
+
+The core uses one Logos lexer and a private Recursive Descent parser, followed by
+scope/type analysis and an owned model graph. CLI and WASM share the same request
+decoder and report projection. Syntax follows the original 2.3/2.4 reference
+manuals, cross-checked against the
+[geostandards ANTLR4 grammar](https://github.com/geostandards-ch/interlis-antlr4/tree/f8f97238c2540a49915f8bb97ee99bbf434b74da)
+and targeted ili2c comparisons. The `.g4` files are references, not product build
+inputs; the geostandards grammar targets 2.4. This subset implementation does not
+establish a parser-generator choice for the complete language.

@@ -12,6 +12,7 @@ const HELP: &str = "interlis-compiler (experimental; no full INTERLIS validation
 Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n";
 const MAX_HOST_BYTES: u64 = 32 * 1024 * 1024;
 
+#[derive(Debug)]
 struct CliError {
     exit: u8,
     message: String,
@@ -40,6 +41,9 @@ fn main() -> ExitCode {
 }
 
 fn read_bounded(path: &PathBuf) -> Result<String, CliError> {
+    if !std::fs::metadata(path).map_err(operational)?.is_file() {
+        return Err(operational("Expected a regular input file"));
+    }
     let file = std::fs::File::open(path).map_err(operational)?;
     read_file_bounded(&file)
 }
@@ -67,32 +71,50 @@ fn logical_source_name(path: &Path, ordinal: usize) -> Result<String, CliError> 
         .ok_or_else(|| usage("Expected a source filename"))?;
     let mut name = format!("cli:///{ordinal}/");
     use std::fmt::Write;
-    for byte in basename.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            name.push(char::from(byte));
-        } else {
-            write!(name, "%{byte:02X}").expect("writing to a String cannot fail");
+    for character in basename.chars() {
+        let mut buffer = [0; 4];
+        let bytes = character.encode_utf8(&mut buffer).as_bytes();
+        let unreserved =
+            bytes.len() == 1 && (bytes[0].is_ascii_alphanumeric() || b"-._~".contains(&bytes[0]));
+        let encoded_len = if unreserved { 1 } else { 3 * bytes.len() };
+        // Reserve one byte for a visible truncation marker. Ordinals retain
+        // uniqueness even when displayed basenames have the same prefix.
+        if name.len() + encoded_len > 1023 {
+            name.push('~');
+            break;
+        }
+        for &byte in bytes {
+            if unreserved {
+                name.push(char::from(byte));
+            } else {
+                write!(name, "%{byte:02X}").expect("writing to a String cannot fail");
+            }
         }
     }
     Ok(name)
 }
 
 fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
+    let mut ordered_paths = paths
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(|canonical| (canonical, path))
+                .map_err(operational)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ordered_paths.sort_by(|a, b| a.0.cmp(&b.0));
     let mut identities = HashSet::new();
     let mut sources = Vec::new();
     let mut total = 0_u64;
-    for (index, path) in paths.iter().enumerate() {
+    for (index, (canonical, path)) in ordered_paths.iter().enumerate() {
         let name = logical_source_name(path, index + 1)?;
         // Keep the open identity through this read set: symlinks and hardlinks
         // are duplicates too. Host paths never become logical source names.
-        let canonical = std::fs::canonicalize(path).map_err(operational)?;
-        if !std::fs::metadata(&canonical)
-            .map_err(operational)?
-            .is_file()
-        {
+        if !std::fs::metadata(canonical).map_err(operational)?.is_file() {
             return Err(operational("Expected a regular source file"));
         }
-        let handle = same_file::Handle::from_path(&canonical).map_err(operational)?;
+        let handle = same_file::Handle::from_path(canonical).map_err(operational)?;
         if identities.contains(&handle) {
             return Err(usage("Duplicate physical source file"));
         }
@@ -207,4 +229,36 @@ fn probe(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
         AnalysisStatus::Rejected => 1,
         AnalysisStatus::Incomplete | AnalysisStatus::LimitExceeded => 4,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legal_windows_length_names_fit_logical_limit_without_splitting_characters() {
+        for basename in [
+            format!("{}.ili", "界".repeat(200)),
+            format!("{}.ili", "😀".repeat(120)),
+        ] {
+            let name = logical_source_name(Path::new(&basename), 4096).unwrap();
+            assert!(name.len() <= 1024);
+            assert!(name.ends_with('~'));
+            let encoded_character = if basename.starts_with('界') {
+                "%E7%95%8C"
+            } else {
+                "%F0%9F%98%80"
+            };
+            let body = name
+                .strip_prefix("cli:///4096/")
+                .unwrap()
+                .strip_suffix('~')
+                .unwrap();
+            assert!(!body.is_empty());
+            assert_eq!(
+                body,
+                encoded_character.repeat(body.len() / encoded_character.len())
+            );
+        }
+    }
 }

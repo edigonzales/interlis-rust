@@ -224,3 +224,93 @@ fn cli_outcomes_are_json_reports_and_text_diagnostics_have_logical_locations() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn reordering_file_arguments_preserves_bindings_and_diagnostic_order() {
+    let root = std::env::temp_dir().join(format!("interlis order {}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let a = root.join("a.ili");
+    let b = root.join("b.ili");
+    for (a_text, b_text, expected) in [
+        (
+            "INTERLIS 2.3; MODEL Base AT \"x\" VERSION \"1\" = DOMAIN N=0..10; END Base.",
+            "INTERLIS 2.3; MODEL Data AT \"x\" VERSION \"1\" = IMPORTS Base; STRUCTURE S=n:Base.N; END S; END Data.",
+            0,
+        ),
+        (
+            "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = END WrongA.",
+            "INTERLIS 2.3; MODEL B AT \"x\" VERSION \"1\" = END WrongB.",
+            1,
+        ),
+    ] {
+        fs::write(&a, a_text).unwrap();
+        fs::write(&b, b_text).unwrap();
+        let forward = binary()
+            .args(["probe", "--json"])
+            .arg(&a)
+            .arg(&b)
+            .output()
+            .unwrap();
+        let reverse = binary()
+            .args(["probe", "--json"])
+            .arg(&b)
+            .arg(&a)
+            .output()
+            .unwrap();
+        assert_eq!(forward.status.code(), Some(expected));
+        assert_eq!(reverse.status.code(), Some(expected));
+        assert_eq!(forward.stdout, reverse.stdout);
+        assert!(forward.stderr.is_empty());
+        assert!(reverse.stderr.is_empty());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn request_fifo_is_rejected_before_a_blocking_open() {
+    use std::time::{Duration, Instant};
+    let root = std::env::temp_dir().join(format!("interlis fifo {}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let fifo = root.join("request.json");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut process = binary()
+        .args(["probe", "--json", "--request"])
+        .arg(&fifo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut timed_out = false;
+    loop {
+        if process.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            process.kill().unwrap();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let out = process.wait_with_output().unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        !timed_out,
+        "request FIFO blocked instead of returning an operational error"
+    );
+    assert_eq!(out.status.code(), Some(3));
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("regular input file")
+    );
+}
