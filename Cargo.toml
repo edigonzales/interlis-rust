@@ -1,0 +1,30 @@
+[package]
+name = "interlis-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+publish = false
+description = "Experimental INTERLIS analysis shared by native and WebAssembly hosts"
+
+[lib]
+name = "interlis"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "interlis-compiler"
+path = "src/main.rs"
+required-features = ["native-cli"]
+
+[features]
+default = ["native-cli"]
+native-cli = []
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true, default-features = false }

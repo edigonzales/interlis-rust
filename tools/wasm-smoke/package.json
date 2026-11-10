@@ -1,0 +1,1 @@
+{"name":"interlis-wasm-smoke","private":true,"type":"module","scripts":{"test:node":"node --test node.test.mjs","test:browser":"node --test browser.test.mjs"},"devDependencies":{"playwright":"1.62.1"}}
