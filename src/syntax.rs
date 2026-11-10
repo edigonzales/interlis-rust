@@ -406,6 +406,11 @@ impl Parser<'_> {
             self.expect(":")?;
             let mandatory = self.take("MANDATORY");
             let ty = self.ty(true)?;
+            if self.is(":=") {
+                return Err(Self::unsupported(
+                    "Attribute value assignments are outside the supported subset",
+                ));
+            }
             self.expect(";")?;
             return Ok(vec![Declaration::Attribute {
                 name,
@@ -534,6 +539,14 @@ impl Parser<'_> {
             "Declaration construction is outside the supported subset",
         ))
     }
+    fn import_name(&mut self) -> Parsed<Name> {
+        if self.is("UNQUALIFIED") {
+            return Err(Self::unsupported(
+                "UNQUALIFIED imports are outside the supported subset",
+            ));
+        }
+        self.name(true)
+    }
     fn model(&mut self) -> Parsed<ModelDecl> {
         let start = self.start();
         self.expect("MODEL")?;
@@ -545,6 +558,11 @@ impl Parser<'_> {
         } else {
             None
         };
+        if self.language == Language::V24 && self.is("NOINCREMENTALTRANSFER") {
+            return Err(Self::unsupported(
+                "NOINCREMENTALTRANSFER is outside the supported subset",
+            ));
+        }
         self.expect("AT")?;
         let issuer = self.quoted()?;
         self.expect("VERSION")?;
@@ -555,15 +573,10 @@ impl Parser<'_> {
             ));
         }
         let mut imports = vec![];
-        if self.take("IMPORTS") {
-            if self.is("UNQUALIFIED") {
-                return Err(Self::unsupported(
-                    "UNQUALIFIED imports are outside the supported subset",
-                ));
-            }
-            imports.push(self.name(true)?);
+        while self.take("IMPORTS") {
+            imports.push(self.import_name()?);
             while self.take(",") {
-                imports.push(self.name(true)?);
+                imports.push(self.import_name()?);
             }
             self.expect(";")?;
         }
@@ -1014,5 +1027,112 @@ mod unsupported_regressions {
                     .any(|d| d.code == "ILI-UNSUPPORTED")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod continuation_regressions {
+    use super::*;
+    use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
+    fn run(text: String) -> crate::AnalysisReport {
+        analyze(CompileRequest {
+            sources: vec![SourceInput {
+                name: "continuation".into(),
+                text,
+            }],
+            limits: Limits::default(),
+        })
+        .unwrap()
+    }
+    #[test]
+    fn unsupported_at_each_model_import_and_attribute_transition() {
+        for language in ["2.3", "2.4"] {
+            let head = format!("INTERLIS {language};");
+            let models = "MODEL Base AT \"https://example.invalid\" VERSION \"1\" = DOMAIN Label=TEXT*4; END Base. MODEL Other AT \"https://example.invalid\" VERSION \"1\" = DOMAIN Code=TEXT*6; END Other.";
+            let data = "MODEL Data AT \"https://example.invalid\" VERSION \"1\" =";
+            for (source, marker) in [
+                (
+                    format!("{head} {models} {data} IMPORTS UNQUALIFIED Base; END Data."),
+                    "UNQUALIFIED",
+                ),
+                (
+                    format!("{head} {models} {data} IMPORTS Base, UNQUALIFIED Other; END Data."),
+                    "UNQUALIFIED",
+                ),
+                (
+                    format!(
+                        "{head} {models} {data} IMPORTS Base; IMPORTS UNQUALIFIED Other; END Data."
+                    ),
+                    "UNQUALIFIED",
+                ),
+                (
+                    format!(
+                        "{head} {data} TOPIC T=CLASS C=value:TEXT*4 := \"X\"; END C; END T; END Data."
+                    ),
+                    ":=",
+                ),
+            ] {
+                let expected = source.find(marker).unwrap();
+                let report = run(source);
+                assert_eq!(report.status(), AnalysisStatus::Incomplete);
+                assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                let d = report
+                    .diagnostics()
+                    .iter()
+                    .find(|d| {
+                        d.code == "ILI-UNSUPPORTED"
+                            && d.message != "Semantic analysis is not implemented yet"
+                    })
+                    .unwrap();
+                let location = report
+                    .sources()
+                    .location(d.primary.as_ref().unwrap())
+                    .unwrap();
+                assert_eq!(location.start_byte as usize, expected);
+                assert_eq!(location.end_byte as usize, expected + marker.len());
+            }
+        }
+        let valid = "INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT \"https://example.invalid\" VERSION \"1\" = END A.";
+        let report = run(valid.into());
+        assert_eq!(report.status(), AnalysisStatus::Incomplete);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "ILI-UNSUPPORTED")
+        );
+        assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+        for invalid in [
+            valid.replace("2.4", "2.3"),
+            valid.replace("NOINCREMENTALTRANSFER", "NOINCREMENTALTRANSFERX"),
+            "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = IMPORTS Base UNQUALIFIED Other; END A."
+                .into(),
+        ] {
+            let report = run(invalid);
+            assert_eq!(report.status(), AnalysisStatus::Rejected);
+            assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+        }
+    }
+    #[test]
+    fn repeated_simple_import_clauses_retain_every_name_in_order() {
+        let source = "INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = END A. MODEL B AT \"https://example.invalid\" VERSION \"1\" = IMPORTS A; IMPORTS INTERLIS; END B.";
+        let sources = SourceSet::new(vec![SourceInput {
+            name: "a".into(),
+            text: source.into(),
+        }])
+        .unwrap();
+        let limits = Limits::default();
+        let mut diagnostics = Diagnostics::new(&limits);
+        let mut remaining = limits.max_tokens;
+        let doc = parse(&sources, 0, &limits, &mut remaining, &mut diagnostics).unwrap();
+        assert!(diagnostics.entries.is_empty());
+        assert_eq!(
+            doc.models[1]
+                .imports
+                .iter()
+                .map(|n| n.value.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "INTERLIS"]
+        );
     }
 }
