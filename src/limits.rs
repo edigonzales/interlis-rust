@@ -11,6 +11,8 @@ pub struct Limits {
     pub max_total_source_bytes: u32,
     pub max_tokens: u32,
     pub max_nesting: u32,
+    pub max_syntax_nodes: u32,
+    pub max_parser_steps: u32,
     pub max_diagnostics: u32,
     pub max_numeric_digits: u32,
     pub max_abs_exponent: u32,
@@ -24,6 +26,8 @@ impl Default for Limits {
             max_total_source_bytes: 8 * 1024 * 1024,
             max_tokens: 250_000,
             max_nesting: 128,
+            max_syntax_nodes: 500_000,
+            max_parser_steps: 10_000_000,
             max_diagnostics: 100,
             max_numeric_digits: 4096,
             max_abs_exponent: 10_000,
@@ -40,6 +44,8 @@ impl Limits {
             (self.max_total_source_bytes, 32 * 1024 * 1024),
             (self.max_tokens, 1_000_000),
             (self.max_nesting, 256),
+            (self.max_syntax_nodes, 2_000_000),
+            (self.max_parser_steps, 100_000_000),
             (self.max_diagnostics, 1000),
             (self.max_numeric_digits, 16_384),
             (self.max_abs_exponent, 100_000),
@@ -52,6 +58,41 @@ impl Limits {
             ));
         }
         Ok(())
+    }
+}
+
+/// One request's frontend budget, shared by all original source files.
+/// Work counts original lexer bytes, grammar entries, loop/recovery iterations,
+/// consumed tokens and syntax allocations. Each charge precedes that work.
+pub(crate) struct SyntaxBudget {
+    tokens: u32,
+    nodes: u32,
+    steps: u32,
+}
+impl SyntaxBudget {
+    pub fn new(limits: &Limits) -> Self {
+        Self {
+            tokens: limits.max_tokens,
+            nodes: limits.max_syntax_nodes,
+            steps: limits.max_parser_steps,
+        }
+    }
+    pub fn token(&mut self) -> bool {
+        charge(&mut self.tokens, 1)
+    }
+    pub fn node(&mut self) -> bool {
+        self.work(1) && charge(&mut self.nodes, 1)
+    }
+    pub fn work(&mut self, amount: u32) -> bool {
+        charge(&mut self.steps, amount)
+    }
+}
+fn charge(remaining: &mut u32, amount: u32) -> bool {
+    if let Some(next) = remaining.checked_sub(amount) {
+        *remaining = next;
+        true
+    } else {
+        false
     }
 }
 

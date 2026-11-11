@@ -138,7 +138,7 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
         diagnostics.push("ILI-LIMIT", "Source byte budget exceeded", None);
     } else {
         sources.index_lines();
-        let mut remaining = request.limits.max_tokens;
+        let mut remaining = limits::SyntaxBudget::new(&request.limits);
         let mut documents = Vec::new();
         for file in 0..sources.files().len() {
             if let Some(document) = syntax::parse(
@@ -154,7 +154,12 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
                 break;
             }
         }
-        if !diagnostics.limited && !diagnostics.incomplete && !diagnostics.rejected {
+        if !diagnostics.limited
+            && !diagnostics.syntax_invalid
+            && !diagnostics.unsupported_version
+            && !diagnostics.incomplete
+            && !diagnostics.rejected
+        {
             graph = semantic::analyze(&documents, &request.limits, &mut diagnostics);
         }
     }
@@ -200,10 +205,17 @@ mod tests {
 
     #[test]
     fn no_unsupported_source_claims_validation() {
-        for text in ["", "INTERLIS 2.2;"] {
+        for (text, status, code) in [
+            ("", AnalysisStatus::Rejected, "ILI-SYNTAX"),
+            (
+                "INTERLIS 2.2;",
+                AnalysisStatus::Incomplete,
+                "ILI-UNSUPPORTED",
+            ),
+        ] {
             let report = analyze(request(text)).unwrap();
-            assert_eq!(report.status(), AnalysisStatus::Incomplete);
-            assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");
+            assert_eq!(report.status(), status);
+            assert_eq!(report.diagnostics()[0].code, code);
             assert_eq!(report.sources().files()[0].text(), text);
         }
     }
@@ -218,7 +230,7 @@ mod tests {
         assert!(result.diagnostics()[0].primary.is_none());
         let mut input = request("ä");
         input.limits.max_source_bytes = 2;
-        assert_eq!(analyze(input).unwrap().status(), AnalysisStatus::Incomplete);
+        assert_eq!(analyze(input).unwrap().status(), AnalysisStatus::Rejected);
         let mut input = request("aa");
         input.limits.max_total_source_bytes = 3;
         input.sources.push(SourceInput {

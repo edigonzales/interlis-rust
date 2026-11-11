@@ -74,14 +74,23 @@ preserves the caller's exact logical names. Plain diagnostics show logical sourc
 line and UTF-16 column; file I/O errors go to stderr.
 
 Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,
+500,000 syntax values, 10,000,000 frontend work units,
 100 diagnostics, 4,096 numeric digits, absolute exponent 10,000, 1,000,000 semantic
 work units. Limits must be positive. Hard caps respectively: 8 MiB, 32 MiB,
-1,000,000, 256, 1,000, 16,384, 100,000, 10,000,000. Numeric digits include exponent
+1,000,000, 256, 2,000,000, 100,000,000, 1,000, 16,384, 100,000, 10,000,000. Numeric digits include exponent
 digits. Numeric/exponent budgets are checked before bigint allocation/alignment.
 Semantic work counts declaration/binding steps, generated name/reference bytes,
 numeric digits and decimal alignment distance. Depth counts active blocks,
 including the outer comment or first topic/class/structure; the model header is
 not a nested container. Limits are operating constraints, not language restrictions.
+Frontend work counts original lexer bytes, grammar entries, loop/recovery steps,
+consumed parser tokens and syntax allocations. Charges precede the corresponding
+work. Syntax values count documents, declarations, type/name/literal values and
+preserved comments, including values later discarded by error recovery; vectors
+and spans are not extra nodes. Limits are shared across the whole request.
+Identifiers are limited to 255 ASCII characters. Strings use INTERLIS escapes;
+comments and explanations retain their original source ranges. Missing or damaged
+language headers are syntax errors; other well-formed versions remain incomplete.
 Unsupported diagnostics are warnings; resource-limit errors mean analysis could
 not finish, without a language-invalidity verdict.
 

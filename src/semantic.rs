@@ -766,7 +766,7 @@ mod tests {
         .unwrap();
         let limits = Limits::default();
         let mut diagnostics = Diagnostics::new(&limits);
-        let mut tokens = limits.max_tokens;
+        let mut tokens = crate::limits::SyntaxBudget::new(&limits);
         let document = syntax::parse(&sources, 0, &limits, &mut tokens, &mut diagnostics).unwrap();
         let documents = [document];
         let mut analyzer = Analyzer::new(&documents, &limits, &mut diagnostics);

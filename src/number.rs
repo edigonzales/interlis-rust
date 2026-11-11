@@ -12,76 +12,111 @@ pub(crate) struct DecimalLiteral {
     pub info: DecimalInfo,
     value: BigInt,
 }
+struct Spelling<'a> {
+    negative: bool,
+    integer: &'a str,
+    fraction: Option<&'a str>,
+    exponent: i32,
+    scaled: bool,
+    digits: u32,
+}
+
+// Shared lexical/form inspection. No bigint, power calculation or allocation.
+fn inspect<'a>(text: &'a str, limits: &Limits) -> Result<Spelling<'a>, NumberError> {
+    // Inspect operational bounds before bigint allocation or exponent alignment.
+    let mut digits = 0_u32;
+    for b in text.bytes() {
+        if b.is_ascii_digit() {
+            digits += 1;
+            if digits > limits.max_numeric_digits {
+                return Err(NumberError::Limit);
+            }
+        }
+    }
+    let (negative, unsigned) = if let Some(s) = text.strip_prefix('-') {
+        (true, s)
+    } else {
+        (false, text.strip_prefix('+').unwrap_or(text))
+    };
+    let (mantissa, exponent_text) = unsigned.find(['e', 'E']).map_or((unsigned, None), |i| {
+        (&unsigned[..i], Some(&unsigned[i + 1..]))
+    });
+    let mut exponent = 0_i32;
+    if let Some(exp) = exponent_text {
+        let (neg, exp) = if let Some(e) = exp.strip_prefix('-') {
+            (true, e)
+        } else {
+            (false, exp.strip_prefix('+').unwrap_or(exp))
+        };
+        if exp.is_empty() || !exp.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(NumberError::Form);
+        }
+        let mut value = 0_u32;
+        for b in exp.bytes() {
+            value = value
+                .checked_mul(10)
+                .and_then(|v| v.checked_add(u32::from(b - b'0')))
+                .ok_or(NumberError::Limit)?;
+            if value > limits.max_abs_exponent {
+                return Err(NumberError::Limit);
+            }
+        }
+        exponent = i32::try_from(value).map_err(|_| NumberError::Limit)?;
+        if neg {
+            exponent = -exponent;
+        }
+    }
+    let (integer, fraction) = mantissa
+        .split_once('.')
+        .map_or((mantissa, None), |(a, b)| (a, Some(b)));
+    if integer.is_empty() || !integer.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(NumberError::Form);
+    }
+    if fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(NumberError::Form);
+    }
+    if exponent_text.is_some() {
+        let Some(f) = fraction else {
+            return Err(NumberError::Form);
+        };
+        // Original formal Float production; broad lexer spellings do not certify it.
+        if integer != "0"
+            || (!f.starts_with(|c: char| c.is_ascii_digit() && c != '0')
+                && !f.bytes().all(|b| b == b'0'))
+        {
+            return Err(NumberError::Form);
+        }
+    }
+    Ok(Spelling {
+        negative,
+        integer,
+        fraction,
+        exponent,
+        scaled: exponent_text.is_some(),
+        digits,
+    })
+}
+
+pub(crate) fn check_spelling(text: &str, limits: &Limits) -> Result<(), NumberError> {
+    inspect(text, limits).map(|_| ())
+}
+
 impl DecimalLiteral {
     pub fn parse(text: &str, limits: &Limits, work: &mut WorkBudget) -> Result<Self, NumberError> {
-        // Inspect operational bounds before bigint allocation or exponent alignment.
-        let mut digits = 0_u32;
-        for b in text.bytes() {
-            if b.is_ascii_digit() {
-                digits += 1;
-                if digits > limits.max_numeric_digits {
-                    return Err(NumberError::Limit);
-                }
-            }
-        }
-        work.charge(digits).map_err(|_| NumberError::Work)?;
-        let (negative, unsigned) = if let Some(s) = text.strip_prefix('-') {
-            (true, s)
-        } else {
-            (false, text.strip_prefix('+').unwrap_or(text))
-        };
-        let (mantissa, exponent_text) = unsigned.find(['e', 'E']).map_or((unsigned, None), |i| {
-            (&unsigned[..i], Some(&unsigned[i + 1..]))
-        });
-        let mut exponent = 0_i32;
-        if let Some(exp) = exponent_text {
-            let (neg, exp) = if let Some(e) = exp.strip_prefix('-') {
-                (true, e)
-            } else {
-                (false, exp.strip_prefix('+').unwrap_or(exp))
-            };
-            if exp.is_empty() || !exp.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(NumberError::Form);
-            }
-            let mut value = 0_u32;
-            for b in exp.bytes() {
-                value = value
-                    .checked_mul(10)
-                    .and_then(|v| v.checked_add(u32::from(b - b'0')))
-                    .ok_or(NumberError::Limit)?;
-                if value > limits.max_abs_exponent {
-                    return Err(NumberError::Limit);
-                }
-            }
-            exponent = i32::try_from(value).map_err(|_| NumberError::Limit)?;
-            if neg {
-                exponent = -exponent;
-            }
-        }
-        let (integer, fraction) = mantissa
-            .split_once('.')
-            .map_or((mantissa, None), |(a, b)| (a, Some(b)));
-        if integer.is_empty() || !integer.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(NumberError::Form);
-        }
-        if fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit())) {
-            return Err(NumberError::Form);
-        }
-        if exponent_text.is_some() {
-            let Some(f) = fraction else {
-                return Err(NumberError::Form);
-            };
-            // Original formal Float production; broad lexer spellings do not certify it.
-            if integer != "0"
-                || (!f.starts_with(|c: char| c.is_ascii_digit() && c != '0')
-                    && !f.bytes().all(|b| b == b'0'))
-            {
-                return Err(NumberError::Form);
-            }
-        }
+        let spelling = inspect(text, limits)?;
+        work.charge(spelling.digits)
+            .map_err(|_| NumberError::Work)?;
+        let Spelling {
+            negative,
+            integer,
+            fraction,
+            exponent,
+            scaled,
+            ..
+        } = spelling;
         let fractional_digits =
             u32::try_from(fraction.map_or(0, str::len)).map_err(|_| NumberError::Limit)?;
-        let mut coefficient = String::with_capacity(mantissa.len());
+        let mut coefficient = String::with_capacity(text.len());
         coefficient.push_str(integer);
         if let Some(f) = fraction {
             coefficient.push_str(f)
@@ -96,7 +131,7 @@ impl DecimalLiteral {
                 coefficient: value.to_string(),
                 fractional_digits,
                 exponent,
-                scaled: exponent_text.is_some(),
+                scaled,
             },
             value,
         })
