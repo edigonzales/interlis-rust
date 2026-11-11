@@ -1,0 +1,24 @@
+INTERLIS 2.3;
+CONTRACTED MODEL Expressions23 AT "https://example.invalid" VERSION "1" =
+  FUNCTION custom(value: ENUMVAL; objects: OBJECTS OF ANYCLASS): BOOLEAN // external implementation //;
+  STRUCTURE S =
+    a: BOOLEAN := #true, custom(#colour.red, ALL(ANYCLASS RESTRICTION (Unknown.C)));
+    MANDATORY CONSTRAINT a OR DEFINED(THIS->parts[FIRST]) AND NOT (a == UNDEFINED);
+    CONSTRAINT >= 99.50 % a;
+    EXISTENCE CONSTRAINT a REQUIRED IN Unknown.C:a OR Other:b;
+    UNIQUE WHERE a: THIS->a, other;
+    UNIQUE (LOCAL) parts->nested: a, b;
+    SET CONSTRAINT WHERE a: custom(#OTHERS, ALL);
+  END S;
+  TOPIC T =
+    ASSOCIATION Link =
+      target -- ANYCLASS := THIS->target;
+      ATTRIBUTE value: BOOLEAN := custom(#red.OTHERS, ALL(Unknown.C));
+      CARDINALITY = {1..*};
+      MANDATORY CONSTRAINT value;
+    END Link;
+    CONSTRAINTS OF Unknown.C =
+      MANDATORY CONSTRAINT custom(>>Unknown.C->name, >Unknown.C);
+    END;
+  END T;
+END Expressions23.

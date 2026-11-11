@@ -7,9 +7,11 @@ use crate::{
     limits::SyntaxBudget,
 };
 
+mod expressions;
 mod structure;
 mod types;
 pub(crate) use crate::model::LanguageVersion as Language;
+pub(crate) use expressions::*;
 pub(crate) use structure::*;
 pub(crate) use types::*;
 fn language_version(text: &str) -> Option<Language> {
@@ -86,6 +88,8 @@ pub(crate) struct QualifiedName {
 pub(crate) struct Document {
     pub language: Language,
     pub models: Vec<ModelDecl>,
+    #[allow(dead_code)] // Document-local expression storage; no expression evaluation.
+    pub expressions: Vec<Expression>,
     pub span: Span,
     // Preserved original comment ranges, without semantic interpretation.
     #[allow(dead_code)]
@@ -126,6 +130,7 @@ pub(crate) enum Declaration {
         attribute_section: Option<Span>,
         parameter_section: Option<Span>,
         parameters: Vec<ParameterDecl>,
+        constraints: Vec<ConstraintSyntax>,
         kind: ContainerKind,
         name: Name,
         attributes: Vec<Declaration>,
@@ -138,10 +143,13 @@ pub(crate) enum Declaration {
         base: Option<QualifiedName>,
         ty: Option<TypeSyntax>,
         mandatory: bool,
+        constraints: Vec<DomainConstraint>,
         span: Span,
     },
     Unit(UnitDecl),
     LineForm(LineFormDecl),
+    Function(FunctionDecl),
+    Constraints(ConstraintsDecl),
     Association(AssociationDecl),
     Context(ContextDecl),
     #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
@@ -155,6 +163,7 @@ pub(crate) enum Declaration {
         subdivision: Option<Subdivision>,
         name: Name,
         type_use: TypeUseSyntax,
+        derivations: Vec<ExprId>,
         span: Span,
     },
 }
@@ -168,6 +177,8 @@ impl Declaration {
             | Self::RuntimeParameter { span, .. } => span,
             Self::Unit(value) => &value.span,
             Self::LineForm(value) => &value.span,
+            Self::Function(value) => &value.span,
+            Self::Constraints(value) => &value.span,
             Self::Association(value) => &value.span,
             Self::Context(value) => &value.span,
         }
@@ -216,6 +227,7 @@ struct Parser<'a> {
     file: usize,
     tokens: Vec<Token>,
     trivia: Vec<lexer::Trivia>,
+    expressions: Vec<Expression>,
     budget: &'a mut SyntaxBudget,
     at: usize,
     language: Language,
@@ -551,7 +563,16 @@ impl Parser<'_> {
             ),
             Context::Container => matches!(
                 self.text(),
-                "CONTINUOUS" | "SUBDIVISION" | "ATTRIBUTE" | "PARAMETER" | "CARDINALITY"
+                "CONTINUOUS"
+                    | "SUBDIVISION"
+                    | "ATTRIBUTE"
+                    | "PARAMETER"
+                    | "CARDINALITY"
+                    | "MANDATORY"
+                    | "CONSTRAINT"
+                    | "EXISTENCE"
+                    | "UNIQUE"
+                    | "SET"
             ),
         }
     }
@@ -616,6 +637,17 @@ impl Parser<'_> {
         if context == Context::Container {
             return Ok(vec![self.attribute()?]);
         }
+        if self.is("FUNCTION") {
+            return Ok(vec![Declaration::Function(self.function()?)]);
+        }
+        if self.is("CONSTRAINTS") {
+            if context != Context::Topic {
+                return Err(Self::expected("CONSTRAINTS OF requires topic scope"));
+            }
+            return Ok(vec![Declaration::Constraints(
+                self.constraints_declaration()?,
+            )]);
+        }
         if self.is("ASSOCIATION") {
             if context != Context::Topic {
                 return Err(Self::expected("ASSOCIATION requires a topic"));
@@ -672,10 +704,8 @@ impl Parser<'_> {
         if self.unreserved_name() {
             return Err(Self::expected("Expected a declaration keyword"));
         }
-        if matches!(self.text(), "UNIT" | "FUNCTION" | "SIGN" | "REFSYSTEM")
-            || context == Context::Model && self.is("LINE")
-            || context == Context::Topic
-                && matches!(self.text(), "VIEW" | "GRAPHIC" | "CONSTRAINTS")
+        if matches!(self.text(), "SIGN" | "REFSYSTEM")
+            || context == Context::Topic && matches!(self.text(), "VIEW" | "GRAPHIC")
         {
             return Err(Self::unsupported(
                 "Declaration construction is outside the supported subset",
@@ -719,6 +749,7 @@ impl Parser<'_> {
         Ok(Document {
             language: self.language,
             models,
+            expressions: std::mem::take(&mut self.expressions),
             span: self.span(start, self.source().len()),
             trivia: std::mem::take(&mut self.trivia),
         })
@@ -741,6 +772,7 @@ pub(crate) fn parse(
         file,
         tokens: lexed.tokens,
         trivia: lexed.trivia,
+        expressions: vec![],
         budget,
         at: 0,
         language: Language::V24,
@@ -982,10 +1014,8 @@ mod tests {
         );
         assert!(d.rejected);
         assert!(!d.incomplete);
-        for body in [
-            "TOPIC T = VIEW V PROJECTION OF B; = ALL OF B; END V; END T;",
-            "CLASS B = MANDATORY CONSTRAINT x == 1; END B;",
-        ] {
+        {
+            let body = "TOPIC T = VIEW V PROJECTION OF B; = ALL OF B; END V; END T;";
             let (_, _, d) = parse_text(&format!("{HEADER}{body} END A."), Limits::default());
             assert!(d.incomplete, "{body}");
             assert!(
@@ -1176,7 +1206,7 @@ mod continuation_regressions {
                     format!(
                         "{head} {data} TOPIC T=CLASS C=value:TEXT*4 := \"X\"; END C; END T; END Data."
                     ),
-                    ":=",
+                    "value:TEXT*4 := \"X\";",
                 ),
             ] {
                 let expected = source.find(marker).unwrap();

@@ -1,0 +1,21 @@
+INTERLIS 2.4;
+CONTRACTED MODEL Expressions24 AT "https://example.invalid" VERSION "1" =
+  FUNCTION empty(): BOOLEAN;
+  FUNCTION custom(value: ATTRIBUTE OF @value; object: OBJECT OF Unknown.C): ENUMTREEVAL;
+  DOMAIN Value = TEXT*40 CONSTRAINTS nonempty: THIS != "", external: Unknown.check(THIS);
+  STRUCTURE S =
+    a: BOOLEAN := empty(), M.T.unknown(PARAMETER M.p, PI[rad], LNBASE, #red.OTHERS);
+    MANDATORY CONSTRAINT expression: a == b AND c OR d + e * f => g;
+    CONSTRAINT percentage: <= 99.50 % a;
+    EXISTENCE CONSTRAINT references: a REQUIRED IN M.T.C:x OR M.T.D:y;
+    UNIQUE (BASKET) key: WHERE a: THIS->a, other;
+    UNIQUE localKey: (LOCAL) parts->nested: a, b;
+    SET CONSTRAINT (BASKET) allObjects: WHERE DEFINED(a): custom(>>a, ALL(Unknown.C));
+    MANDATORY CONSTRAINT inspection: custom(INSPECTION V OF THIS->part, AREA INSPECTION OF base~M.T.C->parts->leaf OF THIS->part);
+  END S;
+  TOPIC T =
+    CONSTRAINTS OF M.T.C =
+      MANDATORY CONSTRAINT external: empty();
+    END;
+  END T;
+END Expressions24.

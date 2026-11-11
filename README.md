@@ -34,8 +34,15 @@ version-specific BAG/LIST elements. Units retain ordered factors/operators,
 symbolic PI/LNBASE and descriptive FUNCTION explanations; no conversion runs.
 Line-form declarations and domain properties/inheritance/mandatory-only forms
 remain structured. Model binding, type compatibility, coordinate interpretation,
-unit evaluation and geometry topology are separate. Expressions, constraints,
-views and graphics still have explicit incomplete paths in this staged frontend.
+unit evaluation and geometry topology are separate.
+
+Expression syntax preserves constants, paths, calls, object sets, inspections,
+runtime parameters and edition-specific operator precedence in a document-local
+arena. Function declarations, domain/attribute/role derivations, all five
+constraint kinds and external constraint blocks are structured syntax. Long flat
+chains use indices, including during error recovery and destruction. Expressions
+and constraints are not evaluated. Views, metaobjects and graphics still have
+explicit incomplete paths in this staged frontend.
 
 General inheritance, structure-valued attributes, units, directions/reference
 systems, views, constraints and other omitted constructs produce `incomplete`.

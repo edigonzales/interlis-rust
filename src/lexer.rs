@@ -27,6 +27,7 @@ enum Raw {
     #[token("<>")]
     #[token("<")]
     #[token(">")]
+    #[token(">>")]
     #[token("<=")]
     #[token(">=")]
     #[token("(")]

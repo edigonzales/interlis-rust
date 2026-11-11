@@ -134,6 +134,7 @@ fn ensure_supported_semantics(
                     base,
                     oid,
                     parameters,
+                    constraints,
                     attributes,
                     parameter_section,
                     span,
@@ -144,6 +145,7 @@ fn ensure_supported_semantics(
                         || !matches!(oid, syntax::OidRule::Unspecified)
                         || parameter_section.is_some()
                         || !parameters.is_empty()
+                        || !constraints.is_empty()
                     {
                         Some(span)
                     } else {
@@ -154,10 +156,15 @@ fn ensure_supported_semantics(
                     properties,
                     subdivision,
                     type_use,
+                    derivations,
                     span,
                     ..
                 } => {
-                    if !properties.is_empty() || subdivision.is_some() || type_use.ty.is_none() {
+                    if !properties.is_empty()
+                        || subdivision.is_some()
+                        || type_use.ty.is_none()
+                        || !derivations.is_empty()
+                    {
                         Some(span)
                     } else {
                         type_use
@@ -172,6 +179,7 @@ fn ensure_supported_semantics(
                     base,
                     ty,
                     mandatory,
+                    constraints,
                     span,
                     ..
                 } => {
@@ -180,6 +188,7 @@ fn ensure_supported_semantics(
                         None => *mandatory && base.is_some(),
                     };
                     if !properties.is_empty()
+                        || !constraints.is_empty()
                         || base.is_some() && ty.is_some()
                         || ty.is_none() && !supported
                     {
@@ -192,6 +201,8 @@ fn ensure_supported_semantics(
                 }
                 SyntaxDecl::Unit(unit) => Some(&unit.span),
                 SyntaxDecl::LineForm(form) => Some(&form.span),
+                SyntaxDecl::Function(function) => Some(&function.span),
+                SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
                 SyntaxDecl::Association(association) => Some(&association.span),
                 SyntaxDecl::Context(context) => Some(&context.span),
                 SyntaxDecl::RuntimeParameter { span, .. } => Some(span),
@@ -521,6 +532,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 SyntaxDecl::Unit(_)
                 | SyntaxDecl::LineForm(_)
+                | SyntaxDecl::Function(_)
+                | SyntaxDecl::Constraints(_)
                 | SyntaxDecl::Association(_)
                 | SyntaxDecl::Context(_)
                 | SyntaxDecl::RuntimeParameter { .. } => {

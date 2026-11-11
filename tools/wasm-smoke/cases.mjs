@@ -14,6 +14,11 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = FUNCTION f(x:BOOLEAN):BOOLEAN; CLASS C=a:BOOLEAN := Missing(THIS); MANDATORY CONSTRAINT a OR b AND c == d; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = FUNCTION f():BOOLEAN; CLASS C=MANDATORY CONSTRAINT named: a == b AND c OR d + e * f => g; UNIQUE(BASKET) key: WHERE a: parts[FIRST]->name; SET CONSTRAINT(BASKET) all: WHERE a: Missing(ALL(ANYCLASS)); END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT f(); END C; END M.', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT a AND; MANDATORY CONSTRAINT b ==; MANDATORY CONSTRAINT #true; END C; END M.', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN CONSTRAINTS c: Missing(THIS); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [m] {M.T.B.System[2]}; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES Schema.Attributes; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
@@ -75,7 +80,13 @@ const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};
 const deepEnumeration=pair('2.4');deepEnumeration.sources=[{name:'memory:///deep-type.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN E='+('(a'.repeat(24))+'leaf'+(')'.repeat(24))+'; END M.'}];deepEnumeration.limits={max_nesting:8};
+const flatExpression = Array(20000).fill('a').join(' AND ');
+const expressionRequest = (tail = '', limits) => JSON.stringify({sources:[{name:'memory:///expression-😀.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT '+flatExpression+tail+'; END C; END M.'}],...(limits?{limits}:{})});
 export const semanticCases = [
+  [expressionRequest(),'incomplete','ILI-UNSUPPORTED'],
+  [expressionRequest(' AND'),'rejected','ILI-SYNTAX'],
+  [expressionRequest('',{max_syntax_nodes:100}),'limit_exceeded','ILI-LIMIT'],
+  [JSON.stringify(valid24),'checked_subset','2.4'],
   [JSON.stringify(deepEnumeration),'limit_exceeded','ILI-LIMIT'],
   [JSON.stringify(valid23),'checked_subset','2.3'],
   [JSON.stringify(valid24),'checked_subset','2.4'],

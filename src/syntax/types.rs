@@ -514,7 +514,7 @@ impl Parser<'_> {
             self.step()?;
             let start = self.start();
             let name = self.name(false)?;
-            let parsed = (|| {
+            let parsed: Parsed<Declaration> = (|| {
                 let allowed = if self.language == Language::V24 {
                     &[Property::Abstract, Property::Generic, Property::Final][..]
                 } else {
@@ -533,14 +533,7 @@ impl Parser<'_> {
                 } else {
                     Some(self.type_syntax()?)
                 };
-                if self.is("CONSTRAINTS") {
-                    if self.language == Language::V23 {
-                        return Err(Self::expected("Domain constraints require INTERLIS 2.4"));
-                    }
-                    return Err(Self::unsupported(
-                        "Domain constraints await expression syntax",
-                    ));
-                }
+                let constraints = self.domain_constraints()?;
                 self.expect(";")?;
                 self.node()?;
                 Ok(Declaration::Domain {
@@ -549,6 +542,7 @@ impl Parser<'_> {
                     base,
                     ty,
                     mandatory,
+                    constraints,
                     span: self.span(start, self.end()),
                 })
             })();
@@ -1327,7 +1321,7 @@ impl Parser<'_> {
             self.at += 1;
         }
     }
-    fn decimal_constant(&mut self) -> Parsed<DecimalConstant> {
+    pub(super) fn decimal_constant(&mut self) -> Parsed<DecimalConstant> {
         self.step()?;
         self.node()?;
         Ok(if let Some(span) = self.marker("PI") {

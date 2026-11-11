@@ -106,6 +106,7 @@ pub(crate) struct RoleDecl {
     pub strength: Located<RoleStrength>,
     pub cardinality: Option<Cardinality>,
     pub targets: Vec<RestrictedTarget>,
+    pub derivation: Option<ExprId>,
     pub span: Span,
 }
 #[derive(Debug)]
@@ -127,6 +128,7 @@ pub(crate) struct AssociationDecl {
     pub attribute_section: Option<Span>,
     pub attributes: Vec<Declaration>,
     pub cardinality: Option<Cardinality>,
+    pub constraints: Vec<ConstraintSyntax>,
     pub end_name: Option<Name>,
     pub span: Span,
 }
@@ -501,6 +503,7 @@ impl Parser<'_> {
         let attributes = self.members();
         self.depth -= 1;
         let attributes = attributes?;
+        let constraints = self.constraints()?;
         let parameter_section = self.marker("PARAMETER");
         let mut parameters = vec![];
         if parameter_section.is_some() {
@@ -522,6 +525,7 @@ impl Parser<'_> {
             parameter_section,
             parameters,
             attributes,
+            constraints,
             end_name,
             span: self.span(start, self.end()),
         })
@@ -532,6 +536,7 @@ impl Parser<'_> {
             && !self.is("END")
             && !self.is("PARAMETER")
             && !self.is("CARDINALITY")
+            && !self.constraint_start()
             && !self.diagnostics.limited
         {
             self.step()?;
@@ -554,14 +559,6 @@ impl Parser<'_> {
     pub(super) fn attribute(&mut self) -> Parsed<Declaration> {
         self.step()?;
         let start = self.start();
-        if matches!(
-            self.text(),
-            "MANDATORY" | "UNIQUE" | "EXISTENCE" | "SET" | "CONSTRAINT"
-        ) {
-            return Err(Self::unsupported(
-                "Constraints await the expression syntax implementation",
-            ));
-        }
         let continuous = self.marker("CONTINUOUS");
         let subdivision = if self.take("SUBDIVISION") {
             self.node()?;
@@ -578,11 +575,7 @@ impl Parser<'_> {
         let properties = self.properties(ATTRIBUTES)?;
         self.expect(":")?;
         let type_use = self.type_use()?;
-        if self.is(":=") {
-            return Err(Self::unsupported(
-                "Attribute derivations await expression syntax",
-            ));
-        }
+        let derivations = self.derivations()?;
         self.expect(";")?;
         self.node()?;
         Ok(Declaration::Attribute {
@@ -590,6 +583,7 @@ impl Parser<'_> {
             properties,
             subdivision,
             type_use,
+            derivations,
             span: self.span(start, self.end()),
         })
     }
@@ -691,7 +685,7 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    fn renamed_viewable(&mut self) -> Parsed<RenamedViewable> {
+    pub(super) fn renamed_viewable(&mut self) -> Parsed<RenamedViewable> {
         let start = self.start();
         let alias = if self.next_is("~") {
             let n = self.name(false)?;
@@ -736,11 +730,11 @@ impl Parser<'_> {
         while self.take("OR") {
             targets.push(self.restricted_target()?);
         }
-        if self.is(":=") {
-            return Err(Self::unsupported(
-                "Role derivations await expression syntax",
-            ));
-        }
+        let derivation = if self.take(":=") {
+            Some(self.factor()?)
+        } else {
+            None
+        };
         self.expect(";")?;
         self.node()?;
         Ok(RoleDecl {
@@ -749,6 +743,7 @@ impl Parser<'_> {
             strength,
             cardinality,
             targets,
+            derivation,
             span: self.span(start, self.end()),
         })
     }
@@ -803,11 +798,7 @@ impl Parser<'_> {
                 }
                 self.expect(":")?;
                 let type_use = self.type_use()?;
-                if self.is(":=") {
-                    return Err(Self::unsupported(
-                        "Attribute derivations await expression syntax",
-                    ));
-                }
+                let derivations = self.derivations()?;
                 self.expect(";")?;
                 self.node()?;
                 attributes.push(Declaration::Attribute {
@@ -815,6 +806,7 @@ impl Parser<'_> {
                     properties,
                     subdivision: None,
                     type_use,
+                    derivations,
                     span: self.span(start, self.end()),
                 });
                 break;
@@ -837,14 +829,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        if matches!(
-            self.text(),
-            "MANDATORY" | "UNIQUE" | "EXISTENCE" | "SET" | "CONSTRAINT"
-        ) {
-            return Err(Self::unsupported(
-                "Association constraints await expression syntax",
-            ));
-        }
+        let constraints = self.constraints()?;
         self.expect("END")?;
         let end_name = if self.unreserved_name() {
             Some(self.name(false)?)
@@ -863,6 +848,7 @@ impl Parser<'_> {
             attribute_section,
             attributes,
             cardinality,
+            constraints,
             end_name,
             span: self.span(start, self.end()),
         })
