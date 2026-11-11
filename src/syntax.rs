@@ -141,16 +141,14 @@ pub(crate) enum Declaration {
     #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
     RuntimeParameter {
         name: Name,
-        ty: TypeSyntax,
-        mandatory: bool,
+        type_use: TypeUseSyntax,
         span: Span,
     },
     Attribute {
         properties: Vec<Located<Property>>,
         subdivision: Option<Subdivision>,
         name: Name,
-        ty: TypeSyntax,
-        mandatory: bool,
+        type_use: TypeUseSyntax,
         span: Span,
     },
 }
@@ -192,6 +190,13 @@ pub(crate) enum TypeSyntax {
         span: Span,
     },
     Named(QualifiedName),
+}
+#[derive(Debug)]
+pub(crate) struct TypeUseSyntax {
+    pub mandatory: bool,
+    pub ty: Option<TypeSyntax>,
+    #[allow(dead_code)] // Original range of this type use, including MANDATORY.
+    pub span: Span,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Context {
@@ -399,19 +404,51 @@ impl Parser<'_> {
         Ok(result)
     }
     fn qualified_name(&mut self) -> Parsed<QualifiedName> {
+        self.qualified_name_in(false)
+    }
+    fn qualified_name_in(&mut self, classes: bool) -> Parsed<QualifiedName> {
         self.step()?;
         let start = self.start();
-        let mut segments = vec![self.name(true)?];
+        let predefined = |text: &str| matches!(text, "SIGN" | "METAOBJECT" | "REFSYSTEM");
+        let bare_class = classes && predefined(self.text());
+        let mut segments = if bare_class {
+            self.node()?;
+            let name = Located {
+                value: self.text().into(),
+                span: self.current_span(),
+            };
+            self.step()?;
+            self.at += 1;
+            vec![name]
+        } else {
+            vec![self.name(true)?]
+        };
+        if bare_class && self.is(".") {
+            return Err(Self::expected(
+                "A predefined class cannot qualify another name",
+            ));
+        }
         while self.take(".") {
             self.step()?;
             // BOOLEAN is a supported predefined domain in INTERLIS; other predefined
             // names that are identifiers are preserved for semantic classification.
-            if segments.len() == 1 && segments[0].value == "INTERLIS" && self.take("BOOLEAN") {
+            if segments.len() == 1
+                && segments[0].value == "INTERLIS"
+                && (self.is("BOOLEAN") || classes && predefined(self.text()))
+            {
                 self.node()?;
-                segments.push(Located {
-                    value: "BOOLEAN".into(),
-                    span: self.span(self.tokens[self.at - 1].range.start, self.end()),
-                });
+                let name = Located {
+                    value: self.text().into(),
+                    span: self.current_span(),
+                };
+                self.step()?;
+                self.at += 1;
+                segments.push(name);
+                if self.is(".") {
+                    return Err(Self::expected(
+                        "A predefined member cannot qualify another name",
+                    ));
+                }
             } else {
                 if segments.len() == 1
                     && segments[0].value == "INTERLIS"
@@ -716,14 +753,12 @@ impl Parser<'_> {
                 let start = self.start();
                 let name = self.name(false)?;
                 self.expect(":")?;
-                let mandatory = self.take("MANDATORY");
-                let ty = self.ty(true)?;
+                let type_use = self.type_use()?;
                 self.expect(";")?;
                 self.node()?;
                 items.push(Declaration::RuntimeParameter {
                     name,
-                    ty,
-                    mandatory,
+                    type_use,
                     span: self.span(start, self.end()),
                 });
             }
@@ -817,11 +852,10 @@ impl Parser<'_> {
         if self.unreserved_name() {
             return Err(Self::expected("Expected a declaration keyword"));
         }
-        if matches!(
-            self.text(),
-            "UNIT" | "FUNCTION" | "LINE" | "SIGN" | "REFSYSTEM"
-        ) || context == Context::Topic
-            && matches!(self.text(), "VIEW" | "GRAPHIC" | "CONSTRAINTS")
+        if matches!(self.text(), "UNIT" | "FUNCTION" | "SIGN" | "REFSYSTEM")
+            || context == Context::Model && self.is("LINE")
+            || context == Context::Topic
+                && matches!(self.text(), "VIEW" | "GRAPHIC" | "CONSTRAINTS")
         {
             return Err(Self::unsupported(
                 "Declaration construction is outside the supported subset",
@@ -982,16 +1016,17 @@ mod tests {
             panic!()
         };
         assert_eq!(*kind, ContainerKind::Structure);
-        let Declaration::Attribute {
-            mandatory, span, ..
-        } = &attributes[0]
-        else {
+        let Declaration::Attribute { type_use, span, .. } = &attributes[0] else {
             panic!()
         };
-        assert!(*mandatory);
+        assert!(type_use.mandatory);
         assert_eq!(original(&sources, span), "label:MANDATORY Label;");
         let Declaration::Attribute {
-            ty: TypeSyntax::Named(q),
+            type_use:
+                TypeUseSyntax {
+                    ty: Some(TypeSyntax::Named(q)),
+                    ..
+                },
             ..
         } = &attributes[1]
         else {

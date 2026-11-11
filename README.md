@@ -20,7 +20,9 @@ qualified/unqualified imports. It represents topic inheritance/dependencies/OIDs
 2.4 deferred generics and contexts, container properties/inheritance/OIDs, attribute
 properties/subdivisions, parameter sections and associations with ordered roles,
 restricted target alternatives and exact cardinalities. Anonymous associations
-retain absent names. These constructs pass through the same bounded frontend;
+retain absent names. Mandatory-only attribute/parameter uses retain an absent
+concrete type. Class references preserve the reserved predefined classes in their
+allowed contexts. These constructs pass through the same bounded frontend;
 the analyzer explicitly returns `incomplete` before binding their unimplemented
 semantics. An optional ATTRIBUTE section marker is semantically inert.
 

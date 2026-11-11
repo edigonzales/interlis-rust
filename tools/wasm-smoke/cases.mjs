@@ -14,6 +14,9 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CONTEXT first=G=X; empty= END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; CONTRACTED TYPE MODEL M (de) NOINCREMENTALTRANSFER AT "x" VERSION "1" // details // TRANSLATION OF Original ["old"] = CHARSET "UTF-8"; XMLNS "urn:x"; IMPORTS UNQUALIFIED Missing, INTERLIS; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=ASSOCIATION = first -- {9007199254740993..*} Unknown.C OR ANYCLASS; second -<#> {1} Missing; ATTRIBUTE flag:BOOLEAN; END; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CONTEXT first=G=C OR D; TOPIC T=DEFERRED GENERICS G; CLASS C (ABSTRACT) EXTENDS Unknown.C = NO OID; ATTRIBUTE SUBDIVISION n (EXTENDED):BOOLEAN; PARAMETER p:METAOBJECT; END C; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],

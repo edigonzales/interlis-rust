@@ -132,7 +132,7 @@ pub(crate) struct AssociationDecl {
 #[derive(Debug)]
 #[allow(dead_code)] // Preserve complete syntax while its semantics remain unimplemented.
 pub(crate) enum ParameterType {
-    Attribute { mandatory: bool, ty: TypeSyntax },
+    Attribute(TypeUseSyntax),
     Metaobject(Option<QualifiedName>),
 }
 #[derive(Debug)]
@@ -363,6 +363,17 @@ impl Parser<'_> {
         }
         Ok(name)
     }
+    fn class_reference(&mut self) -> Parsed<QualifiedName> {
+        let name = self.qualified_name_in(true)?;
+        if name.segments.len() > 3 {
+            return Err(Issue {
+                kind: IssueKind::Syntax,
+                primary: Some(name.span),
+                message: "Too many name segments in class reference",
+            });
+        }
+        Ok(name)
+    }
     fn optional_base(&mut self) -> Parsed<Option<QualifiedName>> {
         if self.take("EXTENDS") {
             Ok(Some(self.reference(3)?))
@@ -484,7 +495,15 @@ impl Parser<'_> {
         };
         let name = self.name(false)?;
         let properties = self.properties(INHERITANCE)?;
-        let base = self.optional_base()?;
+        let base = if self.take("EXTENDS") {
+            Some(if kind == ContainerKind::Class {
+                self.class_reference()?
+            } else {
+                self.reference(3)?
+            })
+        } else {
+            None
+        };
         self.expect("=")?;
         let oid = if kind == ContainerKind::Class {
             self.oid_rule()?
@@ -572,8 +591,7 @@ impl Parser<'_> {
         let name = self.name(false)?;
         let properties = self.properties(ATTRIBUTES)?;
         self.expect(":")?;
-        let mandatory = self.take("MANDATORY");
-        let ty = self.ty(true)?;
+        let type_use = self.type_use()?;
         if self.is(":=") {
             return Err(Self::unsupported(
                 "Attribute derivations await expression syntax",
@@ -585,8 +603,23 @@ impl Parser<'_> {
             name,
             properties,
             subdivision,
-            ty,
+            type_use,
+            span: self.span(start, self.end()),
+        })
+    }
+    pub(super) fn type_use(&mut self) -> Parsed<TypeUseSyntax> {
+        self.step()?;
+        let start = self.start();
+        let mandatory = self.take("MANDATORY");
+        let ty = if mandatory && matches!(self.text(), ";" | ":=" | ")") {
+            None
+        } else {
+            Some(self.ty(true)?)
+        };
+        self.node()?;
+        Ok(TypeUseSyntax {
             mandatory,
+            ty,
             span: self.span(start, self.end()),
         })
     }
@@ -598,16 +631,12 @@ impl Parser<'_> {
         self.expect(":")?;
         let ty = if self.take("METAOBJECT") {
             ParameterType::Metaobject(if self.take("OF") {
-                Some(self.reference(3)?)
+                Some(self.class_reference()?)
             } else {
                 None
             })
         } else {
-            let mandatory = self.take("MANDATORY");
-            ParameterType::Attribute {
-                mandatory,
-                ty: self.ty(true)?,
-            }
+            ParameterType::Attribute(self.type_use()?)
         };
         self.expect(";")?;
         self.node()?;
@@ -674,14 +703,14 @@ impl Parser<'_> {
         let target = if let Some(s) = self.marker("ANYCLASS") {
             TargetRef::AnyClass(s)
         } else {
-            TargetRef::Named(self.reference(3)?)
+            TargetRef::Named(self.class_reference()?)
         };
         let mut restrictions = vec![];
         if self.take("RESTRICTION") {
             self.expect("(")?;
-            restrictions.push(self.reference(3)?);
+            restrictions.push(self.class_reference()?);
             while self.take(";") {
-                restrictions.push(self.reference(3)?);
+                restrictions.push(self.class_reference()?);
             }
             self.expect(")")?;
         }
@@ -701,7 +730,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        let target = self.reference(3)?;
+        let target = self.class_reference()?;
         self.node()?;
         Ok(RenamedViewable {
             alias,
@@ -803,8 +832,7 @@ impl Parser<'_> {
                     return Err(Self::expected("Role property on attribute"));
                 }
                 self.expect(":")?;
-                let mandatory = self.take("MANDATORY");
-                let ty = self.ty(true)?;
+                let type_use = self.type_use()?;
                 if self.is(":=") {
                     return Err(Self::unsupported(
                         "Attribute derivations await expression syntax",
@@ -816,8 +844,7 @@ impl Parser<'_> {
                     name,
                     properties,
                     subdivision: None,
-                    ty,
-                    mandatory,
+                    type_use,
                     span: self.span(start, self.end()),
                 });
                 break;
@@ -894,20 +921,25 @@ impl Parser<'_> {
         Ok(at)
     }
     fn context_header(&mut self) -> Parsed<bool> {
-        // A binding has one '=', a subsequent context starts Name '=' Ref '='.
-        let first = self.qualified_end(self.at)?;
-        if first != self.at + 1
-            || !self
-                .tokens
-                .get(first)
-                .is_some_and(|t| &self.source()[t.range.clone()] == "=")
-        {
+        if !self.unreserved_name() || !self.next_is("=") {
             return Ok(false);
         }
-        let second = self.qualified_end(first + 1)?;
+        // The same `Name =` starts either a mapping or a new context. A mapping
+        // must continue with a concrete reference (then OR or ';'); another '='
+        // after that reference, or a declaration/end token, starts a new group.
+        let rhs = self.at + 2;
+        let starts_reference = self.tokens.get(rhs).is_some_and(|t| {
+            t.kind == Kind::Word
+                && (!keywords::reserved(&self.source()[t.range.clone()], self.language)
+                    || &self.source()[t.range.clone()] == "INTERLIS")
+        });
+        if !starts_reference {
+            return Ok(true);
+        }
+        let end = self.qualified_end(rhs)?;
         Ok(self
             .tokens
-            .get(second)
+            .get(end)
             .is_some_and(|t| &self.source()[t.range.clone()] == "="))
     }
     pub(super) fn contexts(&mut self) -> Parsed<Vec<Declaration>> {
@@ -1111,13 +1143,13 @@ mod tests {
             let Declaration::Attribute {
                 properties,
                 subdivision,
-                mandatory,
+                type_use,
                 ..
             } = &attributes[0]
             else {
                 panic!()
             };
-            assert!(*mandatory);
+            assert!(type_use.mandatory);
             assert_eq!(properties[1].value, Property::Transient);
             let sub = subdivision.as_ref().unwrap();
             assert_eq!(original(&sources, &sub.span), "CONTINUOUS SUBDIVISION");
@@ -1241,7 +1273,7 @@ mod tests {
         assert_eq!(last.name.value, "last");
         assert_eq!(last.bindings[0].generic.segments[0].value, "J");
         assert!(
-            matches!(&items[3],Declaration::RuntimeParameter{name,mandatory:true,ty:TypeSyntax::Text{..},..} if name.value=="scale")
+            matches!(&items[3],Declaration::RuntimeParameter{name,type_use:TypeUseSyntax{mandatory:true,ty:Some(TypeSyntax::Text{..}),..},..} if name.value=="scale")
         );
         parse(&model("2.3", "PARAMETER scale:BOOLEAN;"));
     }
@@ -1405,5 +1437,239 @@ mod fixture_tests {
             "Original"
         );
         assert_eq!(contexts.models[1].end_name.value, "Translation");
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::tests::parse;
+    use super::*;
+    use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
+    fn model(body: &str, version: &str) -> String {
+        format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.")
+    }
+    #[test]
+    fn mandatory_only_is_a_real_type_use_in_every_attribute_and_parameter_position() {
+        for version in ["2.3", "2.4"] {
+            let text = model(
+                "PARAMETER runtime:MANDATORY; STRUCTURE S=ATTRIBUTE value:MANDATORY; PARAMETER p:MANDATORY; END S; TOPIC T=ASSOCIATION = a -- C; value:MANDATORY; END; END T;",
+                version,
+            );
+            let (sources, doc) = parse(&text);
+            let items = &doc.models[0].declarations;
+            let Declaration::RuntimeParameter { type_use, .. } = &items[0] else {
+                panic!()
+            };
+            assert!(type_use.mandatory);
+            assert!(type_use.ty.is_none());
+            let pos = sources.location(&type_use.span).unwrap();
+            assert_eq!(
+                &sources.files()[0].text()[pos.start_byte as usize..pos.end_byte as usize],
+                "MANDATORY"
+            );
+            let Declaration::Container {
+                attributes,
+                parameters,
+                ..
+            } = &items[1]
+            else {
+                panic!()
+            };
+            assert!(matches!(
+                &attributes[0],
+                Declaration::Attribute {
+                    type_use: TypeUseSyntax {
+                        mandatory: true,
+                        ty: None,
+                        ..
+                    },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                parameters[0].ty,
+                ParameterType::Attribute(TypeUseSyntax {
+                    mandatory: true,
+                    ty: None,
+                    ..
+                })
+            ));
+            let Declaration::Topic { declarations, .. } = &items[2] else {
+                panic!()
+            };
+            let Declaration::Association(a) = &declarations[0] else {
+                panic!()
+            };
+            assert!(matches!(
+                &a.attributes[0],
+                Declaration::Attribute {
+                    type_use: TypeUseSyntax {
+                        mandatory: true,
+                        ty: None,
+                        ..
+                    },
+                    ..
+                }
+            ));
+            for body in [
+                "STRUCTURE S=value:MANDATORY; END S;",
+                "STRUCTURE S=PARAMETER p:MANDATORY; END S;",
+                "PARAMETER p:MANDATORY;",
+            ] {
+                let report = analyze(CompileRequest {
+                    sources: vec![SourceInput {
+                        name: "x".into(),
+                        text: model(body, version),
+                    }],
+                    limits: Limits::default(),
+                })
+                .unwrap();
+                assert_eq!(report.status(), AnalysisStatus::Incomplete, "{body}");
+                assert!(report.graph().is_none());
+                assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+            }
+        }
+    }
+    #[test]
+    fn empty_context_groups_survive_every_section_terminator() {
+        for tail in [
+            "",
+            "DOMAIN D=BOOLEAN;",
+            "TOPIC T=END T;",
+            "CLASS C=END C;",
+            "STRUCTURE S=END S;",
+            "PARAMETER p:BOOLEAN;",
+            "CONTEXT other=G=X;",
+        ] {
+            let text = model(&format!("CONTEXT first=G=X; empty= {tail}"), "2.4");
+            let (_, doc) = parse(&text);
+            let items = &doc.models[0].declarations;
+            let Declaration::Context(first) = &items[0] else {
+                panic!()
+            };
+            assert_eq!(first.bindings.len(), 1);
+            let Declaration::Context(empty) = &items[1] else {
+                panic!()
+            };
+            assert_eq!(empty.name.value, "empty");
+            assert!(empty.bindings.is_empty());
+        }
+        let (_, doc) = parse(&model("CONTEXT a=b=c=", "2.4"));
+        assert_eq!(doc.models[0].declarations.len(), 3);
+        for item in &doc.models[0].declarations {
+            let Declaration::Context(c) = item else {
+                panic!()
+            };
+            assert!(c.bindings.is_empty());
+        }
+        for tail in [
+            "UNIT u;",
+            "FUNCTION f (x:BOOLEAN):BOOLEAN;",
+            "LINE FORM curve:Segment;",
+            "SIGN BASKET B~S;",
+            "REFSYSTEM BASKET B~S;",
+        ] {
+            let report = analyze(CompileRequest {
+                sources: vec![SourceInput {
+                    name: "x".into(),
+                    text: model(&format!("CONTEXT first=G=X; empty= {tail}"), "2.4"),
+                }],
+                limits: Limits::default(),
+            })
+            .unwrap();
+            assert_eq!(
+                report.status(),
+                AnalysisStatus::Incomplete,
+                "{tail}: {:?}",
+                report.diagnostics()
+            );
+            assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+        }
+    }
+    #[test]
+    fn predefined_classes_are_preserved_only_in_class_reference_contexts() {
+        for version in ["2.3", "2.4"] {
+            for class in ["SIGN", "METAOBJECT", "REFSYSTEM"] {
+                for qualified in [class.to_string(), format!("INTERLIS.{class}")] {
+                    let text = model(
+                        &format!(
+                            "CLASS C (ABSTRACT) EXTENDS {qualified}=PARAMETER p:METAOBJECT OF {qualified}; END C; TOPIC T=ASSOCIATION DERIVED FROM alias~{qualified}= a -- {qualified} RESTRICTION ({qualified}); END; END T;"
+                        ),
+                        version,
+                    );
+                    let (sources, doc) = parse(&text);
+                    let Declaration::Container {
+                        base, parameters, ..
+                    } = &doc.models[0].declarations[0]
+                    else {
+                        panic!()
+                    };
+                    let base = base.as_ref().unwrap();
+                    assert_eq!(base.segments.last().unwrap().value, class);
+                    assert_eq!(
+                        base.segments.len(),
+                        if qualified.starts_with("INTERLIS.") {
+                            2
+                        } else {
+                            1
+                        }
+                    );
+                    for segment in &base.segments {
+                        let p = sources.location(&segment.span).unwrap();
+                        assert_eq!(
+                            &sources.files()[0].text()[p.start_byte as usize..p.end_byte as usize],
+                            segment.value
+                        );
+                    }
+                    assert!(
+                        matches!(&parameters[0].ty,ParameterType::Metaobject(Some(q)) if q.segments.last().unwrap().value==class)
+                    );
+                    let Declaration::Topic { declarations, .. } = &doc.models[0].declarations[1]
+                    else {
+                        panic!()
+                    };
+                    let Declaration::Association(a) = &declarations[0] else {
+                        panic!()
+                    };
+                    assert_eq!(
+                        a.derived_from
+                            .as_ref()
+                            .unwrap()
+                            .target
+                            .segments
+                            .last()
+                            .unwrap()
+                            .value,
+                        class
+                    );
+                    assert!(
+                        matches!(&a.roles[0].targets[0].target,TargetRef::Named(q) if q.segments.last().unwrap().value==class)
+                    );
+                }
+            }
+        }
+        for body in [
+            "TOPIC T=LINE FORM curve:S; END T;",
+            "CLASS C EXTENDS Other.SIGN=END C;",
+            "CLASS C EXTENDS SIGN.Other=END C;",
+            "CLASS C EXTENDS INTERLIS.SIGN.Other=END C;",
+            "TOPIC T EXTENDS SIGN=END T;",
+        ] {
+            let report = analyze(CompileRequest {
+                sources: vec![SourceInput {
+                    name: "x".into(),
+                    text: model(body, "2.4"),
+                }],
+                limits: Limits::default(),
+            })
+            .unwrap();
+            assert_eq!(
+                report.status(),
+                AnalysisStatus::Rejected,
+                "{body}: {:?}",
+                report.diagnostics()
+            );
+            assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+        }
     }
 }

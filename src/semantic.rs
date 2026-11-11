@@ -126,9 +126,11 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Attribute {
                     properties,
                     subdivision,
+                    type_use,
                     span,
                     ..
-                } => (!properties.is_empty() || subdivision.is_some()).then_some(span),
+                } => (!properties.is_empty() || subdivision.is_some() || type_use.ty.is_none())
+                    .then_some(span),
                 SyntaxDecl::Domain { .. } => None,
                 SyntaxDecl::Association(association) => Some(&association.span),
                 SyntaxDecl::Context(context) => Some(&context.span),
@@ -437,8 +439,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 SyntaxDecl::Attribute {
                     name,
-                    ty,
-                    mandatory,
+                    type_use,
                     span,
                     ..
                 } => {
@@ -448,9 +449,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         span,
                         Some(parent),
                         model,
-                        Some(*mandatory),
+                        Some(type_use.mandatory),
                     ) {
-                        self.symbols[id].syntax = Some(ty);
+                        self.symbols[id].syntax = Some(
+                            type_use
+                                .ty
+                                .as_ref()
+                                .expect("supported type use checked before indexing"),
+                        );
                     }
                 }
                 SyntaxDecl::Association(_)
