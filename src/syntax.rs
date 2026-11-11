@@ -9,11 +9,39 @@ use crate::{
 
 pub(crate) use crate::model::LanguageVersion as Language;
 fn language_version(text: &str) -> Option<Language> {
-    match text {
-        "2.3" => Some(Language::V23),
-        "2.4" => Some(Language::V24),
-        _ => None,
+    // Version-Dec is a number, not a model-version string. Recognize its exact
+    // value without floats, bigint work, allocation or altering source spelling.
+    let unsigned = text.strip_prefix('+').unwrap_or(text);
+    if unsigned.starts_with('-') {
+        return None;
     }
+    let (mantissa, exponent) = if let Some(at) = unsigned.find(['e', 'E']) {
+        (&unsigned[..at], unsigned[at + 1..].parse::<i32>().ok()?)
+    } else {
+        (unsigned, 0)
+    };
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut digits = integer
+        .bytes()
+        .chain(fraction.bytes())
+        .skip_while(|b| *b == b'0');
+    if digits.next() != Some(b'2') {
+        return None;
+    }
+    let language = match digits.next()? {
+        b'3' => Language::V23,
+        b'4' => Language::V24,
+        _ => return None,
+    };
+    let mut trailing = 0_i32;
+    for digit in digits {
+        if digit != b'0' {
+            return None;
+        }
+        trailing = trailing.checked_add(1)?;
+    }
+    let scale = i32::try_from(fraction.len()).ok()?.checked_sub(exponent)?;
+    (scale == trailing.checked_add(1)?).then_some(language)
 }
 
 // The same lexer stops after a complete foreign header. Its remaining language
@@ -34,6 +62,7 @@ pub(crate) fn foreign_header_complete(tokens: &[Token], source: &str) -> bool {
                 && matches!(text(sign), "+" | "-")
                 && sign.range.end == number.range.start
                 && number.kind == Kind::Number
+                && language_version(&source[sign.range.start..number.range.end]).is_none()
         }
         _ => false,
     }
@@ -135,6 +164,7 @@ enum IssueKind {
     Unsupported,
     UnsupportedVersion,
     Limit,
+    Lexical,
 }
 struct Issue {
     primary: Option<Span>,
@@ -218,6 +248,13 @@ impl Parser<'_> {
             message: "Frontend budget exceeded",
         }
     }
+    fn lexical() -> Issue {
+        Issue {
+            primary: None,
+            kind: IssueKind::Lexical,
+            message: "Lexical error already diagnosed",
+        }
+    }
     fn take(&mut self, text: &str) -> bool {
         if !self.diagnostics.limited && self.is(text) && self.step().is_ok() {
             self.at += 1;
@@ -263,11 +300,17 @@ impl Parser<'_> {
             IssueKind::UnsupportedVersion => {
                 self.diagnostics.unsupported_version(issue.message, span)
             }
-            IssueKind::Limit => {} // The early failing charge already emitted its limit.
+            IssueKind::Limit | IssueKind::Lexical => {} // The early failing charge already emitted its limit.
         }
     }
     fn name(&mut self, builtin: bool) -> Parsed<Name> {
         self.step()?;
+        if matches!(
+            self.tokens.get(self.at).map(|t| &t.kind),
+            Some(Kind::Invalid)
+        ) {
+            return Err(Self::lexical());
+        }
         let text = self.text();
         if !matches!(self.tokens.get(self.at).map(|t| &t.kind), Some(Kind::Word))
             || (keywords::reserved(text, self.language) && !(builtin && text == "INTERLIS"))
@@ -286,6 +329,12 @@ impl Parser<'_> {
     }
     fn quoted(&mut self) -> Parsed<Located<String>> {
         self.step()?;
+        if matches!(
+            self.tokens.get(self.at).map(|t| &t.kind),
+            Some(Kind::Invalid)
+        ) {
+            return Err(Self::lexical());
+        }
         if !matches!(
             self.tokens.get(self.at).map(|t| &t.kind),
             Some(Kind::String(_))
@@ -345,22 +394,29 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    fn number(&mut self) -> Parsed<Located<String>> {
+    fn number_range(&mut self) -> Parsed<std::ops::Range<usize>> {
         self.step()?;
         let start = self.start();
         let signed = self.take("-") || self.take("+");
         let Some(token) = self.tokens.get(self.at) else {
             return Err(Self::expected("Expected a number"));
         };
-        if token.kind != Kind::Number || (signed && self.end() != token.range.start) {
+        if token.kind == Kind::Invalid {
+            return Err(Self::lexical());
+        }
+        if token.kind != Kind::Number || signed && self.end() != token.range.start {
             return Err(Self::expected("Expected a number with adjacent sign"));
         }
         self.step()?;
         self.at += 1;
+        Ok(start..self.end())
+    }
+    fn number(&mut self) -> Parsed<Located<String>> {
+        let range = self.number_range()?;
         self.node()?;
         Ok(Located {
-            value: self.source()[start..self.end()].into(),
-            span: self.span(start, self.end()),
+            value: self.source()[range.clone()].into(),
+            span: self.span(range.start, range.end),
         })
     }
     fn ty(&mut self, named: bool) -> Parsed<TypeSyntax> {
@@ -391,9 +447,12 @@ impl Parser<'_> {
             self.tokens.get(self.at).map(|t| &t.kind),
             Some(Kind::Invalid)
         ) {
-            return Err(Self::expected("Invalid lexical token in type"));
+            return Err(Self::lexical());
         }
         let start = self.start();
+        if self.language == Language::V23 && self.is("DATE") {
+            return Err(Self::expected("DATE type requires INTERLIS 2.4"));
+        }
         if self.take("TEXT") {
             if !self.take("*") {
                 return Err(Self::unsupported(
@@ -467,10 +526,59 @@ impl Parser<'_> {
             "Type construction is outside the supported subset",
         ))
     }
-    fn recover(&mut self) {
+    fn recovery_start(&self, context: Context, domain_section: bool) -> bool {
+        let word = matches!(self.tokens.get(self.at).map(|t| &t.kind), Some(Kind::Word));
+        let next = self
+            .tokens
+            .get(self.at + 1)
+            .map_or("", |t| &self.source()[t.range.clone()]);
+        if word && !keywords::reserved(self.text(), self.language) {
+            if domain_section && matches!(next, "=" | "EXTENDS" | "(") {
+                return true;
+            }
+            if context == Context::Container && matches!(next, ":" | "(") {
+                return true;
+            }
+        }
+        match context {
+            Context::Model => matches!(
+                self.text(),
+                "DOMAIN"
+                    | "UNIT"
+                    | "FUNCTION"
+                    | "LINE"
+                    | "PARAMETER"
+                    | "CONTEXT"
+                    | "CLASS"
+                    | "STRUCTURE"
+                    | "TOPIC"
+                    | "SIGN"
+                    | "REFSYSTEM"
+            ),
+            Context::Topic => matches!(
+                self.text(),
+                "DOMAIN"
+                    | "UNIT"
+                    | "FUNCTION"
+                    | "CLASS"
+                    | "STRUCTURE"
+                    | "ASSOCIATION"
+                    | "CONSTRAINTS"
+                    | "VIEW"
+                    | "GRAPHIC"
+                    | "SIGN"
+                    | "REFSYSTEM"
+            ),
+            Context::Container => false,
+        }
+    }
+    fn recover(&mut self, context: Context, domain_section: bool) {
         let mut nesting = 0_u32;
         while self.at < self.tokens.len() && !self.is("END") && !self.diagnostics.limited {
             if self.step().is_err() {
+                return;
+            }
+            if nesting == 0 && self.recovery_start(context, domain_section) {
                 return;
             }
             if self.is(";") && nesting == 0 {
@@ -496,7 +604,7 @@ impl Parser<'_> {
                 Err(issue) if matches!(issue.kind, IssueKind::Unsupported) => return Err(issue),
                 Err(issue) => {
                     self.report(issue);
-                    self.recover();
+                    self.recover(context, false);
                 }
             }
             if self.at == before {
@@ -508,6 +616,12 @@ impl Parser<'_> {
     }
     fn declaration(&mut self, context: Context) -> Parsed<Vec<Declaration>> {
         self.step()?;
+        if matches!(
+            self.tokens.get(self.at).map(|t| &t.kind),
+            Some(Kind::Invalid)
+        ) {
+            return Err(Self::lexical());
+        }
         let start = self.start();
         if self
             .tokens
@@ -590,6 +704,11 @@ impl Parser<'_> {
                     } else {
                         self.expect("=")?;
                         let mandatory = self.take("MANDATORY");
+                        if mandatory && self.is(";") {
+                            return Err(Self::unsupported(
+                                "Mandatory-only domain syntax awaits its complete type representation",
+                            ));
+                        }
                         (DomainType::Concrete(self.ty(false)?), mandatory)
                     };
                     self.expect(";")?;
@@ -608,7 +727,7 @@ impl Parser<'_> {
                     }
                     Err(issue) => {
                         self.report(issue);
-                        self.recover();
+                        self.recover(context, true);
                     }
                 }
                 if self.diagnostics.limited {
@@ -711,7 +830,18 @@ impl Parser<'_> {
         let issuer = self.quoted()?;
         self.expect("VERSION")?;
         let version = self.quoted()?;
-        if self.is("TRANSLATION") || self.source()[self.start()..].starts_with("//") {
+        if matches!(
+            self.tokens.get(self.at).map(|t| &t.kind),
+            Some(Kind::Invalid)
+        ) {
+            return Err(Self::lexical());
+        }
+        if self.is("TRANSLATION")
+            || matches!(
+                self.tokens.get(self.at).map(|t| &t.kind),
+                Some(Kind::Explanation(_))
+            )
+        {
             return Err(Self::unsupported(
                 "Additional model header options are outside the supported subset",
             ));
@@ -747,20 +877,17 @@ impl Parser<'_> {
         if !self.take("INTERLIS") {
             return Err(Self::expected("Expected INTERLIS language header"));
         }
-        self.language = if let Some(language) = language_version(self.text()) {
-            self.step()?;
-            self.at += 1;
-            language
-        } else {
-            self.number()?;
-            self.expect(";")?;
+        let version = self.number_range()?;
+        let language = language_version(&self.source()[version]);
+        self.expect(";")?;
+        let Some(language) = language else {
             return Err(Issue {
                 primary: Some(self.span(start, self.end())),
                 kind: IssueKind::UnsupportedVersion,
                 message: "Only INTERLIS 2.3 and 2.4 are supported",
             });
         };
-        self.expect(";")?;
+        self.language = language;
         let mut models = vec![];
         while self.at < self.tokens.len() && !self.diagnostics.limited {
             if !self.is("MODEL") {
@@ -1509,7 +1636,15 @@ mod frontend_contract_tests {
     }
     #[test]
     fn foreign_remainder_is_not_judged_as_supported_language() {
-        for version in ["1.0", "2.2", "2.5", "+2.5", "-2.5"] {
+        for version in [
+            "1.0",
+            "2.2",
+            "2.5",
+            "+2.5",
+            "-2.5",
+            "-2.3",
+            "2.300000000000000000000000001",
+        ] {
             let (_, d) = run(
                 &format!("INTERLIS {version}; ? 😀 \"open /*"),
                 Limits::default(),
@@ -1615,5 +1750,167 @@ mod frontend_contract_tests {
         );
         assert!(d.syntax_invalid);
         assert!(!d.incomplete);
+    }
+}
+
+#[cfg(test)]
+mod lexical_recovery_regressions {
+    use super::*;
+    use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
+    fn parse_text(text: &str) -> (Option<Document>, Diagnostics) {
+        let sources = SourceSet::new(vec![SourceInput {
+            name: "memory:///regression.ili".into(),
+            text: text.into(),
+        }])
+        .unwrap();
+        let limits = Limits::default();
+        let mut budget = SyntaxBudget::new(&limits);
+        let mut d = Diagnostics::new(&limits);
+        let doc = parse(&sources, 0, &limits, &mut budget, &mut d);
+        (doc, d)
+    }
+    fn analyze_text(text: &str) -> crate::AnalysisReport {
+        analyze(CompileRequest {
+            sources: vec![SourceInput {
+                name: "memory:///regression.ili".into(),
+                text: text.into(),
+            }],
+            limits: Limits::default(),
+        })
+        .unwrap()
+    }
+    fn model(body: &str) -> String {
+        format!("INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" = {body} END M.")
+    }
+    #[test]
+    fn lexical_errors_recover_without_unsupported_surrogates() {
+        for bad in [
+            "?;".to_owned(),
+            format!("{};", "A".repeat(256)),
+            "\"unfinished\n".to_owned(),
+        ] {
+            for body in [
+                format!("{bad} DOMAIN Good=BOOLEAN;"),
+                format!("TOPIC T = {bad} DOMAIN Good=BOOLEAN; END T;"),
+            ] {
+                let text = model(&body);
+                let (doc, d) = parse_text(&text);
+                assert!(d.syntax_invalid);
+                assert!(!d.incomplete);
+                assert!(!d.limited);
+                assert_eq!(d.entries.len(), 1, "{:?}", d.entries);
+                let doc = doc.unwrap();
+                let declarations = match &doc.models[0].declarations[0] {
+                    Declaration::Topic { declarations, .. } => declarations.as_slice(),
+                    _ => doc.models[0].declarations.as_slice(),
+                };
+                assert_eq!(declarations.len(), 1);
+                let Declaration::Domain { name, .. } = &declarations[0] else {
+                    panic!()
+                };
+                assert_eq!(name.value, "Good");
+                let report = analyze_text(&text);
+                assert_eq!(report.status(), AnalysisStatus::Rejected);
+                assert!(report.graph().is_none());
+                assert!(
+                    !report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == "ILI-UNSUPPORTED")
+                );
+            }
+        }
+        // A genuine unsupported family elsewhere cannot erase a proven lexer error.
+        let report = analyze_text(&model("UNIT metre=1[INTERLIS.m]; ?"));
+        assert_eq!(report.status(), AnalysisStatus::Rejected);
+        assert!(report.graph().is_none());
+    }
+    #[test]
+    fn incomplete_explanations_are_lexical_errors_not_header_options() {
+        let text = "INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" // unfinished\n = END M.";
+        let report = analyze_text(text);
+        assert_eq!(report.status(), AnalysisStatus::Rejected);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
+        assert_eq!(report.diagnostics()[0].message, "Unfinished explanation");
+        let report =
+            analyze_text("INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" // closed // = END M.");
+        assert_eq!(report.status(), AnalysisStatus::Incomplete);
+        assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");
+    }
+    #[test]
+    fn missing_semicolons_do_not_consume_next_declarations_or_their_errors() {
+        let (doc, d) = parse_text(&model("DOMAIN A=BOOLEAN DOMAIN B=; DOMAIN Good=BOOLEAN;"));
+        assert_eq!(d.entries.len(), 2);
+        assert!(d.syntax_invalid);
+        assert!(!d.incomplete);
+        let doc = doc.unwrap();
+        assert_eq!(doc.models[0].declarations.len(), 1);
+        let Declaration::Domain { name, .. } = &doc.models[0].declarations[0] else {
+            panic!()
+        };
+        assert_eq!(name.value, "Good");
+        let (doc, d) = parse_text(&model("STRUCTURE S=a:BOOLEAN b:; good:BOOLEAN; END S;"));
+        assert_eq!(d.entries.len(), 2);
+        assert!(!d.limited);
+        let doc = doc.unwrap();
+        let Declaration::Container {
+            attributes,
+            end_name,
+            ..
+        } = &doc.models[0].declarations[0]
+        else {
+            panic!()
+        };
+        assert_eq!(end_name.value, "S");
+        assert_eq!(attributes.len(), 1);
+        let Declaration::Attribute { name, .. } = &attributes[0] else {
+            panic!()
+        };
+        assert_eq!(name.value, "good");
+        let (doc, d) = parse_text(&model("DOMAIN A=BOOLEAN DOMAIN B=BOOLEAN;"));
+        assert_eq!(d.entries.len(), 1);
+        let doc = doc.unwrap();
+        let Declaration::Domain { name, .. } = &doc.models[0].declarations[0] else {
+            panic!()
+        };
+        assert_eq!(name.value, "B");
+    }
+    #[test]
+    fn version_decimal_value_is_recognized_without_changing_original_text() {
+        for (version, language) in [
+            ("2.3", Language::V23),
+            ("+2.3", Language::V23),
+            ("02.300", Language::V23),
+            ("0.23E1", Language::V23),
+            ("2.4", Language::V24),
+            ("+02.400", Language::V24),
+            ("0.240e+1", Language::V24),
+        ] {
+            let text = format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = END M.");
+            let (doc, d) = parse_text(&text);
+            assert!(d.entries.is_empty(), "{version}: {:?}", d.entries);
+            let doc = doc.unwrap();
+            assert_eq!(doc.language, language);
+            assert_eq!(doc.models.len(), 1);
+            let report = analyze_text(&text);
+            assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+            assert_eq!(report.sources().files()[0].text(), text);
+            assert!(parse_text(&(text + " ?")).1.syntax_invalid);
+        }
+    }
+    #[test]
+    fn definite_version_errors_and_future_type_families_remain_distinct() {
+        let text = model("DOMAIN D=DATE;");
+        assert_eq!(analyze_text(&text).status(), AnalysisStatus::Incomplete);
+        let report = analyze_text(&text.replace("2.4", "2.3"));
+        assert_eq!(report.status(), AnalysisStatus::Rejected);
+        assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
+        for version in ["2.3", "2.4"] {
+            let text = model("DOMAIN D=MANDATORY;").replace("2.4", version);
+            let report = analyze_text(&text);
+            assert_eq!(report.status(), AnalysisStatus::Incomplete);
+            assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");
+        }
     }
 }

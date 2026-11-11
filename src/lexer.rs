@@ -340,6 +340,9 @@ pub(crate) fn lex(
                 Kind::Invalid
             }
         };
+        if diagnostics.limited {
+            return output;
+        }
         output.tokens.push(Token { kind, range });
         if crate::syntax::foreign_header_complete(&output.tokens, source) {
             return output;

@@ -166,6 +166,8 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
 
     let status = if diagnostics.limited {
         AnalysisStatus::LimitExceeded
+    } else if diagnostics.syntax_invalid {
+        AnalysisStatus::Rejected
     } else if diagnostics.incomplete {
         AnalysisStatus::Incomplete
     } else if diagnostics.rejected {

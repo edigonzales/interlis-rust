@@ -14,6 +14,10 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN; ? END M.', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" // open', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN A=BOOLEAN DOMAIN B=; DOMAIN Good=BOOLEAN; END M.', 'rejected', 'ILI-SYNTAX'],
+  ['INTERLIS 0.23E1; MODEL M AT "x" VERSION "1" = END M. MODEL B AT "x" VERSION "1" = END B.', 'checked_subset', null],
   ['\uFEFF!!@ author="😀"\r\n/* outer /* inner */ tail */\r\nINTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=0.10E-2..0.99E+2; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.', 'checked_subset', null],
   ['INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN D=1E2..2E2; END A.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL A AT "x" VERSION "1" // /* literal */ !! 😀 // = END A.', 'incomplete', 'ILI-UNSUPPORTED'],
@@ -55,6 +59,8 @@ const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
 const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','MANDATORY CONSTRAINT count > 0; END Item;');
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
+const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
+const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};
 export const semanticCases = [
   [JSON.stringify(valid23),'checked_subset','2.3'],
   [JSON.stringify(valid24),'checked_subset','2.4'],
@@ -63,6 +69,8 @@ export const semanticCases = [
   [JSON.stringify(prefix),'rejected','ILI-TYPE-NOT-FOUND'],
   [JSON.stringify(unsupported),'incomplete','ILI-UNSUPPORTED'],
   [JSON.stringify(numericLimit),'limit_exceeded','ILI-LIMIT'],
+  [JSON.stringify(syntaxLimit),'limit_exceeded','ILI-LIMIT'],
+  [JSON.stringify(workLimit),'limit_exceeded','ILI-LIMIT'],
   [JSON.stringify(valid24),'checked_subset','2.4'],
 ];
 export function verifySemantic(report,input,status,detail) {

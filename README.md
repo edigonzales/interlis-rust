@@ -91,6 +91,9 @@ and spans are not extra nodes. Limits are shared across the whole request.
 Identifiers are limited to 255 ASCII characters. Strings use INTERLIS escapes;
 comments and explanations retain their original source ranges. Missing or damaged
 language headers are syntax errors; other well-formed versions remain incomplete.
+Version-Dec is recognized by exact value (for example `+2.3`, `2.30`, `0.23E1`);
+the original spelling and all source ranges remain unchanged. Proven syntax errors
+take precedence over incomplete analysis; resource limits take precedence over both.
 Unsupported diagnostics are warnings; resource-limit errors mean analysis could
 not finish, without a language-invalidity verdict.
 
