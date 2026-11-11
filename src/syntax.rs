@@ -8,6 +8,36 @@ use crate::{
 };
 
 pub(crate) use crate::model::LanguageVersion as Language;
+fn language_version(text: &str) -> Option<Language> {
+    match text {
+        "2.3" => Some(Language::V23),
+        "2.4" => Some(Language::V24),
+        _ => None,
+    }
+}
+
+// The same lexer stops after a complete foreign header. Its remaining language
+// is unknown, so applying 2.3/2.4 lexical judgments to that remainder is unsound.
+// No alternate lexer or source preprocessing is used.
+pub(crate) fn foreign_header_complete(tokens: &[Token], source: &str) -> bool {
+    let text = |t: &Token| &source[t.range.clone()];
+    match tokens {
+        [start, number, end] => {
+            text(start) == "INTERLIS"
+                && text(end) == ";"
+                && number.kind == Kind::Number
+                && language_version(text(number)).is_none()
+        }
+        [start, sign, number, end] => {
+            text(start) == "INTERLIS"
+                && text(end) == ";"
+                && matches!(text(sign), "+" | "-")
+                && sign.range.end == number.range.start
+                && number.kind == Kind::Number
+        }
+        _ => false,
+    }
+}
 #[derive(Debug)]
 pub(crate) struct Located<T> {
     pub value: T,
@@ -717,10 +747,10 @@ impl Parser<'_> {
         if !self.take("INTERLIS") {
             return Err(Self::expected("Expected INTERLIS language header"));
         }
-        self.language = if self.take("2.3") {
-            Language::V23
-        } else if self.take("2.4") {
-            Language::V24
+        self.language = if let Some(language) = language_version(self.text()) {
+            self.step()?;
+            self.at += 1;
+            language
         } else {
             self.number()?;
             self.expect(";")?;
@@ -1024,6 +1054,11 @@ mod tests {
         for (version, word, valid) in [
             ("2.3", "XMLNS", true),
             ("2.4", "XMLNS", false),
+            ("2.3", "TIMEOFDAY", true),
+            ("2.4", "TIMEOFDAY", false),
+            ("2.3", "DATETIME", true),
+            ("2.4", "DATETIME", false),
+            ("2.3", "DATE", false),
             ("2.3", "XML", true),
             ("2.4", "XML", true),
             ("2.3", "SUBDIVISION", false),
@@ -1471,6 +1506,22 @@ mod frontend_contract_tests {
             assert!(d.entries.is_empty());
             assert!(doc.unwrap().models.is_empty());
         }
+    }
+    #[test]
+    fn foreign_remainder_is_not_judged_as_supported_language() {
+        for version in ["1.0", "2.2", "2.5", "+2.5", "-2.5"] {
+            let (_, d) = run(
+                &format!("INTERLIS {version}; ? 😀 \"open /*"),
+                Limits::default(),
+            );
+            assert!(d.unsupported_version);
+            assert!(!d.syntax_invalid);
+            assert_eq!(d.entries.len(), 1);
+            assert!(!d.limited);
+        }
+        let (_, d) = run("INTERLIS 2.4; ? 😀", Limits::default());
+        assert!(d.syntax_invalid);
+        assert!(!d.unsupported_version);
     }
     #[test]
     fn comments_survive_the_parser_instance_in_the_owned_document() {

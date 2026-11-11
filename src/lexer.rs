@@ -341,6 +341,9 @@ pub(crate) fn lex(
             }
         };
         output.tokens.push(Token { kind, range });
+        if crate::syntax::foreign_header_complete(&output.tokens, source) {
+            return output;
+        }
     }
     output
 }
