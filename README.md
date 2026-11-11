@@ -14,6 +14,16 @@ Domain dependencies use `Alias EXTENDS Base = MANDATORY;`; direct domain
 `Alias = Base;` definitions are invalid. Mandatory domains contribute to the
 effective requirement of attributes; their declared references remain available.
 
+The private syntax tree also preserves model kinds, contracted/transfer options,
+explanations, translation headers, charset/XML namespace declarations and ordered
+qualified/unqualified imports. It represents topic inheritance/dependencies/OIDs,
+2.4 deferred generics and contexts, container properties/inheritance/OIDs, attribute
+properties/subdivisions, parameter sections and associations with ordered roles,
+restricted target alternatives and exact cardinalities. Anonymous associations
+retain absent names. These constructs pass through the same bounded frontend;
+the analyzer explicitly returns `incomplete` before binding their unimplemented
+semantics. An optional ATTRIBUTE section marker is semantically inert.
+
 General inheritance, structure-valued attributes, units, directions/reference
 systems, views, constraints and other omitted constructs produce `incomplete`.
 Broader namespace/visibility and declaration-order rules, issuer URI validation
@@ -79,7 +89,7 @@ Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,
 work units. Limits must be positive. Hard caps respectively: 8 MiB, 32 MiB,
 1,000,000, 256, 2,000,000, 100,000,000, 1,000, 16,384, 100,000, 10,000,000. Numeric digits include exponent
 digits. Numeric/exponent budgets are checked before bigint allocation/alignment.
-Semantic work counts declaration/binding steps, generated name/reference bytes,
+Semantic work counts syntax-support checks, declaration/binding steps, generated name/reference bytes,
 numeric digits and decimal alignment distance. Depth counts active blocks,
 including the outer comment or first topic/class/structure; the model header is
 not a nested container. Limits are operating constraints, not language restrictions.

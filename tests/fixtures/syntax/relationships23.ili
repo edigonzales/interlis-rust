@@ -1,0 +1,13 @@
+INTERLIS 2.3;
+CONTRACTED MODEL Relationships AT "https://example.invalid" VERSION "1" =
+  IMPORTS INTERLIS;
+  TOPIC Objects =
+    OID AS INTERLIS.STANDARDOID;
+    CLASS Part = END Part;
+    CLASS Whole = END Whole;
+    ASSOCIATION =
+      parts -- {0..*} Part;
+      whole -<#> {1} Whole;
+    END;
+  END Objects;
+END Relationships.

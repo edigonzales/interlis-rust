@@ -58,6 +58,135 @@ struct Analyzer<'a, 'd> {
     states: Vec<State>,
     types: Vec<TypeInfo>,
 }
+// Every newly parsed family must pass this gate before the I-0 analyzer runs.
+// Inert section markers do not change the supported attribute semantics.
+fn ensure_supported_semantics(
+    documents: &[syntax::Document],
+    diagnostics: &mut Diagnostics,
+    work: &mut WorkBudget,
+) -> bool {
+    fn charge(work: &mut WorkBudget, diagnostics: &mut Diagnostics, span: &Span) -> bool {
+        if work.charge(1).is_err() {
+            diagnostics.limit("Semantic work budget exceeded", Some(span.clone()));
+            false
+        } else {
+            true
+        }
+    }
+    fn declarations<'a>(
+        items: &'a [SyntaxDecl],
+        work: &mut WorkBudget,
+        diagnostics: &mut Diagnostics,
+    ) -> Option<&'a Span> {
+        for item in items {
+            if !charge(work, diagnostics, item.span()) {
+                return Some(item.span());
+            }
+            let unsupported = match item {
+                SyntaxDecl::Topic {
+                    options,
+                    declarations: children,
+                    span,
+                    ..
+                } => {
+                    if options.view.is_some()
+                        || !options.properties.is_empty()
+                        || options.base.is_some()
+                        || options.basket_oid.is_some()
+                        || options.oid.is_some()
+                        || !options.dependencies.is_empty()
+                        || !options.deferred_generics.is_empty()
+                    {
+                        Some(span)
+                    } else {
+                        declarations(children, work, diagnostics)
+                    }
+                }
+                SyntaxDecl::Container {
+                    properties,
+                    base,
+                    oid,
+                    parameters,
+                    attributes,
+                    parameter_section,
+                    span,
+                    ..
+                } => {
+                    if !properties.is_empty()
+                        || base.is_some()
+                        || !matches!(oid, syntax::OidRule::Unspecified)
+                        || parameter_section.is_some()
+                        || !parameters.is_empty()
+                    {
+                        Some(span)
+                    } else {
+                        declarations(attributes, work, diagnostics)
+                    }
+                }
+                SyntaxDecl::Attribute {
+                    properties,
+                    subdivision,
+                    span,
+                    ..
+                } => (!properties.is_empty() || subdivision.is_some()).then_some(span),
+                SyntaxDecl::Domain { .. } => None,
+                SyntaxDecl::Association(association) => Some(&association.span),
+                SyntaxDecl::Context(context) => Some(&context.span),
+                SyntaxDecl::RuntimeParameter { span, .. } => Some(span),
+            };
+            if unsupported.is_some() {
+                return unsupported;
+            }
+        }
+        None
+    }
+    for document in documents {
+        for model in &document.models {
+            if !charge(work, diagnostics, &model.span) {
+                return false;
+            }
+            let mut unqualified = None;
+            for import in &model.imports {
+                if !charge(work, diagnostics, &import.span) {
+                    return false;
+                }
+                if unqualified.is_none() {
+                    unqualified = import.unqualified.as_ref();
+                }
+            }
+            let header = model.kind != syntax::ModelKind::Data
+                || model.contracted.is_some()
+                || model.no_incremental_transfer.is_some()
+                || model.explanation.is_some()
+                || model.translation.is_some()
+                || model.charset.is_some()
+                || model.xmlns.is_some()
+                || unqualified.is_some();
+            let span = if header {
+                unqualified
+                    .or(model.no_incremental_transfer.as_ref())
+                    .or(model.contracted.as_ref())
+                    .or_else(|| model.explanation.as_ref().map(|e| &e.span))
+                    .or(Some(&model.span))
+            } else {
+                declarations(&model.declarations, work, diagnostics)
+            };
+            if diagnostics.limited {
+                return false;
+            }
+            if let Some(span) = span {
+                diagnostics.push(
+                    "ILI-UNSUPPORTED",
+                    "Parsed syntax has semantics outside the implemented subset",
+                    Some(span.clone()),
+                );
+                return false;
+            }
+        }
+    }
+    true
+}
+
 impl<'a, 'd> Analyzer<'a, 'd> {
     fn new(
         documents: &'a [syntax::Document],
@@ -226,12 +355,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for root in 0..self.roots.len() {
             let model = self.roots[root].model;
             for import in &self.roots[root].syntax.imports {
-                if !self.step(import.value.len().saturating_add(1), &import.span) {
+                if !self.step(import.name.value.len().saturating_add(1), &import.span) {
                     return;
                 }
-                if import.value == "INTERLIS" || self.model_names.contains_key(&import.value) {
-                    if self.bound_imports[model].insert(import.value.clone()) {
-                        self.models[model].imports.push(import.value.clone());
+                if import.name.value == "INTERLIS"
+                    || self.model_names.contains_key(&import.name.value)
+                {
+                    if self.bound_imports[model].insert(import.name.value.clone()) {
+                        self.models[model].imports.push(import.name.value.clone());
                     }
                 } else {
                     self.blocked_models.insert(model);
@@ -255,6 +386,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     declarations,
                     end_name,
                     span,
+                    ..
                 } => {
                     self.end_name(name, end_name);
                     if let Some(id) = self.add(Kind::Topic, name, span, Some(parent), model, None) {
@@ -267,6 +399,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     attributes,
                     end_name,
                     span,
+                    ..
                 } => {
                     self.end_name(name, end_name);
                     let kind = match kind {
@@ -307,6 +440,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     ty,
                     mandatory,
                     span,
+                    ..
                 } => {
                     if let Some(id) = self.add(
                         Kind::Attribute,
@@ -318,6 +452,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     ) {
                         self.symbols[id].syntax = Some(ty);
                     }
+                }
+                SyntaxDecl::Association(_)
+                | SyntaxDecl::Context(_)
+                | SyntaxDecl::RuntimeParameter { .. } => {
+                    unreachable!("unsupported semantics are checked before indexing")
                 }
             }
         }
@@ -669,6 +808,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         if self.diagnostics.incomplete {
+            return None;
+        }
+        if !ensure_supported_semantics(self.documents, self.diagnostics, &mut self.work) {
             return None;
         }
         self.collect_models();

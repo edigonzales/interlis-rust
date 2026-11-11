@@ -1,0 +1,21 @@
+INTERLIS 2.4;
+TYPE MODEL Original (en) NOINCREMENTALTRANSFER
+  AT "https://example.invalid" VERSION "2024" // context example // =
+  CHARSET "UTF-8";
+  XMLNS "urn:example:original";
+  IMPORTS UNQUALIFIED Geometry, INTERLIS;
+  CONTEXT default =
+    Geometry.Generic = Geometry.LV03 OR Geometry.LV95;
+  TOPIC Measurements (ABSTRACT) =
+    DEFERRED GENERICS Geometry.Generic;
+    STRUCTURE Reading (ABSTRACT) EXTENDS Other.Reading =
+      ATTRIBUTE
+        value (EXTENDED): MANDATORY BOOLEAN;
+      PARAMETER
+        symbol: METAOBJECT OF Unknown.Symbol;
+    END Reading;
+  END Measurements;
+END Original.
+MODEL Translation AT "https://example.invalid" VERSION "2025"
+  TRANSLATION OF Original ["2024"] =
+END Translation.

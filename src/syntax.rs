@@ -7,7 +7,9 @@ use crate::{
     limits::SyntaxBudget,
 };
 
+mod structure;
 pub(crate) use crate::model::LanguageVersion as Language;
+pub(crate) use structure::*;
 fn language_version(text: &str) -> Option<Language> {
     // Version-Dec is a number, not a model-version string. Recognize its exact
     // value without floats, bigint work, allocation or altering source spelling.
@@ -93,7 +95,14 @@ pub(crate) struct ModelDecl {
     pub language_tag: Option<Name>,
     pub issuer: Located<String>,
     pub version: Located<String>,
-    pub imports: Vec<Name>,
+    pub kind: ModelKind,
+    pub contracted: Option<Span>,
+    pub no_incremental_transfer: Option<Span>,
+    pub explanation: Option<Located<String>>,
+    pub translation: Option<TranslationSyntax>,
+    pub charset: Option<Located<String>>,
+    pub xmlns: Option<Located<String>>,
+    pub imports: Vec<ImportSyntax>,
     pub declarations: Vec<Declaration>,
     pub end_name: Name,
     pub span: Span,
@@ -101,12 +110,20 @@ pub(crate) struct ModelDecl {
 #[derive(Debug)]
 pub(crate) enum Declaration {
     Topic {
+        options: TopicOptions,
         name: Name,
         declarations: Vec<Declaration>,
         end_name: Name,
         span: Span,
     },
     Container {
+        properties: Vec<Located<Property>>,
+        base: Option<QualifiedName>,
+        oid: OidRule,
+        #[allow(dead_code)] // Preserved section spelling; semantically inert.
+        attribute_section: Option<Span>,
+        parameter_section: Option<Span>,
+        parameters: Vec<ParameterDecl>,
         kind: ContainerKind,
         name: Name,
         attributes: Vec<Declaration>,
@@ -119,12 +136,36 @@ pub(crate) enum Declaration {
         mandatory: bool,
         span: Span,
     },
-    Attribute {
+    Association(AssociationDecl),
+    Context(ContextDecl),
+    #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
+    RuntimeParameter {
         name: Name,
         ty: TypeSyntax,
         mandatory: bool,
         span: Span,
     },
+    Attribute {
+        properties: Vec<Located<Property>>,
+        subdivision: Option<Subdivision>,
+        name: Name,
+        ty: TypeSyntax,
+        mandatory: bool,
+        span: Span,
+    },
+}
+impl Declaration {
+    pub(crate) fn span(&self) -> &Span {
+        match self {
+            Self::Topic { span, .. }
+            | Self::Container { span, .. }
+            | Self::Domain { span, .. }
+            | Self::Attribute { span, .. }
+            | Self::RuntimeParameter { span, .. } => span,
+            Self::Association(value) => &value.span,
+            Self::Context(value) => &value.span,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ContainerKind {
@@ -522,6 +563,24 @@ impl Parser<'_> {
         {
             return Err(Self::expected("Expected a type"));
         }
+        if matches!(
+            self.text(),
+            "MODEL"
+                | "TOPIC"
+                | "CLASS"
+                | "STRUCTURE"
+                | "ASSOCIATION"
+                | "DOMAIN"
+                | "ATTRIBUTE"
+                | "PARAMETER"
+                | "IMPORTS"
+                | "CONTEXT"
+                | "METAOBJECT"
+        ) {
+            return Err(Self::expected(
+                "Expected a type before the next declaration",
+            ));
+        }
         Err(Self::unsupported(
             "Type construction is outside the supported subset",
         ))
@@ -569,7 +628,10 @@ impl Parser<'_> {
                     | "SIGN"
                     | "REFSYSTEM"
             ),
-            Context::Container => false,
+            Context::Container => matches!(
+                self.text(),
+                "CONTINUOUS" | "SUBDIVISION" | "ATTRIBUTE" | "PARAMETER" | "CARDINALITY"
+            ),
         }
     }
     fn recover(&mut self, context: Context, domain_section: bool) {
@@ -622,7 +684,6 @@ impl Parser<'_> {
         ) {
             return Err(Self::lexical());
         }
-        let start = self.start();
         if self
             .tokens
             .get(self.at)
@@ -632,33 +693,41 @@ impl Parser<'_> {
         }
 
         if context == Context::Container {
-            if keywords::reserved(self.text(), self.language) {
-                return Err(Self::unsupported(
-                    "Container member construction is outside the supported subset",
-                ));
+            return Ok(vec![self.attribute()?]);
+        }
+        if self.is("ASSOCIATION") {
+            if context != Context::Topic {
+                return Err(Self::expected("ASSOCIATION requires a topic"));
             }
-            let name = self.name(false)?;
-            if self.is("(") {
-                return Err(Self::unsupported(
-                    "Attribute properties are outside the supported subset",
-                ));
+            return Ok(vec![Declaration::Association(self.association()?)]);
+        }
+        if self.is("CONTEXT") {
+            if context != Context::Model || self.language != Language::V24 {
+                return Err(Self::expected("CONTEXT requires an INTERLIS 2.4 model"));
             }
-            self.expect(":")?;
-            let mandatory = self.take("MANDATORY");
-            let ty = self.ty(true)?;
-            if self.is(":=") {
-                return Err(Self::unsupported(
-                    "Attribute value assignments are outside the supported subset",
-                ));
+            return self.contexts();
+        }
+        if self.take("PARAMETER") {
+            if context != Context::Model {
+                return Err(Self::expected("Runtime PARAMETER requires a model"));
             }
-            self.expect(";")?;
-            self.node()?;
-            return Ok(vec![Declaration::Attribute {
-                name,
-                ty,
-                mandatory,
-                span: self.span(start, self.end()),
-            }]);
+            let mut items = vec![];
+            while self.unreserved_name() {
+                let start = self.start();
+                let name = self.name(false)?;
+                self.expect(":")?;
+                let mandatory = self.take("MANDATORY");
+                let ty = self.ty(true)?;
+                self.expect(";")?;
+                self.node()?;
+                items.push(Declaration::RuntimeParameter {
+                    name,
+                    ty,
+                    mandatory,
+                    span: self.span(start, self.end()),
+                });
+            }
+            return Ok(items);
         }
         if self.take("DOMAIN") {
             let mut items = vec![];
@@ -736,140 +805,31 @@ impl Parser<'_> {
             }
             return Ok(items);
         }
-        let topic = self.is("TOPIC");
-        let kind = if self.take("CLASS") {
-            Some(ContainerKind::Class)
-        } else if self.take("STRUCTURE") {
-            Some(ContainerKind::Structure)
-        } else {
-            None
-        };
-        if topic || kind.is_some() {
-            if topic {
-                self.expect("TOPIC")?;
-                if context != Context::Model {
-                    return Err(Self::expected("TOPIC may only occur in a model"));
-                }
+        if self.is("TOPIC") || self.is("VIEW") && self.next_is("TOPIC") {
+            if context != Context::Model {
+                return Err(Self::expected("TOPIC may only occur in a model"));
             }
-            let name = self.name(false)?;
-            if self.is("(") || self.is("EXTENDS") {
-                return Err(Self::unsupported(
-                    "Container modifiers or inheritance are outside the supported subset",
-                ));
-            }
-            self.expect("=")?;
-            if self.depth >= self.limits.max_nesting {
-                self.diagnostics.push(
-                    "ILI-LIMIT",
-                    "Parser nesting budget exceeded",
-                    Some(self.current_span()),
-                );
-                return Err(Self::expected("Nesting budget exceeded"));
-            }
-            self.depth += 1;
-            let members = self.declarations(if topic {
-                Context::Topic
-            } else {
-                Context::Container
-            });
-            self.depth -= 1;
-            let members = members?;
-            self.expect("END")?;
-            let end_name = self.name(false)?;
-            self.expect(";")?;
-            let span = self.span(start, self.end());
-            self.node()?;
-            return Ok(vec![if let Some(kind) = kind {
-                Declaration::Container {
-                    kind,
-                    name,
-                    attributes: members,
-                    end_name,
-                    span,
-                }
-            } else {
-                Declaration::Topic {
-                    name,
-                    declarations: members,
-                    end_name,
-                    span,
-                }
-            }]);
+            return Ok(vec![self.topic()?]);
         }
-        Err(Self::unsupported(
-            "Declaration construction is outside the supported subset",
-        ))
-    }
-    fn import_name(&mut self) -> Parsed<Name> {
-        self.step()?;
-        if self.is("UNQUALIFIED") {
-            return Err(Self::unsupported(
-                "UNQUALIFIED imports are outside the supported subset",
-            ));
+        if self.is("CLASS") || self.is("STRUCTURE") {
+            return Ok(vec![self.container()?]);
         }
-        self.name(true)
-    }
-    fn model(&mut self) -> Parsed<ModelDecl> {
-        self.step()?;
-        let start = self.start();
-        self.expect("MODEL")?;
-        let name = self.name(false)?;
-        let language_tag = if self.take("(") {
-            let tag = self.name(false)?;
-            self.expect(")")?;
-            Some(tag)
-        } else {
-            None
-        };
-        if self.language == Language::V24 && self.is("NOINCREMENTALTRANSFER") {
-            return Err(Self::unsupported(
-                "NOINCREMENTALTRANSFER is outside the supported subset",
-            ));
+        if self.unreserved_name() {
+            return Err(Self::expected("Expected a declaration keyword"));
         }
-        self.expect("AT")?;
-        let issuer = self.quoted()?;
-        self.expect("VERSION")?;
-        let version = self.quoted()?;
         if matches!(
-            self.tokens.get(self.at).map(|t| &t.kind),
-            Some(Kind::Invalid)
-        ) {
-            return Err(Self::lexical());
-        }
-        if self.is("TRANSLATION")
-            || matches!(
-                self.tokens.get(self.at).map(|t| &t.kind),
-                Some(Kind::Explanation(_))
-            )
+            self.text(),
+            "UNIT" | "FUNCTION" | "LINE" | "SIGN" | "REFSYSTEM"
+        ) || context == Context::Topic
+            && matches!(self.text(), "VIEW" | "GRAPHIC" | "CONSTRAINTS")
         {
             return Err(Self::unsupported(
-                "Additional model header options are outside the supported subset",
+                "Declaration construction is outside the supported subset",
             ));
         }
-        self.expect("=")?;
-        let mut imports = vec![];
-        while self.take("IMPORTS") {
-            imports.push(self.import_name()?);
-            while self.take(",") {
-                imports.push(self.import_name()?);
-            }
-            self.expect(";")?;
-        }
-        let declarations = self.declarations(Context::Model)?;
-        self.expect("END")?;
-        let end_name = self.name(false)?;
-        self.expect(".")?;
-        self.node()?;
-        Ok(ModelDecl {
-            name,
-            language_tag,
-            issuer,
-            version,
-            imports,
-            declarations,
-            end_name,
-            span: self.span(start, self.end()),
-        })
+        Err(Self::expected(
+            "Declaration is not permitted at this position",
+        ))
     }
     fn document(&mut self) -> Parsed<Document> {
         self.step()?;
@@ -890,15 +850,10 @@ impl Parser<'_> {
         self.language = language;
         let mut models = vec![];
         while self.at < self.tokens.len() && !self.diagnostics.limited {
-            if !self.is("MODEL") {
-                if matches!(
-                    self.text(),
-                    "CONTRACTED" | "TYPE" | "REFSYSTEM" | "SYMBOLOGY"
-                ) {
-                    return Err(Self::unsupported(
-                        "Model construction is outside the supported subset",
-                    ));
-                }
+            if !matches!(
+                self.text(),
+                "MODEL" | "CONTRACTED" | "TYPE" | "REFSYSTEM" | "SYMBOLOGY"
+            ) {
                 return Err(Self::expected(
                     "Unexpected token after complete model; EOF required",
                 ));
@@ -1057,7 +1012,7 @@ mod tests {
             doc.models[1]
                 .imports
                 .iter()
-                .map(|n| n.value.as_str())
+                .map(|n| n.name.value.as_str())
                 .collect::<Vec<_>>(),
             ["A", "INTERLIS"]
         );
@@ -1161,8 +1116,7 @@ mod tests {
         assert!(!d.incomplete);
         for body in [
             "DOMAIN Alias EXTENDS Base = TEXT*2;",
-            "CLASS B EXTENDS C = END B;",
-            "VIEW V PROJECTION OF B; = ALL OF B; END V;",
+            "TOPIC T = VIEW V PROJECTION OF B; = ALL OF B; END V; END T;",
             "CLASS B = MANDATORY CONSTRAINT x == 1; END B;",
             "DOMAIN E=(red,green);",
             "UNIT metre=1[INTERLIS.m];",
@@ -1418,7 +1372,7 @@ mod continuation_regressions {
             doc.models[1]
                 .imports
                 .iter()
-                .map(|n| n.value.as_str())
+                .map(|n| n.name.value.as_str())
                 .collect::<Vec<_>>(),
             ["A", "INTERLIS"]
         );

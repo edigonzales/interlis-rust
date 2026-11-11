@@ -536,7 +536,7 @@ fn every_supplied_source_is_checked_and_mixed_language_is_incomplete() {
     );
     for body in [
         "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
-        "VIEW V PROJECTION OF X; = ALL OF X; END V;",
+        "TOPIC T = VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
         "STRUCTURE S EXTENDS Base=END S;",
         "DOMAIN N=0..360 CIRCULAR;",
     ] {
