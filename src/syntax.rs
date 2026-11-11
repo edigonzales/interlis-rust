@@ -8,8 +8,10 @@ use crate::{
 };
 
 mod structure;
+mod types;
 pub(crate) use crate::model::LanguageVersion as Language;
 pub(crate) use structure::*;
+pub(crate) use types::*;
 fn language_version(text: &str) -> Option<Language> {
     // Version-Dec is a number, not a model-version string. Recognize its exact
     // value without floats, bigint work, allocation or altering source spelling.
@@ -132,10 +134,14 @@ pub(crate) enum Declaration {
     },
     Domain {
         name: Name,
-        ty: DomainType,
+        properties: Vec<Located<Property>>,
+        base: Option<QualifiedName>,
+        ty: Option<TypeSyntax>,
         mandatory: bool,
         span: Span,
     },
+    Unit(UnitDecl),
+    LineForm(LineFormDecl),
     Association(AssociationDecl),
     Context(ContextDecl),
     #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
@@ -160,6 +166,8 @@ impl Declaration {
             | Self::Domain { span, .. }
             | Self::Attribute { span, .. }
             | Self::RuntimeParameter { span, .. } => span,
+            Self::Unit(value) => &value.span,
+            Self::LineForm(value) => &value.span,
             Self::Association(value) => &value.span,
             Self::Context(value) => &value.span,
         }
@@ -169,27 +177,6 @@ impl Declaration {
 pub(crate) enum ContainerKind {
     Class,
     Structure,
-}
-#[derive(Debug)]
-pub(crate) enum DomainType {
-    Concrete(TypeSyntax),
-    MandatoryDerivation(QualifiedName),
-}
-#[derive(Debug)]
-pub(crate) enum TypeSyntax {
-    Text {
-        max_length: Located<String>,
-        span: Span,
-    },
-    Boolean {
-        span: Span,
-    },
-    Numeric {
-        lower: Located<String>,
-        upper: Located<String>,
-        span: Span,
-    },
-    Named(QualifiedName),
 }
 #[derive(Debug)]
 pub(crate) struct TypeUseSyntax {
@@ -519,142 +506,6 @@ impl Parser<'_> {
             span: self.span(range.start, range.end),
         })
     }
-    fn ty(&mut self, named: bool) -> Parsed<TypeSyntax> {
-        self.step()?;
-        let ty = self.type_base(named)?;
-        if matches!(
-            self.text(),
-            "[" | "{"
-                | "<"
-                | "CIRCULAR"
-                | "CLOCKWISE"
-                | "COUNTERCLOCKWISE"
-                | "CONSTRAINTS"
-                | "WITH"
-                | "REFSYSTEM"
-                | "REFSYS"
-                | "FORMAT"
-        ) {
-            return Err(Self::unsupported(
-                "Type modifiers are outside the supported subset",
-            ));
-        }
-        Ok(ty)
-    }
-    fn type_base(&mut self, named: bool) -> Parsed<TypeSyntax> {
-        self.step()?;
-        if matches!(
-            self.tokens.get(self.at).map(|t| &t.kind),
-            Some(Kind::Invalid)
-        ) {
-            return Err(Self::lexical());
-        }
-        let start = self.start();
-        if self.language == Language::V23 && self.is("DATE") {
-            return Err(Self::expected("DATE type requires INTERLIS 2.4"));
-        }
-        if self.take("TEXT") {
-            if !self.take("*") {
-                return Err(Self::unsupported(
-                    "Unbounded TEXT is outside the supported subset",
-                ));
-            }
-            let max_length = self.number()?;
-            if max_length.value.bytes().any(|b| !b.is_ascii_digit()) {
-                return Err(Issue {
-                    primary: Some(max_length.span),
-                    kind: IssueKind::Syntax,
-                    message: "TEXT length must be an unsigned integer",
-                });
-            }
-            self.node()?;
-            return Ok(TypeSyntax::Text {
-                max_length,
-                span: self.span(start, self.end()),
-            });
-        }
-        if self.take("BOOLEAN") {
-            self.node()?;
-            return Ok(TypeSyntax::Boolean {
-                span: self.span(start, self.end()),
-            });
-        }
-        if self.is("-")
-            || self.is("+")
-            || self
-                .tokens
-                .get(self.at)
-                .is_some_and(|t| t.kind == Kind::Number)
-        {
-            let lower = self.number()?;
-            self.expect("..")?;
-            let upper = self.number()?;
-            self.node()?;
-            return Ok(TypeSyntax::Numeric {
-                lower,
-                upper,
-                span: self.span(start, self.end()),
-            });
-        }
-        if matches!(self.tokens.get(self.at).map(|t| &t.kind), Some(Kind::Word))
-            && (!keywords::reserved(self.text(), self.language) || self.is("INTERLIS"))
-        {
-            if !named {
-                return Err(Self::expected(
-                    "Domain definitions require a concrete type; direct aliases are invalid",
-                ));
-            }
-            let name = self.qualified_name()?;
-            self.node()?;
-            return Ok(TypeSyntax::Named(name));
-        }
-        if self.is(";")
-            || self.is("END")
-            || self.at == self.tokens.len()
-            || matches!(
-                self.tokens.get(self.at).map(|t| &t.kind),
-                Some(Kind::Invalid)
-            )
-            || (matches!(
-                self.tokens.get(self.at).map(|t| &t.kind),
-                Some(Kind::Symbol)
-            ) && !self.is("("))
-        {
-            return Err(Self::expected("Expected a type"));
-        }
-        if matches!(self.text(), "CLASS" | "STRUCTURE" | "ATTRIBUTE") {
-            let next = self.tokens.get(self.at + 1);
-            if next.is_some_and(|t| {
-                t.kind == Kind::Word
-                    && !keywords::reserved(&self.source()[t.range.clone()], self.language)
-            }) {
-                return Err(Self::expected(
-                    "Unexpected identifier after a value-type keyword; expected a separator",
-                ));
-            }
-            return Err(Self::unsupported(
-                "Class and attribute-path value types await the complete type syntax",
-            ));
-        }
-        if matches!(
-            self.text(),
-            "MODEL"
-                | "TOPIC"
-                | "ASSOCIATION"
-                | "DOMAIN"
-                | "PARAMETER"
-                | "IMPORTS"
-                | "CONTEXT"
-                | "METAOBJECT"
-        ) {
-            return Err(Self::expected(
-                "Expected a type before the next declaration",
-            ));
-        }
-        Err(Self::unsupported(
-            "Type construction is outside the supported subset",
-        ))
-    }
     fn recovery_start(&self, context: Context, domain_section: bool) -> bool {
         let word = matches!(self.tokens.get(self.at).map(|t| &t.kind), Some(Kind::Word));
         let next = self
@@ -798,80 +649,16 @@ impl Parser<'_> {
             return Ok(items);
         }
         if self.take("DOMAIN") {
-            let mut items = vec![];
-            while self
-                .tokens
-                .get(self.at)
-                .is_some_and(|t| t.kind == Kind::Word)
-                && !keywords::reserved(self.text(), self.language)
-            {
-                self.step()?;
-                let start = self.start();
-                let name = self.name(false)?;
-                let parsed = (|| {
-                    if self.is("(") {
-                        return Err(Self::unsupported(
-                            "Domain properties are outside the supported subset",
-                        ));
-                    }
-                    let (ty, mandatory) = if self.take("EXTENDS") {
-                        let base = self.qualified_name()?;
-                        self.expect("=")?;
-                        if self.is(";") || self.is("END") || self.at == self.tokens.len() {
-                            return Err(Self::expected(
-                                "Expected a type or MANDATORY after derived domain '='",
-                            ));
-                        }
-                        if !self.take("MANDATORY") {
-                            return Err(Self::unsupported(
-                                "Only EXTENDS Base = MANDATORY domain derivations are supported",
-                            ));
-                        }
-                        if self.is("END") || self.at == self.tokens.len() {
-                            return Err(Self::expected(
-                                "Expected ';' after mandatory domain derivation",
-                            ));
-                        }
-                        if !self.is(";") {
-                            return Err(Self::unsupported(
-                                "Refined inherited types are outside the supported subset",
-                            ));
-                        }
-                        (DomainType::MandatoryDerivation(base), true)
-                    } else {
-                        self.expect("=")?;
-                        let mandatory = self.take("MANDATORY");
-                        if mandatory && self.is(";") {
-                            return Err(Self::unsupported(
-                                "Mandatory-only domain syntax awaits its complete type representation",
-                            ));
-                        }
-                        (DomainType::Concrete(self.ty(false)?), mandatory)
-                    };
-                    self.expect(";")?;
-                    self.node()?;
-                    Ok(Declaration::Domain {
-                        name,
-                        ty,
-                        mandatory,
-                        span: self.span(start, self.end()),
-                    })
-                })();
-                match parsed {
-                    Ok(item) => items.push(item),
-                    Err(issue) if matches!(issue.kind, IssueKind::Unsupported) => {
-                        return Err(issue);
-                    }
-                    Err(issue) => {
-                        self.report(issue);
-                        self.recover(context, true);
-                    }
-                }
-                if self.diagnostics.limited {
-                    break;
-                }
+            return self.domain_section(context);
+        }
+        if self.take("UNIT") {
+            return self.unit_section(context);
+        }
+        if self.is("LINE") {
+            if context != Context::Model {
+                return Err(Self::expected("LINE FORM requires model scope"));
             }
-            return Ok(items);
+            return self.line_form_section();
         }
         if self.is("TOPIC") || self.is("VIEW") && self.next_is("TOPIC") {
             if context != Context::Model {
@@ -1011,7 +798,11 @@ mod tests {
         assert_eq!(original(&sources, &a.end_name.span), "A");
         assert_eq!(a.declarations.len(), 4);
         let Declaration::Domain {
-            ty: DomainType::Concrete(TypeSyntax::Text { max_length, .. }),
+            ty:
+                Some(TypeSyntax::Text(TextSyntax {
+                    max_length: Some(max_length),
+                    ..
+                })),
             ..
         } = &a.declarations[0]
         else {
@@ -1020,7 +811,11 @@ mod tests {
         assert_eq!(max_length.value, "40");
         assert_eq!(original(&sources, &max_length.span), "40");
         let Declaration::Domain {
-            ty: DomainType::Concrete(TypeSyntax::Numeric { lower, upper, .. }),
+            ty:
+                Some(TypeSyntax::Numeric(NumericSyntax {
+                    bounds: Some(NumericBounds { lower, upper }),
+                    ..
+                })),
             ..
         } = &a.declarations[1]
         else {
@@ -1030,7 +825,8 @@ mod tests {
         assert_eq!(original(&sources, &lower.span), "-1");
         assert_eq!(upper.value, "100");
         let Declaration::Domain {
-            ty: DomainType::MandatoryDerivation(base),
+            ty: None,
+            base: Some(base),
             mandatory,
             ..
         } = &a.declarations[2]
@@ -1160,7 +956,11 @@ mod tests {
         let (_, doc, d) = parse_text(&text, limits);
         assert!(d.entries.is_empty());
         let Declaration::Domain {
-            ty: DomainType::Concrete(TypeSyntax::Numeric { lower, upper, .. }),
+            ty:
+                Some(TypeSyntax::Numeric(NumericSyntax {
+                    bounds: Some(NumericBounds { lower, upper }),
+                    ..
+                })),
             ..
         } = &doc.unwrap().models[0].declarations[0]
         else {
@@ -1183,11 +983,8 @@ mod tests {
         assert!(d.rejected);
         assert!(!d.incomplete);
         for body in [
-            "DOMAIN Alias EXTENDS Base = TEXT*2;",
             "TOPIC T = VIEW V PROJECTION OF B; = ALL OF B; END V; END T;",
             "CLASS B = MANDATORY CONSTRAINT x == 1; END B;",
-            "DOMAIN E=(red,green);",
-            "UNIT metre=1[INTERLIS.m];",
         ] {
             let (_, _, d) = parse_text(&format!("{HEADER}{body} END A."), Limits::default());
             assert!(d.incomplete, "{body}");

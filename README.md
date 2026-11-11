@@ -26,6 +26,17 @@ allowed contexts. These constructs pass through the same bounded frontend;
 the analyzer explicitly returns `incomplete` before binding their unimplemented
 semantics. An optional ATTRIBUTE section marker is semantically inert.
 
+Type syntax covers text families, alignments, 2.4 temporal values, nested
+and dotted enumerations, numeric units/directions/reference systems, formatted
+parts and bounds, coordinates/rotation/CRS, geometry variants and line options,
+OID carriers, blackboxes, class and attribute-path values, references and
+version-specific BAG/LIST elements. Units retain ordered factors/operators,
+symbolic PI/LNBASE and descriptive FUNCTION explanations; no conversion runs.
+Line-form declarations and domain properties/inheritance/mandatory-only forms
+remain structured. Model binding, type compatibility, coordinate interpretation,
+unit evaluation and geometry topology are separate. Expressions, constraints,
+views and graphics still have explicit incomplete paths in this staged frontend.
+
 General inheritance, structure-valued attributes, units, directions/reference
 systems, views, constraints and other omitted constructs produce `incomplete`.
 Broader namespace/visibility and declaration-order rules, issuer URI validation
@@ -92,7 +103,7 @@ work units. Limits must be positive. Hard caps respectively: 8 MiB, 32 MiB,
 1,000,000, 256, 2,000,000, 100,000,000, 1,000, 16,384, 100,000, 10,000,000. Numeric digits include exponent
 digits. Numeric/exponent budgets are checked before bigint allocation/alignment.
 Semantic work counts syntax-support checks, declaration/binding steps, generated name/reference bytes,
-numeric digits and decimal alignment distance. Depth counts active blocks,
+numeric digits and decimal alignment distance. Depth counts active blocks and recursive types/enumerations,
 including the outer comment or first topic/class/structure; the model header is
 not a nested container. Limits are operating constraints, not language restrictions.
 Frontend work counts original lexer bytes, grammar entries, loop/recovery steps,

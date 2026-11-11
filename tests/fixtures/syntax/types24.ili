@@ -1,0 +1,27 @@
+INTERLIS 2.4;
+TYPE MODEL TypeExamples AT "https://example.invalid" VERSION "1" =
+  DOMAIN
+    Generic (GENERIC) = MULTICOORD NUMERIC,NUMERIC;
+    Concrete = MULTICOORD 0.00..10.00,0.00..10.00 REFSYS "EPSG:2056";
+    Route = DIRECTED MULTIPOLYLINE WITH (STRAIGHTS,Curves.Spline)
+      VERTEX Concrete WITHOUT OVERLAPS;
+    Regions = MULTISURFACE;
+    Partition = MULTIAREA;
+    Day = DATE;
+    Time = TIMEOFDAY;
+    Timestamp = DATETIME;
+    ObjectId = OID ANY;
+    Orientation = HALIGNMENT;
+    Bytes = BLACKBOX BINARY;
+    AttributeValue = ATTRIBUTE OF THIS->owner[Association]->parts[LAST]
+      RESTRICTION (TEXT*7; LIST {1..*} OF REFERENCE TO Unknown.C);
+  CONTEXT selected = Generic = Concrete OR Other.Coordinate; empty =
+  TOPIC Data =
+    DEFERRED GENERICS Generic;
+    CLASS Item =
+      names: LIST {0..100} OF TEXT*20;
+      required: MANDATORY;
+      objects: BAG OF REFERENCE TO (EXTERNAL) ANYCLASS;
+    END Item;
+  END Data;
+END TypeExamples.

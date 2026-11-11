@@ -1,0 +1,29 @@
+INTERLIS 2.3;
+CONTRACTED MODEL TypeExamples AT "https://example.invalid" VERSION "1" =
+  !! Syntax examples retain unresolved references; no binding is requested here.
+  STRUCTURE Segment (ABSTRACT) EXTENDS INTERLIS.LineSegment = END Segment;
+  STRUCTURE LineData = label: TEXT*20; END LineData;
+  LINE FORM curve: Segment;
+  UNIT Length (ABSTRACT); Metre [m] EXTENDS Length;
+    Small [cm] = 1/100[m]; Described = FUNCTION // source / target // [m];
+  DOMAIN
+    Label = TEXT*40;
+    Multiline = MTEXT;
+    Symbol = (red (dark,light),green:FINAL) ORDERED;
+    Refined EXTENDS Symbol = (red.dark,blue (FINAL));
+    Nodes = ALL OF Symbol;
+    Number = -0.1000E3..0.1001E3 CIRCULAR [m] {Systems.Zero[1]};
+    Position = COORD 0.00..10.00 [m],0.00..10.00 [m],ROTATION 2->1;
+    Boundary = SURFACE WITH (STRAIGHTS,ARCS) VERTEX Position
+      WITHOUT OVERLAPS >0.01 LINE ATTRIBUTES TypeExamples.LineData;
+    Identifier = OID TEXT*36;
+    Payload = BLACKBOX XML;
+    ClassValue = CLASS RESTRICTION (Unknown.C; INTERLIS.SIGN);
+    AttributeValue = ATTRIBUTE OF @argument RESTRICTION (TEXT*4; MANDATORY);
+    Formatted = FORMAT BASED ON Unknown.Calendar
+      (INHERITANCE "prefix😀" Year/4 "-" Month/Formats.Month);
+  STRUCTURE Holder =
+    members: BAG {0..*} OF ANYSTRUCTURE RESTRICTION (Unknown.S; Other.S);
+    target: REFERENCE TO (EXTERNAL) ANYCLASS RESTRICTION (Unknown.C);
+  END Holder;
+END TypeExamples.

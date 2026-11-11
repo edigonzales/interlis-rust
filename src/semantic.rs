@@ -4,7 +4,7 @@ use crate::{
     limits::WorkBudget,
     model::{self, DeclarationKind as Kind, ModelGraph, ModelInfo, TypeInfo, TypeReference},
     number::{DecimalLiteral, NumberError},
-    syntax::{self, Declaration as SyntaxDecl, DomainType, Name, QualifiedName, TypeSyntax},
+    syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
 use std::{
     cmp::Ordering,
@@ -57,6 +57,33 @@ struct Analyzer<'a, 'd> {
     ambiguous_models: bool,
     states: Vec<State>,
     types: Vec<TypeInfo>,
+}
+fn supported_type(ty: &TypeSyntax) -> bool {
+    match ty {
+        TypeSyntax::Text(t) => t.kind == syntax::TextKind::Text && t.max_length.is_some(),
+        TypeSyntax::Boolean { .. } | TypeSyntax::Named(_) => true,
+        TypeSyntax::Numeric(n) => {
+            n.bounds.is_some()
+                && n.circular.is_none()
+                && n.unit.is_none()
+                && n.direction.is_none()
+                && n.reference_system.is_none()
+        }
+        TypeSyntax::Alignment { .. }
+        | TypeSyntax::Temporal { .. }
+        | TypeSyntax::Enumeration { .. }
+        | TypeSyntax::EnumTree { .. }
+        | TypeSyntax::Formatted { .. }
+        | TypeSyntax::Coordinate(_)
+        | TypeSyntax::Geometry(_)
+        | TypeSyntax::Oid { .. }
+        | TypeSyntax::Blackbox { .. }
+        | TypeSyntax::ClassValue { .. }
+        | TypeSyntax::AttributePathValue { .. }
+        | TypeSyntax::Reference { .. }
+        | TypeSyntax::Collection { .. }
+        | TypeSyntax::RestrictedStructure { .. } => false,
+    }
 }
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
@@ -129,9 +156,42 @@ fn ensure_supported_semantics(
                     type_use,
                     span,
                     ..
-                } => (!properties.is_empty() || subdivision.is_some() || type_use.ty.is_none())
-                    .then_some(span),
-                SyntaxDecl::Domain { .. } => None,
+                } => {
+                    if !properties.is_empty() || subdivision.is_some() || type_use.ty.is_none() {
+                        Some(span)
+                    } else {
+                        type_use
+                            .ty
+                            .as_ref()
+                            .filter(|ty| !supported_type(ty))
+                            .map(TypeSyntax::span)
+                    }
+                }
+                SyntaxDecl::Domain {
+                    properties,
+                    base,
+                    ty,
+                    mandatory,
+                    span,
+                    ..
+                } => {
+                    let supported = match ty {
+                        Some(t) => base.is_none() && supported_type(t),
+                        None => *mandatory && base.is_some(),
+                    };
+                    if !properties.is_empty()
+                        || base.is_some() && ty.is_some()
+                        || ty.is_none() && !supported
+                    {
+                        Some(span)
+                    } else if !supported {
+                        Some(ty.as_ref().expect("type present").span())
+                    } else {
+                        None
+                    }
+                }
+                SyntaxDecl::Unit(unit) => Some(&unit.span),
+                SyntaxDecl::LineForm(form) => Some(&form.span),
                 SyntaxDecl::Association(association) => Some(&association.span),
                 SyntaxDecl::Context(context) => Some(&context.span),
                 SyntaxDecl::RuntimeParameter { span, .. } => Some(span),
@@ -419,7 +479,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     name,
                     ty,
                     mandatory,
+                    base,
                     span,
+                    ..
                 } => {
                     if let Some(id) = self.add(
                         Kind::Domain,
@@ -429,11 +491,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         Some(*mandatory),
                     ) {
-                        match ty {
-                            DomainType::Concrete(ty) => self.symbols[id].syntax = Some(ty),
-                            DomainType::MandatoryDerivation(base) => {
-                                self.symbols[id].base = Some(base)
-                            }
+                        self.symbols[id].syntax = ty.as_ref();
+                        if ty.is_none() {
+                            self.symbols[id].base = base.as_ref();
                         }
                     }
                 }
@@ -459,7 +519,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         );
                     }
                 }
-                SyntaxDecl::Association(_)
+                SyntaxDecl::Unit(_)
+                | SyntaxDecl::LineForm(_)
+                | SyntaxDecl::Association(_)
                 | SyntaxDecl::Context(_)
                 | SyntaxDecl::RuntimeParameter { .. } => {
                     unreachable!("unsupported semantics are checked before indexing")
@@ -572,7 +634,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     }
     fn concrete_type(&mut self, owner: usize, syntax: &TypeSyntax) -> Option<Effective> {
         let ty = match syntax {
-            TypeSyntax::Text { max_length, span } => {
+            TypeSyntax::Text(text) => {
+                let span = &text.span;
+                let max_length = text
+                    .max_length
+                    .as_ref()
+                    .expect("bounded text checked before indexing");
                 if !self.step(1, span) {
                     return None;
                 }
@@ -595,7 +662,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 TypeInfo::Boolean
             }
-            TypeSyntax::Numeric { lower, upper, span } => {
+            TypeSyntax::Numeric(numeric) => {
+                let span = &numeric.span;
+                let syntax::NumericBounds { lower, upper } = numeric
+                    .bounds
+                    .as_ref()
+                    .expect("concrete bounds checked before indexing");
                 if !self.step(1, span) {
                     return None;
                 }
@@ -670,6 +742,22 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         None
                     }
                 };
+            }
+            TypeSyntax::Alignment { .. }
+            | TypeSyntax::Temporal { .. }
+            | TypeSyntax::Enumeration { .. }
+            | TypeSyntax::EnumTree { .. }
+            | TypeSyntax::Formatted { .. }
+            | TypeSyntax::Coordinate(_)
+            | TypeSyntax::Geometry(_)
+            | TypeSyntax::Oid { .. }
+            | TypeSyntax::Blackbox { .. }
+            | TypeSyntax::ClassValue { .. }
+            | TypeSyntax::AttributePathValue { .. }
+            | TypeSyntax::Reference { .. }
+            | TypeSyntax::Collection { .. }
+            | TypeSyntax::RestrictedStructure { .. } => {
+                unreachable!("unsupported type semantics checked before indexing")
             }
         };
         let id = self.types.len();

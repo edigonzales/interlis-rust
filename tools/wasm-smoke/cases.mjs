@@ -14,6 +14,10 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [m] {M.T.B.System[2]}; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES Schema.Attributes; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON S ("😀" Year/4 "-" Month/Formats.Month); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (Unknown.C); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
@@ -70,7 +74,9 @@ const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1]
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};
+const deepEnumeration=pair('2.4');deepEnumeration.sources=[{name:'memory:///deep-type.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN E='+('(a'.repeat(24))+'leaf'+(')'.repeat(24))+'; END M.'}];deepEnumeration.limits={max_nesting:8};
 export const semanticCases = [
+  [JSON.stringify(deepEnumeration),'limit_exceeded','ILI-LIMIT'],
   [JSON.stringify(valid23),'checked_subset','2.3'],
   [JSON.stringify(valid24),'checked_subset','2.4'],
   [JSON.stringify(missing),'rejected','ILI-IMPORT-NOT-FOUND'],

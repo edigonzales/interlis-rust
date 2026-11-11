@@ -15,6 +15,7 @@ pub(crate) enum Property {
     Final,
     Transient,
     Oid,
+    Generic,
     Hiding,
     Ordered,
     External,
@@ -132,7 +133,7 @@ pub(crate) struct AssociationDecl {
 #[derive(Debug)]
 #[allow(dead_code)] // Preserve complete syntax while its semantics remain unimplemented.
 pub(crate) enum ParameterType {
-    Attribute(TypeUseSyntax),
+    Attribute(Box<TypeUseSyntax>),
     Metaobject(Option<QualifiedName>),
 }
 #[derive(Debug)]
@@ -177,11 +178,11 @@ impl Parser<'_> {
             .is_some_and(|t| t.kind == Kind::Word)
             && !keywords::reserved(self.text(), self.language)
     }
-    fn marker(&mut self, text: &str) -> Option<Span> {
+    pub(super) fn marker(&mut self, text: &str) -> Option<Span> {
         let start = self.start();
         self.take(text).then(|| self.span(start, self.end()))
     }
-    fn properties(&mut self, allowed: &[Property]) -> Parsed<Vec<Located<Property>>> {
+    pub(super) fn properties(&mut self, allowed: &[Property]) -> Parsed<Vec<Located<Property>>> {
         self.step()?;
         let mut out = vec![];
         if !self.take("(") {
@@ -195,6 +196,7 @@ impl Parser<'_> {
                 "FINAL" => Property::Final,
                 "TRANSIENT" => Property::Transient,
                 "OID" => Property::Oid,
+                "GENERIC" => Property::Generic,
                 "HIDING" => Property::Hiding,
                 "ORDERED" => Property::Ordered,
                 "EXTERNAL" => Property::External,
@@ -221,7 +223,7 @@ impl Parser<'_> {
         self.expect(")")?;
         Ok(out)
     }
-    fn explanation(&mut self) -> Parsed<Option<Located<String>>> {
+    pub(super) fn explanation(&mut self) -> Parsed<Option<Located<String>>> {
         self.step()?;
         match self.tokens.get(self.at).map(|t| &t.kind) {
             Some(Kind::Invalid) => Err(Self::lexical()),
@@ -352,10 +354,10 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    fn reference(&mut self, maximum: usize) -> Parsed<QualifiedName> {
+    pub(super) fn reference(&mut self, maximum: usize) -> Parsed<QualifiedName> {
         self.qualified_name_in(ReferenceContext::Ordinary, maximum)
     }
-    fn class_reference(&mut self) -> Parsed<QualifiedName> {
+    pub(super) fn class_reference(&mut self) -> Parsed<QualifiedName> {
         self.qualified_name_in(ReferenceContext::Class, 3)
     }
     fn optional_base(&mut self) -> Parsed<Option<QualifiedName>> {
@@ -458,7 +460,7 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    fn enter(&mut self) -> Parsed<()> {
+    pub(super) fn enter(&mut self) -> Parsed<()> {
         self.step()?;
         if self.depth >= self.limits.max_nesting {
             self.diagnostics
@@ -591,22 +593,6 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    pub(super) fn type_use(&mut self) -> Parsed<TypeUseSyntax> {
-        self.step()?;
-        let start = self.start();
-        let mandatory = self.take("MANDATORY");
-        let ty = if mandatory && matches!(self.text(), ";" | ":=" | ")") {
-            None
-        } else {
-            Some(self.ty(true)?)
-        };
-        self.node()?;
-        Ok(TypeUseSyntax {
-            mandatory,
-            ty,
-            span: self.span(start, self.end()),
-        })
-    }
     fn parameter(&mut self) -> Parsed<ParameterDecl> {
         self.step()?;
         let start = self.start();
@@ -620,7 +606,7 @@ impl Parser<'_> {
                 None
             })
         } else {
-            ParameterType::Attribute(self.type_use()?)
+            ParameterType::Attribute(Box::new(self.type_use()?))
         };
         self.expect(";")?;
         self.node()?;
@@ -631,7 +617,7 @@ impl Parser<'_> {
             span: self.span(start, self.end()),
         })
     }
-    fn unsigned_integer(&mut self) -> Parsed<Located<String>> {
+    pub(super) fn unsigned_integer(&mut self) -> Parsed<Located<String>> {
         let number = self.number()?;
         if !number.value.bytes().all(|b| b.is_ascii_digit()) {
             return Err(Issue {
@@ -642,7 +628,7 @@ impl Parser<'_> {
         }
         Ok(number)
     }
-    fn cardinality(&mut self) -> Parsed<Cardinality> {
+    pub(super) fn cardinality(&mut self) -> Parsed<Cardinality> {
         self.step()?;
         let start = self.start();
         self.expect("{")?;
@@ -681,7 +667,7 @@ impl Parser<'_> {
         }
         Ok(value)
     }
-    fn restricted_target(&mut self) -> Parsed<RestrictedTarget> {
+    pub(super) fn restricted_target(&mut self) -> Parsed<RestrictedTarget> {
         self.step()?;
         let start = self.start();
         let target = if let Some(s) = self.marker("ANYCLASS") {
@@ -1472,11 +1458,7 @@ mod review_regressions {
             ));
             assert!(matches!(
                 parameters[0].ty,
-                ParameterType::Attribute(TypeUseSyntax {
-                    mandatory: true,
-                    ty: None,
-                    ..
-                })
+                ParameterType::Attribute(ref u) if u.mandatory && u.ty.is_none()
             ));
             let Declaration::Topic { declarations, .. } = &items[2] else {
                 panic!()
@@ -1674,7 +1656,7 @@ mod reference_and_type_start_regressions {
         .unwrap()
     }
     #[test]
-    fn genuine_value_type_starts_remain_incomplete_until_their_type_implementation() {
+    fn value_types_remain_outside_the_partial_semantics() {
         for version in ["2.3", "2.4"] {
             for ty in [
                 "CLASS",
