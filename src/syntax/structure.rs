@@ -353,26 +353,10 @@ impl Parser<'_> {
         })
     }
     fn reference(&mut self, maximum: usize) -> Parsed<QualifiedName> {
-        let name = self.qualified_name()?;
-        if name.segments.len() > maximum {
-            return Err(Issue {
-                kind: IssueKind::Syntax,
-                primary: Some(name.span),
-                message: "Too many name segments in this reference",
-            });
-        }
-        Ok(name)
+        self.qualified_name_in(ReferenceContext::Ordinary, maximum)
     }
     fn class_reference(&mut self) -> Parsed<QualifiedName> {
-        let name = self.qualified_name_in(true)?;
-        if name.segments.len() > 3 {
-            return Err(Issue {
-                kind: IssueKind::Syntax,
-                primary: Some(name.span),
-                message: "Too many name segments in class reference",
-            });
-        }
-        Ok(name)
+        self.qualified_name_in(ReferenceContext::Class, 3)
     }
     fn optional_base(&mut self) -> Parsed<Option<QualifiedName>> {
         if self.take("EXTENDS") {
@@ -391,7 +375,7 @@ impl Parser<'_> {
             Ok(OidRule::None(self.span(start, self.end())))
         } else if self.take("OID") {
             self.expect("AS")?;
-            let name = self.reference(3)?;
+            let name = self.qualified_name()?;
             self.expect(";")?;
             self.node()?;
             Ok(OidRule::Domain(name))
@@ -415,7 +399,7 @@ impl Parser<'_> {
         let basket_oid = if self.take("BASKET") {
             self.expect("OID")?;
             self.expect("AS")?;
-            let n = self.reference(3)?;
+            let n = self.qualified_name()?;
             self.expect(";")?;
             Some(n)
         } else {
@@ -423,7 +407,7 @@ impl Parser<'_> {
         };
         let oid = if self.take("OID") {
             self.expect("AS")?;
-            let n = self.reference(3)?;
+            let n = self.qualified_name()?;
             self.expect(";")?;
             Some(n)
         } else {
@@ -444,9 +428,9 @@ impl Parser<'_> {
                 return Err(Self::expected("DEFERRED GENERICS requires INTERLIS 2.4"));
             }
             self.expect("GENERICS")?;
-            deferred_generics.push(self.reference(3)?);
+            deferred_generics.push(self.qualified_name()?);
             while self.take(",") {
-                deferred_generics.push(self.reference(3)?);
+                deferred_generics.push(self.qualified_name()?);
             }
             self.expect(";")?;
         }
@@ -955,11 +939,11 @@ impl Parser<'_> {
                     break;
                 }
                 let start = self.start();
-                let generic = self.reference(3)?;
+                let generic = self.qualified_name()?;
                 self.expect("=")?;
-                let mut concrete = vec![self.reference(3)?];
+                let mut concrete = vec![self.qualified_name()?];
                 while self.take("OR") {
-                    concrete.push(self.reference(3)?);
+                    concrete.push(self.qualified_name()?);
                 }
                 self.expect(";")?;
                 self.node()?;
@@ -1670,6 +1654,134 @@ mod review_regressions {
                 report.diagnostics()
             );
             assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod reference_and_type_start_regressions {
+    use super::tests::parse;
+    use super::*;
+    use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
+    fn run(body: &str, version: &str) -> crate::AnalysisReport {
+        analyze(CompileRequest {
+            sources: vec![SourceInput {
+                name: "x".into(),
+                text: format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M."),
+            }],
+            limits: Limits::default(),
+        })
+        .unwrap()
+    }
+    #[test]
+    fn genuine_value_type_starts_remain_incomplete_until_their_type_implementation() {
+        for version in ["2.3", "2.4"] {
+            for ty in [
+                "CLASS",
+                "STRUCTURE",
+                "ATTRIBUTE",
+                "CLASS RESTRICTION (A.B)",
+                "STRUCTURE RESTRICTION (A.B)",
+                "ATTRIBUTE OF a->b",
+            ] {
+                for body in [
+                    format!("DOMAIN D={ty};"),
+                    format!("STRUCTURE S=x:{ty}; END S;"),
+                    format!("STRUCTURE S=PARAMETER p:{ty}; END S;"),
+                    format!("PARAMETER p:{ty};"),
+                ] {
+                    let report = run(&body, version);
+                    assert_eq!(
+                        report.status(),
+                        AnalysisStatus::Incomplete,
+                        "{version}: {body}: {:?}",
+                        report.diagnostics()
+                    );
+                    assert!(report.graph().is_none());
+                    assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                }
+            }
+            for body in [
+                "DOMAIN D=MANDATORY CLASS C=END C;",
+                "STRUCTURE S=x:ATTRIBUTE y:BOOLEAN; END S;",
+                "DOMAIN D=STRUCTURE S=END S;",
+            ] {
+                let report = run(body, version);
+                assert_eq!(report.status(), AnalysisStatus::Rejected, "{body}");
+                assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                assert!(report.graph().is_none());
+            }
+        }
+    }
+    #[test]
+    fn reference_contexts_do_not_reuse_import_or_domain_keyword_exceptions() {
+        for version in ["2.3", "2.4"] {
+            for reference in ["INTERLIS", "INTERLIS.BOOLEAN", "INTERLIS.NAME"] {
+                for body in [
+                    format!("CLASS C EXTENDS {reference}=END C;"),
+                    format!("STRUCTURE S=PARAMETER p:METAOBJECT OF {reference}; END S;"),
+                    format!("TOPIC T=ASSOCIATION DERIVED FROM {reference}=a -- C; END; END T;"),
+                    format!("TOPIC T=ASSOCIATION =a -- {reference}; END; END T;"),
+                    format!("TOPIC T=ASSOCIATION =a -- C RESTRICTION ({reference}); END; END T;"),
+                    format!("TOPIC T EXTENDS {reference}=END T;"),
+                    format!("STRUCTURE S EXTENDS {reference}=END S;"),
+                ] {
+                    let report = run(&body, version);
+                    assert_eq!(
+                        report.status(),
+                        AnalysisStatus::Rejected,
+                        "{version}: {body}: {:?}",
+                        report.diagnostics()
+                    );
+                    assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+                    assert!(report.graph().is_none());
+                }
+            }
+            // INTERLIS by itself is an import name, not a reference to a member.
+            let report = run(
+                "IMPORTS INTERLIS; STRUCTURE S=x:INTERLIS.BOOLEAN; END S;",
+                version,
+            );
+            assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+            assert!(report.diagnostics().is_empty());
+            for body in [
+                "STRUCTURE S=x:INTERLIS; END S;",
+                "STRUCTURE S=x:A.B.C.D; END S;",
+            ] {
+                let report = run(body, version);
+                assert_eq!(report.status(), AnalysisStatus::Rejected);
+                assert!(report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
+            }
+            let text = format!(
+                "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=a:INTERLIS.NAME; b:INTERLIS.URI; c:INTERLIS.HALIGNMENT; d:INTERLIS.VALIGNMENT; END S; CLASS C EXTENDS INTERLIS.Unknown=END C; END M."
+            );
+            let (_, doc) = parse(&text);
+            let Declaration::Container { attributes, .. } = &doc.models[0].declarations[0] else {
+                panic!()
+            };
+            assert_eq!(attributes.len(), 4);
+            for (item, expected) in
+                attributes
+                    .iter()
+                    .zip(["NAME", "URI", "HALIGNMENT", "VALIGNMENT"])
+            {
+                let Declaration::Attribute {
+                    type_use:
+                        TypeUseSyntax {
+                            ty: Some(TypeSyntax::Named(q)),
+                            ..
+                        },
+                    ..
+                } = item
+                else {
+                    panic!()
+                };
+                assert_eq!(q.segments[1].value, expected);
+            }
+            assert_eq!(
+                run("CLASS C EXTENDS INTERLIS.Unknown=END C;", version).status(),
+                AnalysisStatus::Incomplete
+            );
         }
     }
 }

@@ -199,6 +199,12 @@ pub(crate) struct TypeUseSyntax {
     pub span: Span,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum ReferenceContext {
+    Ordinary,
+    Domain,
+    Class,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Context {
     Model,
     Topic,
@@ -404,25 +410,35 @@ impl Parser<'_> {
         Ok(result)
     }
     fn qualified_name(&mut self) -> Parsed<QualifiedName> {
-        self.qualified_name_in(false)
+        self.qualified_name_in(ReferenceContext::Domain, 3)
     }
-    fn qualified_name_in(&mut self, classes: bool) -> Parsed<QualifiedName> {
+    fn qualified_name_in(
+        &mut self,
+        context: ReferenceContext,
+        maximum: usize,
+    ) -> Parsed<QualifiedName> {
         self.step()?;
         let start = self.start();
-        let predefined = |text: &str| matches!(text, "SIGN" | "METAOBJECT" | "REFSYSTEM");
-        let bare_class = classes && predefined(self.text());
+        let class = |text: &str| matches!(text, "SIGN" | "METAOBJECT" | "REFSYSTEM");
+        let domain = |text: &str| {
+            matches!(
+                text,
+                "BOOLEAN" | "NAME" | "URI" | "HALIGNMENT" | "VALIGNMENT"
+            )
+        };
+        let bare_class = context == ReferenceContext::Class && class(self.text());
         let mut segments = if bare_class {
-            self.node()?;
-            let name = Located {
-                value: self.text().into(),
-                span: self.current_span(),
-            };
-            self.step()?;
-            self.at += 1;
-            vec![name]
+            vec![self.predefined_name()?]
         } else {
             vec![self.name(true)?]
         };
+        if segments[0].value == "INTERLIS" && !self.is(".") {
+            return Err(Issue {
+                kind: IssueKind::Syntax,
+                primary: Some(segments[0].span.clone()),
+                message: "INTERLIS must qualify a member in a reference",
+            });
+        }
         if bare_class && self.is(".") {
             return Err(Self::expected(
                 "A predefined class cannot qualify another name",
@@ -430,34 +446,30 @@ impl Parser<'_> {
         }
         while self.take(".") {
             self.step()?;
-            // BOOLEAN is a supported predefined domain in INTERLIS; other predefined
-            // names that are identifiers are preserved for semantic classification.
+            if segments.len() >= maximum {
+                return Err(Self::expected("Too many name segments in this reference"));
+            }
             if segments.len() == 1
                 && segments[0].value == "INTERLIS"
-                && (self.is("BOOLEAN") || classes && predefined(self.text()))
+                && keywords::reserved(self.text(), self.language)
             {
-                self.node()?;
-                let name = Located {
-                    value: self.text().into(),
-                    span: self.current_span(),
+                let allowed = match context {
+                    ReferenceContext::Ordinary => false,
+                    ReferenceContext::Domain => domain(self.text()),
+                    ReferenceContext::Class => class(self.text()),
                 };
-                self.step()?;
-                self.at += 1;
-                segments.push(name);
+                if !allowed {
+                    return Err(Self::expected(
+                        "Reserved predefined member is not permitted in this reference context",
+                    ));
+                }
+                segments.push(self.predefined_name()?);
                 if self.is(".") {
                     return Err(Self::expected(
                         "A predefined member cannot qualify another name",
                     ));
                 }
             } else {
-                if segments.len() == 1
-                    && segments[0].value == "INTERLIS"
-                    && keywords::reserved(self.text(), self.language)
-                {
-                    return Err(Self::unsupported(
-                        "Predefined type is outside the supported subset",
-                    ));
-                }
                 segments.push(self.name(false)?);
             }
         }
@@ -471,6 +483,16 @@ impl Parser<'_> {
             segments,
             span: self.span(start, self.end()),
         })
+    }
+    fn predefined_name(&mut self) -> Parsed<Name> {
+        self.node()?;
+        let name = Located {
+            value: self.text().into(),
+            span: self.current_span(),
+        };
+        self.step()?;
+        self.at += 1;
+        Ok(name)
     }
     fn number_range(&mut self) -> Parsed<std::ops::Range<usize>> {
         self.step()?;
@@ -600,15 +622,26 @@ impl Parser<'_> {
         {
             return Err(Self::expected("Expected a type"));
         }
+        if matches!(self.text(), "CLASS" | "STRUCTURE" | "ATTRIBUTE") {
+            let next = self.tokens.get(self.at + 1);
+            if next.is_some_and(|t| {
+                t.kind == Kind::Word
+                    && !keywords::reserved(&self.source()[t.range.clone()], self.language)
+            }) {
+                return Err(Self::expected(
+                    "Unexpected identifier after a value-type keyword; expected a separator",
+                ));
+            }
+            return Err(Self::unsupported(
+                "Class and attribute-path value types await the complete type syntax",
+            ));
+        }
         if matches!(
             self.text(),
             "MODEL"
                 | "TOPIC"
-                | "CLASS"
-                | "STRUCTURE"
                 | "ASSOCIATION"
                 | "DOMAIN"
-                | "ATTRIBUTE"
                 | "PARAMETER"
                 | "IMPORTS"
                 | "CONTEXT"

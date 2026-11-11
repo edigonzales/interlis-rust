@@ -14,6 +14,8 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (Unknown.C); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CONTEXT first=G=X; empty= END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
