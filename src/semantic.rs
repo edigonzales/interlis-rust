@@ -2,6 +2,7 @@ mod domains;
 mod enumeration;
 mod names;
 mod references;
+mod units;
 
 use self::names::{BoundName, LookupError};
 use crate::{
@@ -269,7 +270,7 @@ fn ensure_supported_semantics(
                         None
                     }
                 }
-                SyntaxDecl::Unit(unit) => Some(&unit.span),
+                SyntaxDecl::Unit(_) => None,
                 SyntaxDecl::LineForm(form) => Some(&form.span),
                 SyntaxDecl::Function(function) => Some(&function.span),
                 SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
@@ -299,7 +300,7 @@ fn ensure_supported_semantics(
                 && model
                     .declarations
                     .iter()
-                    .all(|d| matches!(d, SyntaxDecl::Domain { .. }));
+                    .all(|d| matches!(d, SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_)));
         let header = !kind_supported
             || model.no_incremental_transfer.is_some()
             || model.explanation.is_some()
@@ -451,6 +452,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 effective_mandatory: None,
                 reference: None,
                 base_reference: None,
+                unit: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1588,6 +1590,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         {
             return None;
         }
+        self.bind_units()?;
         for symbol in &self.symbols {
             if symbol.declaration.kind == Kind::Class
                 && symbol

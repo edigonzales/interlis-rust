@@ -342,6 +342,8 @@ impl Serialize for DeclarationsOutput<'_> {
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
             effective_type: Option<TypeOutput<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            unit: Option<&'a crate::UnitInfo>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -366,14 +368,14 @@ impl Serialize for DeclarationsOutput<'_> {
                     .type_id
                     .and_then(|id| self.graph.types.get(id))
                     .map(TypeOutput),
+                unit: declaration.unit(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }
         seq.end()
     }
 }
-struct TypeOutput<'a>(&'a TypeInfo);
-impl Serialize for TypeOutput<'_> {
+impl Serialize for DecimalInfo {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -385,31 +387,33 @@ impl Serialize for TypeOutput<'_> {
             uses_exponent: bool,
             scale: i32,
         }
-        impl<'a> From<&'a DecimalInfo> for Decimal<'a> {
-            fn from(d: &'a DecimalInfo) -> Self {
-                Self {
-                    original: d.original(),
-                    coefficient: d.coefficient(),
-                    fractional_digits: d.fractional_digits(),
-                    written_exponent: d.written_exponent(),
-                    uses_exponent: d.uses_exponent(),
-                    scale: d.scale(),
-                }
-            }
+        Decimal {
+            original: self.original(),
+            coefficient: self.coefficient(),
+            fractional_digits: self.fractional_digits(),
+            written_exponent: self.written_exponent(),
+            uses_exponent: self.uses_exponent(),
+            scale: self.scale(),
         }
+        .serialize(serializer)
+    }
+}
+struct TypeOutput<'a>(&'a TypeInfo);
+impl Serialize for TypeOutput<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Range<'a> {
-            lower: Option<Decimal<'a>>,
-            upper: Option<Decimal<'a>>,
+            lower: Option<&'a DecimalInfo>,
+            upper: Option<&'a DecimalInfo>,
             circular: bool,
             direction: Option<crate::NumericDirection>,
         }
         impl<'a> From<&'a crate::NumericRange> for Range<'a> {
             fn from(range: &'a crate::NumericRange) -> Self {
                 Self {
-                    lower: range.bounds.as_ref().map(|bounds| (&bounds.lower).into()),
-                    upper: range.bounds.as_ref().map(|bounds| (&bounds.upper).into()),
+                    lower: range.bounds.as_ref().map(|bounds| &bounds.lower),
+                    upper: range.bounds.as_ref().map(|bounds| &bounds.upper),
                     circular: range.circular,
                     direction: range.direction,
                 }

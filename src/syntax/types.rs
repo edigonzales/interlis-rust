@@ -1,5 +1,6 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
+use crate::UnitOperator;
 pub(crate) use crate::model::NumericDirection as Direction;
 pub(crate) use crate::model::{
     AlignmentKind, BlackboxKind, CoordinateKind, EnumerationOrder, TemporalKind,
@@ -317,11 +318,6 @@ pub(crate) enum DecimalConstant {
     Number(Located<String>),
     Pi(Span),
     LnBase(Span),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnitOperator {
-    Multiply,
-    Divide,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2159,7 +2155,6 @@ mod tests {
         assert!(!result.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         for body in [
             "DOMAIN D=MANDATORY;",
-            "UNIT metre[m];",
             "STRUCTURE Segment=END Segment; LINE FORM curve:Segment;",
         ] {
             clean("2.4", body);

@@ -19,7 +19,8 @@ pub use model::{
     AlignmentKind, AxisRotation, BlackboxKind, CoordinateKind, CoordinateType, DecimalInfo,
     Declaration, DeclarationKind, Enumeration, EnumerationElement, EnumerationOrder,
     FixedTextFormat, LanguageVersion, ModelGraph, ModelInfo, NumericBounds, NumericDirection,
-    NumericRange, TemporalKind, TypeInfo, TypeReference,
+    NumericRange, TemporalKind, TypeInfo, TypeReference, UnitConstant, UnitDefinition, UnitFactor,
+    UnitInfo, UnitOperator, UnitScale, UnitTerm,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

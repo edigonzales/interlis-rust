@@ -1073,11 +1073,25 @@ fn direct_names_are_checked_even_when_types_are_not_yet_supported() {
             .unwrap();
         assert!(earlier.start_byte < later.start_byte, "{body}");
     }
-    outcome(
+    let report = outcome(
         single("UNIT Meter [m]; DOMAIN Meter=BOOLEAN;"),
-        Status::Incomplete,
-        Some("ILI-UNSUPPORTED"),
+        Status::CheckedSubset,
+        None,
     );
+    let graph = report.graph().unwrap();
+    assert_eq!(
+        graph
+            .declaration("M.m")
+            .unwrap()
+            .unit()
+            .unwrap()
+            .designation,
+        "Meter"
+    );
+    assert!(matches!(
+        graph.effective_type("M.Meter"),
+        Some(TypeInfo::Boolean)
+    ));
 }
 
 #[test]
@@ -1739,6 +1753,101 @@ fn coordinate_types_reject_missing_axes_changed_metadata_and_bad_rotation() {
             "ILI-COORD-EXTENSION",
         ),
         ("DOMAIN A=COORD NUMERIC,0..1;", "ILI-DOMAIN-ABSTRACT"),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn units_keep_designation_exact_conversion_and_ordered_composition() {
+    use interlis::{UnitConstant, UnitDefinition, UnitOperator, UnitScale};
+
+    let units = r#"
+        INTERLIS 2.3; CONTRACTED TYPE MODEL Measures AT "x" VERSION "1" =
+          UNIT
+            Speed (ABSTRACT) = (INTERLIS.LENGTH / INTERLIS.TIME);
+            FeetPerSecond [fps] EXTENDS Speed = (ft / INTERLIS.s);
+            Foot [ft] EXTENDS INTERLIS.LENGTH = 0.3048 * PI / LNBASE [INTERLIS.m];
+            Fahrenheit [degF] = FUNCTION // (degF+459.67)/1.8 // [INTERLIS.K];
+            SameLength = [ft];
+        END Measures.
+    "#;
+    let report = outcome(
+        request(vec![("measures.ili", units.into())]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let unit = |name| graph.declaration(name).unwrap().unit().unwrap();
+    let feet = unit("Measures.ft");
+    assert_eq!(feet.designation, "Foot");
+    assert_eq!(feet.base.as_ref().unwrap().target_name(), "INTERLIS.LENGTH");
+    let UnitDefinition::Derived {
+        target,
+        scale: UnitScale::Factors(factors),
+    } = &feet.definition
+    else {
+        panic!("expected a bound exact conversion");
+    };
+    assert_eq!(target.target_name(), "INTERLIS.m");
+    assert_eq!(target.predefined_language(), Some(LanguageVersion::V23));
+    assert!(
+        matches!(&factors[0].value, UnitConstant::Decimal(value) if value.original()=="0.3048" && value.coefficient()=="3048" && value.scale()==4)
+    );
+    assert!(matches!(factors[1].value, UnitConstant::Pi));
+    assert!(matches!(factors[2].value, UnitConstant::LnBase));
+    assert_eq!(factors[2].operator, UnitOperator::Divide);
+    let UnitDefinition::Composed { terms } = &unit("Measures.fps").definition else {
+        panic!("expected a bound composition");
+    };
+    assert_eq!(terms[0].unit.target_name(), "Measures.ft");
+    assert_eq!(terms[1].operator, UnitOperator::Divide);
+    assert_eq!(terms[1].unit.target_name(), "INTERLIS.s");
+    assert!(unit("Measures.Speed").abstract_unit);
+    assert!(
+        matches!(&unit("Measures.degF").definition, UnitDefinition::Derived{scale:UnitScale::Function(description), ..} if description.contains("459.67"))
+    );
+    assert!(matches!(
+        &unit("Measures.SameLength").definition,
+        UnitDefinition::Derived {
+            scale: UnitScale::Identity,
+            ..
+        }
+    ));
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let feet = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decl| decl["qualifiedName"] == "Measures.ft")
+        .unwrap();
+    assert_eq!(
+        feet["unit"]["definition"]["scale"]["value"][0]["value"]["value"]["scale"],
+        4
+    );
+}
+
+#[test]
+fn units_reject_invalid_dependencies_and_conversions() {
+    for (body, code) in [
+        ("UNIT B [bb] EXTENDS INTERLIS.m;", "ILI-UNIT-BASE"),
+        ("UNIT B = 1 [INTERLIS.LENGTH];", "ILI-UNIT-DERIVED"),
+        ("UNIT B (ABSTRACT) = 1 [INTERLIS.m];", "ILI-UNIT-DERIVED"),
+        ("UNIT B = 1 / -0.00 [INTERLIS.m];", "ILI-UNIT-ZERO"),
+        (
+            "UNIT B = (INTERLIS.LENGTH/INTERLIS.s);",
+            "ILI-UNIT-COMPONENT",
+        ),
+        (
+            "UNIT B EXTENDS INTERLIS.TIME = 1 [INTERLIS.m];",
+            "ILI-UNIT-EXTENSION",
+        ),
+        (
+            "UNIT A (ABSTRACT)=(INTERLIS.LENGTH/INTERLIS.TIME); B EXTENDS A=(INTERLIS.m*INTERLIS.s);",
+            "ILI-UNIT-EXTENSION",
+        ),
+        ("UNIT U = [V]; V = (INTERLIS.m/U);", "ILI-UNIT-CYCLE"),
+        ("UNIT U = [Unknown];", "ILI-NAME-NOT-FOUND"),
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }

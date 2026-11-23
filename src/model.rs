@@ -256,11 +256,16 @@ impl EnumerationElement {
     }
 }
 /// Retains declared name segments, exact bound target identity and original reference range.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TypeReference {
+    #[serde(rename = "declaredName")]
     pub(crate) declared: String,
+    #[serde(rename = "targetName")]
     pub(crate) target: String,
+    #[serde(skip)]
     pub(crate) span: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) predefined_language: Option<LanguageVersion>,
 }
 impl TypeReference {
@@ -277,6 +282,64 @@ impl TypeReference {
         self.predefined_language
     }
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitInfo {
+    pub designation: String,
+    pub abstract_unit: bool,
+    pub base: Option<TypeReference>,
+    pub definition: UnitDefinition,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnitDefinition {
+    Fundamental,
+    Derived {
+        target: TypeReference,
+        scale: UnitScale,
+    },
+    Composed {
+        terms: Vec<UnitTerm>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum UnitScale {
+    Identity,
+    Factors(Vec<UnitFactor>),
+    Function(String),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum UnitConstant {
+    Decimal(DecimalInfo),
+    Pi,
+    LnBase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitOperator {
+    Multiply,
+    Divide,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnitTerm {
+    pub operator: UnitOperator,
+    pub unit: TypeReference,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnitFactor {
+    pub operator: UnitOperator,
+    pub value: UnitConstant,
+}
+
 #[derive(Debug)]
 pub struct Declaration {
     pub(crate) name: String,
@@ -291,6 +354,7 @@ pub struct Declaration {
     pub(crate) effective_mandatory: Option<bool>,
     pub(crate) reference: Option<TypeReference>,
     pub(crate) base_reference: Option<TypeReference>,
+    pub(crate) unit: Option<Box<UnitInfo>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -324,6 +388,9 @@ impl Declaration {
     }
     pub fn base_reference(&self) -> Option<&TypeReference> {
         self.base_reference.as_ref()
+    }
+    pub fn unit(&self) -> Option<&UnitInfo> {
+        self.unit.as_deref()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.
