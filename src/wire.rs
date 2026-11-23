@@ -334,6 +334,8 @@ impl Serialize for DeclarationsOutput<'_> {
             declared_mandatory: Option<bool>,
             #[serde(rename = "final")]
             final_declaration: bool,
+            #[serde(rename = "abstract")]
+            abstract_declaration: bool,
             type_reference: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
@@ -353,6 +355,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 mandatory: declaration.mandatory(),
                 declared_mandatory: declaration.declared_mandatory(),
                 final_declaration: declaration.is_final(),
+                abstract_declaration: declaration.is_abstract(),
                 type_reference: reference,
                 base_reference: declaration
                     .base_reference()
@@ -427,8 +430,10 @@ impl Serialize for TypeOutput<'_> {
                 domain: &'a str,
             },
             Numeric {
-                lower: Decimal<'a>,
-                upper: Decimal<'a>,
+                lower: Option<Decimal<'a>>,
+                upper: Option<Decimal<'a>>,
+                circular: bool,
+                direction: Option<crate::NumericDirection>,
             },
         }
         match self.0 {
@@ -468,9 +473,11 @@ impl Serialize for TypeOutput<'_> {
             }
             .serialize(serializer),
             TypeInfo::EnumTree { domain } => Type::EnumTree { domain }.serialize(serializer),
-            TypeInfo::Numeric { lower, upper } => Type::Numeric {
-                lower: lower.into(),
-                upper: upper.into(),
+            TypeInfo::Numeric(range) => Type::Numeric {
+                lower: range.bounds.as_ref().map(|bounds| (&bounds.lower).into()),
+                upper: range.bounds.as_ref().map(|bounds| (&bounds.upper).into()),
+                circular: range.circular,
+                direction: range.direction,
             }
             .serialize(serializer),
         }

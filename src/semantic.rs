@@ -15,7 +15,7 @@ use crate::{
     number::{DecimalLiteral, NumberError},
     syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
 struct Effective {
@@ -115,13 +115,7 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Blackbox { .. }
         | TypeSyntax::Enumeration { .. }
         | TypeSyntax::EnumTree { .. } => true,
-        TypeSyntax::Numeric(n) => {
-            n.bounds.is_some()
-                && n.circular.is_none()
-                && n.unit.is_none()
-                && n.direction.is_none()
-                && n.reference_system.is_none()
-        }
+        TypeSyntax::Numeric(n) => n.unit.is_none() && n.reference_system.is_none(),
         TypeSyntax::Formatted { .. }
         | TypeSyntax::Coordinate(_)
         | TypeSyntax::Geometry(_)
@@ -248,9 +242,17 @@ fn ensure_supported_semantics(
                         }
                         None => *mandatory && base.is_some(),
                     };
-                    if properties
+                    if properties.iter().any(|p| {
+                        !matches!(
+                            p.value,
+                            syntax::Property::Final | syntax::Property::Abstract
+                        )
+                    }) || properties
                         .iter()
-                        .any(|p| p.value != syntax::Property::Final)
+                        .any(|p| p.value == syntax::Property::Final)
+                        && properties
+                            .iter()
+                            .any(|p| p.value == syntax::Property::Abstract)
                         || !constraints.is_empty()
                         || ty.is_none() && !supported
                     {
@@ -441,6 +443,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 type_id: None,
                 declared_mandatory: mandatory,
                 final_declaration: false,
+                abstract_declaration: false,
                 effective_mandatory: None,
                 reference: None,
                 base_reference: None,
@@ -827,6 +830,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                             self.symbols[id].declaration.final_declaration = true;
                             if let Some(repeated) = finals.next() {
                                 self.duplicate(&repeated.span, &final_property.span);
+                            }
+                        }
+                        let mut abstracts = properties
+                            .iter()
+                            .filter(|p| p.value == syntax::Property::Abstract);
+                        if let Some(abstract_property) = abstracts.next() {
+                            self.symbols[id].declaration.abstract_declaration = true;
+                            if let Some(repeated) = abstracts.next() {
+                                self.duplicate(&repeated.span, &abstract_property.span);
                             }
                         }
                     }
@@ -1296,53 +1308,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 };
                 return self.enum_tree_type(owner, value, &domain.span);
             }
-            TypeSyntax::Numeric(numeric) => {
-                let span = &numeric.span;
-                let syntax::NumericBounds { lower, upper } = numeric
-                    .bounds
-                    .as_ref()
-                    .expect("concrete bounds checked before indexing");
-                if !self.step(1, span) {
-                    return None;
-                }
-                let low = self.literal(lower)?;
-                let high = self.literal(upper)?;
-                if low.info.fractional_digits() != high.info.fractional_digits() {
-                    self.diagnostics.push_related(
-                        "ILI-NUMERIC-PRECISION",
-                        "Numeric bounds must have matching written fractional precision",
-                        Some(upper.span.clone()),
-                        vec![RelatedLocation {
-                            span: lower.span.clone(),
-                            message: "Lower-bound precision".into(),
-                        }],
-                    );
-                    return None;
-                }
-                match low.compare_value(&high, &mut self.work) {
-                    Ok(Ordering::Greater) => {
-                        self.diagnostics.push_related(
-                            "ILI-NUMERIC-RANGE",
-                            "Lower numeric bound exceeds upper bound",
-                            Some(lower.span.clone()),
-                            vec![RelatedLocation {
-                                span: upper.span.clone(),
-                                message: "Upper bound".into(),
-                            }],
-                        );
-                        return None;
-                    }
-                    Err(error) => {
-                        self.number_error(error, &lower.span);
-                        return None;
-                    }
-                    _ => {}
-                }
-                TypeInfo::Numeric {
-                    lower: low.info,
-                    upper: high.info,
-                }
-            }
+            TypeSyntax::Numeric(numeric) => TypeInfo::Numeric(self.numeric_range(numeric)?),
             TypeSyntax::Named(name) => {
                 return match self.bind_name(owner, name)? {
                     Target::Domain(id) => self.resolve_domain(id),
@@ -1533,6 +1499,16 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             {
                 result = result.and_then(|value| self.specialize_scalar(id, value, ty));
             }
+            if result.is_some_and(|value| matches!(&self.types[value.ty], TypeInfo::Numeric(range) if range.bounds.is_none()))
+                && !self.symbols[id].declaration.is_abstract()
+            {
+                self.diagnostics.push(
+                    "ILI-DOMAIN-ABSTRACT",
+                    "An unbounded numeric domain must be ABSTRACT",
+                    Some(self.symbols[id].name_span.clone()),
+                );
+                result = None;
+            }
             if let Some(mut value) = result {
                 value.mandatory |= self.symbols[id]
                     .declaration
@@ -1611,6 +1587,22 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 continue;
             };
             if let Some(value) = self.concrete_type(id, syntax) {
+                let symbol = &self.symbols[id];
+                if symbol.declaration.kind == Kind::Attribute
+                    && (matches!(&self.types[value.ty], TypeInfo::Numeric(range) if range.bounds.is_none())
+                        || symbol
+                            .declaration
+                            .type_reference()
+                            .and_then(|link| self.names.get(link.target_name()))
+                            .is_some_and(|&target| self.symbols[target].declaration.is_abstract()))
+                {
+                    self.diagnostics.push(
+                        "ILI-ATTRIBUTE-ABSTRACT",
+                        "An attribute with an abstract value domain must be ABSTRACT",
+                        Some(syntax.span().clone()),
+                    );
+                    continue;
+                }
                 self.symbols[id].declaration.type_id = Some(value.ty);
                 self.symbols[id].declaration.effective_mandatory = Some(
                     value.mandatory

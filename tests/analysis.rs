@@ -1,7 +1,7 @@
 use interlis::{
     AlignmentKind, AnalysisReport, AnalysisStatus as Status, BlackboxKind, CompileRequest,
-    DeclarationKind, EnumerationOrder, FixedTextFormat, LanguageVersion, Limits, SourceInput,
-    TemporalKind, TypeInfo, analyze, analyze_roots,
+    DeclarationKind, EnumerationOrder, FixedTextFormat, LanguageVersion, Limits, NumericBounds,
+    NumericDirection, NumericRange, SourceInput, TemporalKind, TypeInfo, analyze, analyze_roots,
 };
 const BASE: &str = r#"INTERLIS 2.3;
 MODEL ProbeBase (en) AT "https://example.invalid" VERSION "2026-11-10" =
@@ -290,8 +290,10 @@ fn two_file_subset_has_owned_metadata_members_types_and_origins_in_both_versions
         assert!(
             matches!(graph.effective_type("ProbeData.Items.Item.label"),Some(TypeInfo::Text {max_length}) if max_length=="40")
         );
-        let Some(TypeInfo::Numeric { lower, upper }) =
-            graph.effective_type("ProbeData.Items.Item.count")
+        let Some(TypeInfo::Numeric(NumericRange {
+            bounds: Some(NumericBounds { lower, upper }),
+            ..
+        })) = graph.effective_type("ProbeData.Items.Item.count")
         else {
             panic!()
         };
@@ -484,7 +486,7 @@ fn local_topic_scopes_and_empty_queries_do_not_mix_with_attribute_names() {
     );
     assert!(matches!(
         graph.effective_type("M.T.S.n"),
-        Some(TypeInfo::Numeric { .. })
+        Some(TypeInfo::Numeric(_))
     ));
 }
 #[test]
@@ -612,15 +614,27 @@ fn integers_above_js_precision_and_written_decimal_metadata_are_exact() {
         None,
     );
     let graph = report.graph().unwrap();
-    let Some(TypeInfo::Numeric { lower, upper }) = graph.effective_type("M.Big") else {
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { lower, upper }),
+        ..
+    })) = graph.effective_type("M.Big")
+    else {
         panic!()
     };
     assert_eq!(lower.coefficient(), "9007199254740992");
     assert_eq!(upper.original(), "9007199254740993");
-    let Some(TypeInfo::Numeric { lower: fine, .. }) = graph.effective_type("M.Fine") else {
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { lower: fine, .. }),
+        ..
+    })) = graph.effective_type("M.Fine")
+    else {
         panic!()
     };
-    let Some(TypeInfo::Numeric { lower: coarse, .. }) = graph.effective_type("M.Coarse") else {
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { lower: coarse, .. }),
+        ..
+    })) = graph.effective_type("M.Coarse")
+    else {
         panic!()
     };
     assert_eq!(
@@ -628,7 +642,11 @@ fn integers_above_js_precision_and_written_decimal_metadata_are_exact() {
         (2, 1)
     );
     assert_eq!((fine.original(), coarse.original()), ("0.00", "0.0"));
-    let Some(TypeInfo::Numeric { lower, upper }) = graph.effective_type("M.Scaled") else {
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { lower, upper }),
+        ..
+    })) = graph.effective_type("M.Scaled")
+    else {
         panic!()
     };
     assert_eq!(
@@ -703,7 +721,6 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
         "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
         "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
         "STRUCTURE Base=END Base; STRUCTURE S EXTENDS Base=END S;",
-        "DOMAIN N=0..360 CIRCULAR;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
@@ -1454,7 +1471,11 @@ fn domain_specializations_preserve_base_provenance_and_narrow_values() {
     assert!(
         matches!(graph.effective_type("M.Bounded"), Some(TypeInfo::MultilineText { max_length: Some(cap) }) if cap == "75")
     );
-    let Some(TypeInfo::Numeric { lower, upper }) = graph.effective_type("M.Refined") else {
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { lower, upper }),
+        ..
+    })) = graph.effective_type("M.Refined")
+    else {
         panic!("refined range");
     };
     assert_eq!((lower.original(), upper.original()), ("-19.01", "019.99"));
@@ -1508,7 +1529,10 @@ fn numeric_extension_rounds_23_bounds_and_preserves_24_precision() {
         Status::CheckedSubset,
         None,
     );
-    let Some(TypeInfo::Numeric { upper, .. }) = report.graph().unwrap().effective_type("M.Fine")
+    let Some(TypeInfo::Numeric(NumericRange {
+        bounds: Some(NumericBounds { upper, .. }),
+        ..
+    })) = report.graph().unwrap().effective_type("M.Fine")
     else {
         panic!("expected rounded-compatible range");
     };
@@ -1529,4 +1553,65 @@ fn numeric_extension_rounds_23_bounds_and_preserves_24_precision() {
         Some("ILI-DOMAIN-PRECISION"),
     );
     outcome(input("2.4", "-1.00", "7.00"), Status::CheckedSubset, None);
+}
+
+#[test]
+fn numeric_ranges_preserve_abstractness_circularity_and_direction() {
+    let report = outcome(
+        single(
+            "DOMAIN Angle (ABSTRACT)=NUMERIC CIRCULAR CLOCKWISE; Degree EXTENDS Angle=0..359; Opposite=0..1 COUNTERCLOCKWISE; PARAMETER Decimal:NUMERIC; STRUCTURE Holder=angle:Degree; END Holder;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(graph.declaration("M.Angle").unwrap().is_abstract());
+    assert!(matches!(
+        graph.effective_type("M.Angle"),
+        Some(TypeInfo::Numeric(NumericRange {
+            bounds: None,
+            circular: true,
+            direction: Some(NumericDirection::Clockwise)
+        }))
+    ));
+    let Some(TypeInfo::Numeric(range)) = graph.effective_type("M.Holder.angle") else {
+        panic!("expected concrete angle");
+    };
+    assert!(range.circular);
+    assert_eq!(range.direction, Some(NumericDirection::Clockwise));
+    assert_eq!(range.bounds.as_ref().unwrap().upper.original(), "359");
+    assert!(matches!(
+        graph.effective_type("M.Opposite"),
+        Some(TypeInfo::Numeric(NumericRange {
+            direction: Some(NumericDirection::Counterclockwise),
+            ..
+        }))
+    ));
+    assert!(matches!(
+        graph.runtime_parameter("M.Decimal").unwrap().1,
+        TypeInfo::Numeric(NumericRange { bounds: None, .. })
+    ));
+
+    for (body, code) in [
+        ("DOMAIN A=NUMERIC;", "ILI-DOMAIN-ABSTRACT"),
+        (
+            "DOMAIN A (ABSTRACT)=TEXT*4; STRUCTURE S=x:A; END S;",
+            "ILI-ATTRIBUTE-ABSTRACT",
+        ),
+        (
+            "DOMAIN A (ABSTRACT)=NUMERIC; B EXTENDS A=MANDATORY;",
+            "ILI-DOMAIN-ABSTRACT",
+        ),
+        (
+            "DOMAIN A (ABSTRACT)=NUMERIC; STRUCTURE S=x:A; END S;",
+            "ILI-ATTRIBUTE-ABSTRACT",
+        ),
+        ("STRUCTURE S=x:NUMERIC; END S;", "ILI-ATTRIBUTE-ABSTRACT"),
+        (
+            "DOMAIN A=0..10 CLOCKWISE; B EXTENDS A=1..9 COUNTERCLOCKWISE;",
+            "ILI-DOMAIN-DIRECTION",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
 }

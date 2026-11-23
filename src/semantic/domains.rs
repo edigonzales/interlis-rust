@@ -1,10 +1,65 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
 };
-use crate::{DecimalInfo, LanguageVersion, Limits, limits::WorkBudget};
+use crate::{
+    DecimalInfo, LanguageVersion, Limits, NumericBounds, NumericRange, limits::WorkBudget,
+    syntax::NumericSyntax,
+};
 use std::cmp::Ordering;
 
 impl Analyzer<'_, '_> {
+    pub(super) fn numeric_range(&mut self, syntax: &NumericSyntax) -> Option<NumericRange> {
+        if !self.step(1, &syntax.span) {
+            return None;
+        }
+        let bounds = if let Some(range) = &syntax.bounds {
+            let low = self.literal(&range.lower)?;
+            let high = self.literal(&range.upper)?;
+            if low.info.fractional_digits() != high.info.fractional_digits() {
+                self.diagnostics.push_related(
+                    "ILI-NUMERIC-PRECISION",
+                    "Numeric bounds must have matching written fractional precision",
+                    Some(range.upper.span.clone()),
+                    vec![RelatedLocation {
+                        span: range.lower.span.clone(),
+                        message: "Lower-bound precision".into(),
+                    }],
+                );
+                return None;
+            }
+            match low.compare_value(&high, &mut self.work) {
+                Ok(Ordering::Greater) => {
+                    self.diagnostics.push_related(
+                        "ILI-NUMERIC-RANGE",
+                        "Lower numeric bound exceeds upper bound",
+                        Some(range.lower.span.clone()),
+                        vec![RelatedLocation {
+                            span: range.upper.span.clone(),
+                            message: "Upper bound".into(),
+                        }],
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    self.number_error(error, &range.lower.span);
+                    return None;
+                }
+                _ => {}
+            }
+            Some(NumericBounds {
+                lower: low.info,
+                upper: high.info,
+            })
+        } else {
+            None
+        };
+        Some(NumericRange {
+            bounds,
+            circular: syntax.circular.is_some(),
+            direction: syntax.direction.as_ref().map(|direction| direction.value),
+        })
+    }
+
     pub(super) fn specialize_scalar(
         &mut self,
         owner: usize,
@@ -21,6 +76,13 @@ impl Analyzer<'_, '_> {
         );
         match check {
             Ok(None) => {
+                if let TypeInfo::Numeric(range) = &self.types[base.ty] {
+                    let flags = (range.circular, range.direction);
+                    if let TypeInfo::Numeric(own_range) = &mut self.types[own.ty] {
+                        own_range.circular |= flags.0;
+                        own_range.direction = own_range.direction.or(flags.1);
+                    }
+                }
                 own.mandatory |= base.mandatory;
                 Some(own)
             }
@@ -66,24 +128,36 @@ fn scalar_extension(
             text_fits(max_length.as_deref(), cap.as_deref(), work)?
         }
         (FixedText { format: a, .. }, FixedText { format: b, .. }) => a == b,
-        (
-            Numeric { lower, upper },
-            Numeric {
-                lower: min,
-                upper: max,
-            },
-        ) => {
-            if language == LanguageVersion::V24
-                && (lower.fractional_digits() != min.fractional_digits()
-                    || upper.fractional_digits() != max.fractional_digits())
+        (Numeric(own), Numeric(base)) => {
+            if let Some(base_direction) = base.direction
+                && own
+                    .direction
+                    .is_some_and(|direction| direction != base_direction)
             {
                 return Ok(Some((
-                    "ILI-DOMAIN-PRECISION",
-                    "An INTERLIS 2.4 numeric extension must preserve the precision of its base",
+                    "ILI-DOMAIN-DIRECTION",
+                    "The direction of a numeric base domain cannot change",
                 )));
             }
-            compare(lower, min, language, limits, work)? != Ordering::Less
-                && compare(upper, max, language, limits, work)? != Ordering::Greater
+            match (&own.bounds, &base.bounds) {
+                (_, None) => true,
+                (None, Some(_)) => false,
+                (Some(own), Some(base)) => {
+                    let (lower, upper) = (&own.lower, &own.upper);
+                    let (min, max) = (&base.lower, &base.upper);
+                    if language == LanguageVersion::V24
+                        && (lower.fractional_digits() != min.fractional_digits()
+                            || upper.fractional_digits() != max.fractional_digits())
+                    {
+                        return Ok(Some((
+                            "ILI-DOMAIN-PRECISION",
+                            "An INTERLIS 2.4 numeric extension must preserve the precision of its base",
+                        )));
+                    }
+                    compare(lower, min, language, limits, work)? != Ordering::Less
+                        && compare(upper, max, language, limits, work)? != Ordering::Greater
+                }
+            }
         }
         _ => false,
     };

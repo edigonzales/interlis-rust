@@ -1099,12 +1099,8 @@ mod unsupported_regressions {
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
             for body in [
-                "DOMAIN Angle=0..360 CIRCULAR;",
                 "DOMAIN Length=0..100 [INTERLIS.m];",
                 "STRUCTURE S=value:0..100 [INTERLIS.m]; END S;",
-                "DOMAIN Code (ABSTRACT)=TEXT*4;",
-                "DOMAIN Angle=0..360 CLOCKWISE;",
-                "DOMAIN Angle=0..360 COUNTERCLOCKWISE;",
                 r#"DOMAIN Code=TEXT*4 CONSTRAINTS OnlyX: THIS == "X";"#,
             ] {
                 if language == "2.3" && body.contains("CONSTRAINTS") {

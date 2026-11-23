@@ -18,7 +18,7 @@ pub use limits::Limits;
 pub use model::{
     AlignmentKind, BlackboxKind, DecimalInfo, Declaration, DeclarationKind, Enumeration,
     EnumerationElement, EnumerationOrder, FixedTextFormat, LanguageVersion, ModelGraph, ModelInfo,
-    TemporalKind, TypeInfo, TypeReference,
+    NumericBounds, NumericDirection, NumericRange, TemporalKind, TypeInfo, TypeReference,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

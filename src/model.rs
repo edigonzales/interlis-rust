@@ -118,10 +118,27 @@ pub enum TypeInfo {
     EnumTree {
         domain: String,
     },
-    Numeric {
-        lower: DecimalInfo,
-        upper: DecimalInfo,
-    },
+    Numeric(NumericRange),
+}
+
+#[derive(Debug)]
+pub struct NumericRange {
+    pub bounds: Option<NumericBounds>,
+    pub circular: bool,
+    pub direction: Option<NumericDirection>,
+}
+
+#[derive(Debug)]
+pub struct NumericBounds {
+    pub lower: DecimalInfo,
+    pub upper: DecimalInfo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NumericDirection {
+    Clockwise,
+    Counterclockwise,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -231,6 +248,7 @@ pub struct Declaration {
     pub(crate) type_id: Option<usize>,
     pub(crate) declared_mandatory: Option<bool>,
     pub(crate) final_declaration: bool,
+    pub(crate) abstract_declaration: bool,
     pub(crate) effective_mandatory: Option<bool>,
     pub(crate) reference: Option<TypeReference>,
     pub(crate) base_reference: Option<TypeReference>,
@@ -258,6 +276,9 @@ impl Declaration {
     }
     pub fn is_final(&self) -> bool {
         self.final_declaration
+    }
+    pub fn is_abstract(&self) -> bool {
+        self.abstract_declaration
     }
     pub fn type_reference(&self) -> Option<&TypeReference> {
         self.reference.as_ref().or(self.base_reference.as_ref())

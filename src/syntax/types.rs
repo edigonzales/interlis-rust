@@ -1,5 +1,6 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
+pub(crate) use crate::model::NumericDirection as Direction;
 pub(crate) use crate::model::{AlignmentKind, BlackboxKind, EnumerationOrder, TemporalKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,11 +20,6 @@ pub(crate) struct TextSyntax {
 pub(crate) struct NumericBounds {
     pub lower: Located<String>,
     pub upper: Located<String>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Direction {
-    Clockwise,
-    Counterclockwise,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2134,10 +2130,7 @@ mod tests {
     #[test]
     fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
         for ty in [
-            "NUMERIC",
-            "0..360 CIRCULAR",
             "0..1 [INTERLIS.m]",
-            "0..1 CLOCKWISE",
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
             "COORD NUMERIC,NUMERIC",
