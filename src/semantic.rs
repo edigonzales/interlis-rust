@@ -1,11 +1,11 @@
+mod names;
+
+use self::names::{BoundName, LookupError};
 use crate::{
     Limits, RelatedLocation, Span,
     diagnostic::Diagnostics,
     limits::WorkBudget,
-    model::{
-        self, DeclarationKind as Kind, LanguageVersion, ModelGraph, ModelInfo, TypeInfo,
-        TypeReference,
-    },
+    model::{self, DeclarationKind as Kind, ModelGraph, ModelInfo, TypeInfo, TypeReference},
     number::{DecimalLiteral, NumberError},
     syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
@@ -25,15 +25,33 @@ enum State {
 }
 struct Symbol<'a> {
     declaration: model::Declaration,
-    name_span: &'a Span,
+    name_span: Span,
     model: usize,
     syntax: Option<&'a TypeSyntax>,
     base: Option<&'a QualifiedName>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Namespace {
+    Type,
+    Member,
+    MetaObject,
+    Context,
+}
+fn namespace(kind: Kind) -> Namespace {
+    match kind {
+        Kind::Attribute
+        | Kind::RuntimeParameter
+        | Kind::Role
+        | Kind::Parameter
+        | Kind::DrawingRule => Namespace::Member,
+        Kind::MetaObject => Namespace::MetaObject,
+        Kind::Context => Namespace::Context,
+        _ => Namespace::Type,
+    }
+}
 enum Target {
     Domain(usize),
     Structure,
-    Other,
     Predefined(&'static str),
 }
 struct Analyzer<'a, 'd> {
@@ -47,8 +65,7 @@ struct Analyzer<'a, 'd> {
     bound_imports: Vec<BTreeMap<&'a str, bool>>,
     model_names: BTreeMap<String, usize>,
     names: BTreeMap<String, usize>,
-    member_names: BTreeMap<(usize, String), usize>,
-    type_names: BTreeMap<(usize, String), usize>,
+    scope_names: BTreeMap<(usize, Namespace, String), usize>,
     states: Vec<State>,
     types: Vec<TypeInfo>,
 }
@@ -80,39 +97,6 @@ fn supported_type(ty: &TypeSyntax) -> bool {
     }
 }
 
-fn predefined_domain(language: LanguageVersion, name: &str) -> Option<&'static str> {
-    Some(match name {
-        "URI" => "URI",
-        "NAME" => "NAME",
-        "INTERLIS_1_DATE" => "INTERLIS_1_DATE",
-        "BOOLEAN" => "BOOLEAN",
-        "HALIGNMENT" => "HALIGNMENT",
-        "VALIGNMENT" => "VALIGNMENT",
-        "ANYOID" => "ANYOID",
-        "I32OID" => "I32OID",
-        "STANDARDOID" => "STANDARDOID",
-        "UUIDOID" => "UUIDOID",
-        "LineCoord" => "LineCoord",
-        "NOOID" if language == LanguageVersion::V24 => "NOOID",
-        "GregorianYear" => "GregorianYear",
-        "XMLTime" => "XMLTime",
-        "XMLDate" => "XMLDate",
-        "XMLDateTime" => "XMLDateTime",
-        "AXIS" => "AXIS",
-        "TimeOfDay" => "TimeOfDay",
-        "UTC" => "UTC",
-        "GregorianDate" => "GregorianDate",
-        "GregorianDateTime" => "GregorianDateTime",
-        "LineSegment" => "LineSegment",
-        "StartSegment" => "StartSegment",
-        "StraightSegment" => "StraightSegment",
-        "ArcSegment" => "ArcSegment",
-        "SurfaceEdge" => "SurfaceEdge",
-        "SurfaceBoundary" => "SurfaceBoundary",
-        "LineGeometry" => "LineGeometry",
-        _ => return None,
-    })
-}
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
 fn ensure_supported_semantics(
@@ -307,8 +291,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             bound_imports: vec![],
             model_names: BTreeMap::new(),
             names: BTreeMap::new(),
-            member_names: BTreeMap::new(),
-            type_names: BTreeMap::new(),
+            scope_names: BTreeMap::new(),
             states: vec![],
             types: vec![],
         }
@@ -356,7 +339,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     fn add(
         &mut self,
         kind: Kind,
-        name: &'a Name,
+        name: &Name,
         span: &Span,
         parent: Option<usize>,
         model: usize,
@@ -379,25 +362,20 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         let id = self.symbols.len();
         let mut duplicate = false;
         if let Some(parent) = parent {
-            let key = (parent, name.value.clone());
-            let namespace = if matches!(kind, Kind::Attribute | Kind::RuntimeParameter) {
-                &mut self.member_names
-            } else {
-                &mut self.type_names
-            };
-            if let Some(&previous) = namespace.get(&key) {
+            let key = (parent, namespace(kind), name.value.clone());
+            if let Some(&previous) = self.scope_names.get(&key) {
                 let previous_span = self.symbols[previous].name_span.clone();
                 self.duplicate(&name.span, &previous_span);
                 duplicate = true;
             } else {
-                namespace.insert(key, id);
+                self.scope_names.insert(key, id);
             }
         }
         self.names
             .entry(qualified.clone())
             .and_modify(|previous| {
-                if self.symbols[*previous].declaration.kind == Kind::RuntimeParameter
-                    && kind != Kind::RuntimeParameter
+                if namespace(self.symbols[*previous].declaration.kind) != Namespace::Type
+                    && namespace(kind) == Namespace::Type
                 {
                     *previous = id;
                 }
@@ -415,7 +393,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 effective_mandatory: None,
                 reference: None,
             },
-            name_span: &name.span,
+            name_span: name.span.clone(),
             model,
             syntax: None,
             base: None,
@@ -709,6 +687,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     kind,
                     name,
                     attributes,
+                    parameters,
                     end_name,
                     span,
                     ..
@@ -718,11 +697,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         syntax::ContainerKind::Class => Kind::Class,
                         syntax::ContainerKind::Structure => Kind::Structure,
                     };
-                    if kind == Kind::Class && self.symbols[parent].declaration.kind == Kind::Model {
-                        self.diagnostics.push("ILI-SCOPE","A concrete class in the supported data-model subset must be in a topic",Some(name.span.clone()));
-                    }
                     if let Some(id) = self.add(kind, name, span, Some(parent), model, None) {
                         self.index_declarations(id, model, attributes);
+                        for parameter in parameters {
+                            self.add(
+                                Kind::Parameter,
+                                &parameter.name,
+                                &parameter.span,
+                                Some(id),
+                                model,
+                                None,
+                            );
+                        }
                     }
                 }
                 SyntaxDecl::Domain {
@@ -761,12 +747,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         Some(type_use.mandatory),
                     ) {
-                        self.symbols[id].syntax = Some(
-                            type_use
-                                .ty
-                                .as_ref()
-                                .expect("supported type use checked before indexing"),
-                        );
+                        self.symbols[id].syntax = type_use.ty.as_ref();
                     }
                 }
                 SyntaxDecl::RuntimeParameter {
@@ -785,160 +766,217 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         self.symbols[id].syntax = type_use.ty.as_ref();
                     }
                 }
-                SyntaxDecl::Unit(_)
-                | SyntaxDecl::LineForm(_)
-                | SyntaxDecl::Function(_)
-                | SyntaxDecl::Constraints(_)
-                | SyntaxDecl::Association(_)
-                | SyntaxDecl::Context(_)
-                | SyntaxDecl::View(_)
-                | SyntaxDecl::Graphic(_)
-                | SyntaxDecl::MetadataBasket(_) => {
-                    unreachable!("unsupported semantics are checked before indexing")
+                SyntaxDecl::Unit(unit) => {
+                    let name = match &unit.display {
+                        Some(syntax::UnitDisplay::ShortName(short)) => short,
+                        _ => &unit.name,
+                    };
+                    self.add(Kind::Unit, name, &unit.span, Some(parent), model, None);
                 }
+                SyntaxDecl::LineForm(form) => {
+                    self.add(
+                        Kind::LineForm,
+                        &form.name,
+                        &form.span,
+                        Some(parent),
+                        model,
+                        None,
+                    );
+                }
+                SyntaxDecl::Function(f) => {
+                    if let Some(id) =
+                        self.add(Kind::Function, &f.name, &f.span, Some(parent), model, None)
+                    {
+                        for argument in &f.arguments {
+                            self.add(
+                                Kind::Parameter,
+                                &argument.name,
+                                &argument.span,
+                                Some(id),
+                                model,
+                                None,
+                            );
+                        }
+                    }
+                }
+                SyntaxDecl::Context(context) => {
+                    self.add(
+                        Kind::Context,
+                        &context.name,
+                        &context.span,
+                        Some(parent),
+                        model,
+                        None,
+                    );
+                }
+                SyntaxDecl::Association(association) => {
+                    let implicit;
+                    let name = if let Some(name) = &association.name {
+                        if let Some(end) = &association.end_name {
+                            self.end_name(name, end);
+                        }
+                        name
+                    } else if !association.roles.is_empty() {
+                        let bytes = association.roles.iter().map(|r| r.name.value.len()).sum();
+                        if !self.step(bytes, &association.span) {
+                            return;
+                        }
+                        implicit = Name {
+                            value: association
+                                .roles
+                                .iter()
+                                .map(|r| r.name.value.as_str())
+                                .collect(),
+                            span: association.roles[0].name.span.clone(),
+                        };
+                        &implicit
+                    } else {
+                        continue;
+                    };
+                    if let Some(id) = self.add(
+                        Kind::Association,
+                        name,
+                        &association.span,
+                        Some(parent),
+                        model,
+                        None,
+                    ) {
+                        for role in &association.roles {
+                            self.add(Kind::Role, &role.name, &role.span, Some(id), model, None);
+                        }
+                        self.index_declarations(id, model, &association.attributes);
+                    }
+                }
+                SyntaxDecl::View(view) => {
+                    self.end_name(&view.name, &view.end_name);
+                    if let Some(id) = self.add(
+                        Kind::View,
+                        &view.name,
+                        &view.span,
+                        Some(parent),
+                        model,
+                        None,
+                    ) {
+                        for attribute in &view.attributes {
+                            match attribute {
+                                syntax::ViewAttribute::Typed(item) => self.index_declarations(
+                                    id,
+                                    model,
+                                    std::slice::from_ref(item.as_ref()),
+                                ),
+                                syntax::ViewAttribute::Derived { name, span, .. } => {
+                                    self.add(Kind::Attribute, name, span, Some(id), model, None);
+                                }
+                                syntax::ViewAttribute::AllOf(_) => {}
+                            }
+                        }
+                    }
+                }
+                SyntaxDecl::Graphic(graphic) => {
+                    self.end_name(&graphic.name, &graphic.end_name);
+                    if let Some(id) = self.add(
+                        Kind::Graphic,
+                        &graphic.name,
+                        &graphic.span,
+                        Some(parent),
+                        model,
+                        None,
+                    ) {
+                        for rule in &graphic.rules {
+                            self.add(
+                                Kind::DrawingRule,
+                                &rule.name,
+                                &rule.span,
+                                Some(id),
+                                model,
+                                None,
+                            );
+                        }
+                    }
+                }
+                SyntaxDecl::MetadataBasket(basket) => {
+                    if let Some(id) = self.add(
+                        Kind::MetadataBasket,
+                        &basket.name,
+                        &basket.span,
+                        Some(parent),
+                        model,
+                        None,
+                    ) {
+                        for name in basket.groups.iter().flat_map(|group| &group.objects) {
+                            self.add(Kind::MetaObject, name, &name.span, Some(id), model, None);
+                        }
+                    }
+                }
+                SyntaxDecl::Constraints(_) => {} // A block augments its target's namespace.
             }
         }
     }
     fn bind_name(&mut self, owner: usize, name: &QualifiedName) -> Option<Target> {
-        let cost = name.segments.iter().try_fold(1_usize, |n, s| {
-            n.checked_add(s.value.len().saturating_add(1))
-        });
-        if !self.step(cost.unwrap_or(usize::MAX), &name.span) {
-            return None;
-        }
-        let model = self.symbols[owner].model;
-        let parts = &name.segments;
-        let language = self.models[model].language;
-        let accepts_structure = self.symbols[owner].declaration.kind != Kind::Domain;
-        let accepts = |symbol: &Symbol<'_>| match symbol.declaration.kind {
-            Kind::Domain => true,
-            Kind::Structure => accepts_structure,
-            _ => false,
-        };
-        let mut builtin = None;
-        let id = if parts.len() == 1 {
-            let mut scope = self.symbols[owner].declaration.parent;
-            let mut found = None;
-            let mut later_domain = None;
-            while let Some(parent) = scope {
-                if !self.step(1, &name.span) {
-                    return None;
-                }
-                if let Some(&id) = self.type_names.get(&(parent, parts[0].value.clone()))
-                    && accepts(&self.symbols[id])
-                {
-                    if self.symbols[id].declaration.kind == Kind::Domain
-                        && self.domain_follows_reference(owner, id, &name.span)
-                    {
-                        later_domain.get_or_insert(id);
-                    } else {
-                        found = Some(id);
-                        break;
-                    }
-                }
-                scope = self.symbols[parent].declaration.parent;
-            }
-            if found.is_none() {
-                if !self.step(self.bound_imports[model].len(), &name.span) {
-                    return None;
-                }
-                for (&import, &unqualified) in &self.bound_imports[model] {
-                    if !unqualified {
-                        continue;
-                    }
-                    if import == "INTERLIS" {
-                        builtin = predefined_domain(language, &parts[0].value);
-                        continue;
-                    }
-                    let parent = self.names[import];
-                    if let Some(&candidate) = self.type_names.get(&(parent, parts[0].value.clone()))
-                        && accepts(&self.symbols[candidate])
-                    {
-                        if let Some(previous) = found {
-                            self.ambiguous_type(name, [previous, candidate]);
-                            return None;
-                        }
-                        found = Some(candidate);
-                    }
-                }
-                if found.is_some() {
-                    builtin = None;
-                }
-            }
-            if builtin.is_none() {
-                found.or(later_domain)
-            } else {
-                found
-            }
+        let kinds = if self.symbols[owner].declaration.kind == Kind::Domain {
+            &[Kind::Domain][..]
         } else {
-            let first = &parts[0].value;
-            if first == "INTERLIS" {
-                if parts.len() == 2 {
-                    builtin = predefined_domain(language, &parts[1].value);
+            &[Kind::Domain, Kind::Structure]
+        };
+        let (target, qualified, predefined_language) = match self.lookup_name(owner, name, kinds) {
+            Ok(BoundName::Declared(id)) => {
+                let declaration = &self.symbols[id].declaration;
+                if declaration.kind == Kind::Domain
+                    && self.symbols[owner].declaration.kind != Kind::Domain
+                    && !self.check_domain_order(owner, id, &name.span)
+                {
+                    return None;
                 }
-                None
-            } else if first != &self.models[model].name
-                && !self.bound_imports[model].contains_key(first.as_str())
-            {
-                self.diagnostics.push(
-                    "ILI-TYPE-NOT-FOUND",
-                    "Qualified domain must use the current or an explicitly imported model name",
-                    Some(name.span.clone()),
-                );
+                let declaration = &self.symbols[id].declaration;
+                if !self.step(declaration.qualified.len(), &name.span) {
+                    return None;
+                }
+                let declaration = &self.symbols[id].declaration;
+                let target = match declaration.kind {
+                    Kind::Domain => Target::Domain(id),
+                    Kind::Structure => Target::Structure,
+                    _ => unreachable!("lookup only accepts domains or structures"),
+                };
+                (target, declaration.qualified.clone(), None)
+            }
+            Ok(BoundName::Predefined(name, kind)) => (
+                if kind == Kind::Domain {
+                    Target::Predefined(name)
+                } else {
+                    Target::Structure
+                },
+                format!("INTERLIS.{name}"),
+                Some(self.models[self.symbols[owner].model].language),
+            ),
+            Err(LookupError::Ambiguous(candidates)) => {
+                self.ambiguous_type(name, candidates);
                 return None;
-            } else {
-                let qualified = parts
-                    .iter()
-                    .map(|n| n.value.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
-                self.names.get(&qualified).copied()
+            }
+            Err(LookupError::Limit) => return None,
+            Err(error @ (LookupError::NotImported | LookupError::Missing)) => {
+                let message = match error {
+                    LookupError::NotImported => {
+                        "Qualified domain must use the current or an explicitly imported model name"
+                    }
+                    _ => "Domain reference does not resolve in the supported scope",
+                };
+                self.diagnostics
+                    .push("ILI-TYPE-NOT-FOUND", message, Some(name.span.clone()));
+                return None;
             }
         };
-        let declared = parts
-            .iter()
-            .map(|n| n.value.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        if let Some(builtin) = builtin {
-            self.symbols[owner].declaration.reference = Some(TypeReference {
-                declared,
-                target: format!("INTERLIS.{builtin}"),
-                span: name.span.clone(),
-                predefined_language: Some(language),
-            });
-            return Some(Target::Predefined(builtin));
-        }
-        let Some(id) = id else {
-            self.diagnostics.push(
-                "ILI-TYPE-NOT-FOUND",
-                "Domain reference does not resolve in the supported scope",
-                Some(name.span.clone()),
-            );
-            return None;
-        };
-        let target = &self.symbols[id];
-        let kind = target.declaration.kind;
-        if kind == Kind::Domain
-            && self.symbols[owner].declaration.kind != Kind::Domain
-            && !self.check_domain_order(owner, id, &name.span)
-        {
-            return None;
-        }
-        if !self.step(self.symbols[id].declaration.qualified.len(), &name.span) {
-            return None;
-        }
         self.symbols[owner].declaration.reference = Some(TypeReference {
-            declared,
-            target: self.symbols[id].declaration.qualified.clone(),
+            declared: name
+                .segments
+                .iter()
+                .map(|n| n.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            target: qualified,
             span: name.span.clone(),
-            predefined_language: None,
+            predefined_language,
         });
-        Some(match kind {
-            Kind::Domain => Target::Domain(id),
-            Kind::Structure => Target::Structure,
-            _ => Target::Other,
-        })
+        Some(target)
     }
     fn domain_follows_reference(&self, owner: usize, target: usize, reference: &Span) -> bool {
         let target = &self.symbols[target];
@@ -1114,14 +1152,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         );
                         None
                     }
-                    Target::Other => {
-                        self.diagnostics.push(
-                            "ILI-TYPE-NOT-FOUND",
-                            "Referenced declaration is not a domain or structure",
-                            Some(name.span.clone()),
-                        );
-                        None
-                    }
                 };
             }
             TypeSyntax::Alignment { .. }
@@ -1177,7 +1207,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         let primary = path
             .last()
             .and_then(|&id| self.symbols[id].base)
-            .map_or(self.symbols[current].name_span, |q| &q.span)
+            .map_or(&self.symbols[current].name_span, |q| &q.span)
             .clone();
         let related = cycle
             .iter()
@@ -1296,9 +1326,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         if self.diagnostics.limited || self.diagnostics.rejected {
             return None;
         }
-        if !ensure_supported_semantics(&self.selected_models, self.diagnostics, &mut self.work) {
-            return None;
-        }
         for model in 0..self.selected_models.len() {
             let ast = self.selected_models[model];
             let symbol = self.add(Kind::Model, &ast.name, &ast.span, None, model, None)?;
@@ -1309,6 +1336,25 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         }
         if self.diagnostics.limited {
             return None;
+        }
+        if self.diagnostics.rejected
+            || !ensure_supported_semantics(&self.selected_models, self.diagnostics, &mut self.work)
+        {
+            return None;
+        }
+        for symbol in &self.symbols {
+            if symbol.declaration.kind == Kind::Class
+                && symbol
+                    .declaration
+                    .parent
+                    .is_some_and(|p| self.symbols[p].declaration.kind == Kind::Model)
+            {
+                self.diagnostics.push(
+                    "ILI-SCOPE",
+                    "A concrete class in the supported data-model subset must be in a topic",
+                    Some(symbol.name_span.clone()),
+                );
+            }
         }
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind == Kind::Domain {

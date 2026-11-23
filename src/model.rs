@@ -20,6 +20,18 @@ pub enum DeclarationKind {
     Domain,
     Attribute,
     RuntimeParameter,
+    Unit,
+    LineForm,
+    Function,
+    Association,
+    Role,
+    Parameter,
+    Context,
+    View,
+    Graphic,
+    DrawingRule,
+    MetadataBasket,
+    MetaObject,
 }
 #[derive(Debug)]
 pub struct ModelInfo {

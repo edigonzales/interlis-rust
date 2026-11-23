@@ -834,6 +834,38 @@ fn runtime_parameters_and_types_have_distinct_namespaces() {
 }
 
 #[test]
+fn direct_names_are_checked_even_when_types_are_not_yet_supported() {
+    for body in [
+        "UNIT Meter [m]; Second [m];",
+        "DOMAIN F=BOOLEAN; FUNCTION F():BOOLEAN;",
+        "STRUCTURE S= P:BOOLEAN; PARAMETER P:BOOLEAN; END S;",
+        "TOPIC T= ASSOCIATION = a -- ANYCLASS; a -- ANYCLASS; END; END T;",
+        "TOPIC T= CLASS C=END C; VIEW V PROJECTION OF C; = a := #true; a := #false; END V; END T;",
+    ] {
+        let report = outcome(single(body), Status::Rejected, Some("ILI-DUPLICATE"));
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "ILI-DUPLICATE")
+            .unwrap();
+        let earlier = report
+            .sources()
+            .location(&diagnostic.related[0].span)
+            .unwrap();
+        let later = report
+            .sources()
+            .location(diagnostic.primary.as_ref().unwrap())
+            .unwrap();
+        assert!(earlier.start_byte < later.start_byte, "{body}");
+    }
+    outcome(
+        single("UNIT Meter [m]; DOMAIN Meter=BOOLEAN;"),
+        Status::Incomplete,
+        Some("ILI-UNSUPPORTED"),
+    );
+}
+
+#[test]
 fn same_model_domain_references_require_prior_definition() {
     for body in [
         "STRUCTURE S=value:Later; END S; DOMAIN Later=TEXT*4;",
