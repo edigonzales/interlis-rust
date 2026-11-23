@@ -114,7 +114,7 @@ fn scalar_types_keep_bounds_families_and_predefined_origins() {
 
 #[test]
 fn enumerations_preserve_sibling_order_final_subtrees_and_tree_domains() {
-    let body = "DOMAIN Colour=(warm(red,blue:FINAL), cool(blue), neutral) CIRCULAR; AllColours=ALL OF Colour; AllBoolean=ALL OF INTERLIS.BOOLEAN; STRUCTURE S=value:ALL OF Colour; END S;";
+    let body = "DOMAIN Colour=(warm(red,blue:FINAL), cool(blue), neutral) CIRCULAR; AllColours=ALL OF Colour; AllBoolean=ALL OF INTERLIS.BOOLEAN; Empty=(FINAL); STRUCTURE S=value:ALL OF Colour; END S;";
     for version in ["2.3", "2.4"] {
         let text = format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
         let report = outcome(request(vec![("enum", text)]), Status::CheckedSubset, None);
@@ -162,6 +162,9 @@ fn enumerations_preserve_sibling_order_final_subtrees_and_tree_domains() {
         assert!(
             matches!(graph.effective_type("M.AllBoolean"), Some(TypeInfo::EnumTree { domain }) if domain == "INTERLIS.BOOLEAN")
         );
+        assert!(
+            matches!(graph.effective_type("M.Empty"), Some(TypeInfo::Enumeration { values, .. }) if values.is_final() && values.elements().is_empty())
+        );
     }
 }
 
@@ -170,7 +173,6 @@ fn enumeration_definitions_and_tree_domains_reject_illegal_targets() {
     for (body, code) in [
         ("DOMAIN Colour=(red,red);", "ILI-ENUM-DUPLICATE"),
         ("DOMAIN Colour=(a.b,c);", "ILI-ENUM-PATH"),
-        ("DOMAIN Colour=(FINAL);", "ILI-ENUM-EMPTY"),
         ("DOMAIN X=TEXT; Tree=ALL OF X;", "ILI-ENUM-TARGET"),
         (
             "DOMAIN X=(a,b); Tree=ALL OF X; Other=ALL OF Tree;",
@@ -1328,4 +1330,96 @@ fn successful_parallel_runs_and_calls_after_errors_have_no_shared_binding_state(
             .unwrap(),
         expected
     );
+}
+
+#[test]
+fn enumeration_extensions_keep_inherited_order_and_explicit_options() {
+    let report = outcome(
+        single(
+            "DOMAIN Base=(warm(red), cool) ORDERED; Added EXTENDS Base=(warm.red(dark,light), cool(pale:FINAL), neutral); Closed EXTENDS Added=(warm.red(FINAL):FINAL); Fixed (FINAL)=BOOLEAN;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(graph.declaration("M.Fixed").unwrap().is_final());
+    let Some(TypeInfo::Enumeration {
+        values,
+        order,
+        declared_order,
+    }) = graph.effective_type("M.Closed")
+    else {
+        panic!("expected checked extension");
+    };
+    assert_eq!(
+        (*order, *declared_order),
+        (Some(EnumerationOrder::Ordered), None)
+    );
+    assert!(values.is_final());
+    assert_eq!(
+        values
+            .elements()
+            .iter()
+            .map(|e| e.name())
+            .collect::<Vec<_>>(),
+        ["warm", "cool", "neutral"]
+    );
+    let red = values.elements()[0].children().unwrap().elements()[0]
+        .children()
+        .unwrap();
+    assert_eq!(
+        red.elements().iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["dark", "light"]
+    );
+    assert!(red.is_final());
+    assert!(values.elements()[1].children().unwrap().is_final());
+    let Some(TypeInfo::Enumeration { values: base, .. }) = graph.effective_type("M.Base") else {
+        panic!("missing base");
+    };
+    assert!(
+        base.elements()[0].children().unwrap().elements()[0]
+            .children()
+            .is_none()
+    );
+}
+
+#[test]
+fn enum_extensions_reject_final_additions_duplicates_and_unbound_paths() {
+    for (body, code) in [
+        (
+            "DOMAIN Base=(a:FINAL); Bad EXTENDS Base=(b);",
+            "ILI-ENUM-FINAL",
+        ),
+        (
+            "DOMAIN Base=(a(x:FINAL)); Bad EXTENDS Base=(a(y));",
+            "ILI-ENUM-FINAL",
+        ),
+        (
+            "DOMAIN Base=(a); Bad EXTENDS Base=(a);",
+            "ILI-ENUM-DUPLICATE",
+        ),
+        (
+            "DOMAIN Base=(a(x)); Bad EXTENDS Base=(a.y(z));",
+            "ILI-ENUM-PATH",
+        ),
+        (
+            "DOMAIN Base=(a); Bad EXTENDS Base=(b(x),b.x(y));",
+            "ILI-ENUM-PATH",
+        ),
+        ("DOMAIN Base=TEXT; Bad EXTENDS Base=(a);", "ILI-ENUM-BASE"),
+        (
+            "DOMAIN Base=(a) CIRCULAR; Bad EXTENDS Base=(b);",
+            "ILI-ENUM-CIRCULAR",
+        ),
+        (
+            "DOMAIN Base=(a); Bad EXTENDS Base=(b) CIRCULAR;",
+            "ILI-ENUM-CIRCULAR",
+        ),
+        (
+            "DOMAIN Base (FINAL)=(a); Bad EXTENDS Base=(b);",
+            "ILI-DOMAIN-FINAL",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
 }

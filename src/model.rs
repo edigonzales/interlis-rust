@@ -218,6 +218,7 @@ pub struct Declaration {
     pub(crate) parent: Option<usize>,
     pub(crate) type_id: Option<usize>,
     pub(crate) declared_mandatory: Option<bool>,
+    pub(crate) final_declaration: bool,
     pub(crate) effective_mandatory: Option<bool>,
     pub(crate) reference: Option<TypeReference>,
 }
@@ -241,6 +242,9 @@ impl Declaration {
     /// The literal MANDATORY modifier for typed declarations.
     pub fn declared_mandatory(&self) -> Option<bool> {
         self.declared_mandatory
+    }
+    pub fn is_final(&self) -> bool {
+        self.final_declaration
     }
     pub fn type_reference(&self) -> Option<&TypeReference> {
         self.reference.as_ref()

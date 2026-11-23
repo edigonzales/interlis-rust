@@ -229,12 +229,16 @@ fn ensure_supported_semantics(
                     ..
                 } => {
                     let supported = match ty {
-                        Some(t) => base.is_none() && supported_type(t),
+                        Some(t) => {
+                            supported_type(t)
+                                && (base.is_none() || matches!(t, TypeSyntax::Enumeration { .. }))
+                        }
                         None => *mandatory && base.is_some(),
                     };
-                    if !properties.is_empty()
+                    if properties
+                        .iter()
+                        .any(|p| p.value != syntax::Property::Final)
                         || !constraints.is_empty()
-                        || base.is_some() && ty.is_some()
                         || ty.is_none() && !supported
                     {
                         Some(span)
@@ -423,6 +427,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 parent,
                 type_id: None,
                 declared_mandatory: mandatory,
+                final_declaration: false,
                 effective_mandatory: None,
                 reference: None,
             },
@@ -784,6 +789,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 SyntaxDecl::Domain {
                     name,
+                    properties,
                     ty,
                     mandatory,
                     base,
@@ -799,8 +805,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         Some(*mandatory),
                     ) {
                         self.symbols[id].syntax = ty.as_ref();
-                        if ty.is_none() {
-                            self.symbols[id].base = base.as_ref();
+                        self.symbols[id].base = base.as_ref();
+                        let mut finals = properties
+                            .iter()
+                            .filter(|p| p.value == syntax::Property::Final);
+                        if let Some(final_property) = finals.next() {
+                            self.symbols[id].declaration.final_declaration = true;
+                            if let Some(repeated) = finals.next() {
+                                self.duplicate(&repeated.span, &final_property.span);
+                            }
                         }
                     }
                 }
@@ -1415,6 +1428,20 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             if let Some(reference) = self.symbols[current].domain_dependency() {
                 match self.bind_name(current, reference) {
                     Some(Target::Domain(next)) => {
+                        if self.symbols[current].base.is_some()
+                            && self.symbols[next].declaration.is_final()
+                        {
+                            self.diagnostics.push_related(
+                                "ILI-DOMAIN-FINAL",
+                                "A FINAL domain cannot be extended",
+                                Some(reference.span.clone()),
+                                vec![RelatedLocation {
+                                    span: self.symbols[next].name_span.clone(),
+                                    message: "FINAL base domain".into(),
+                                }],
+                            );
+                            break None;
+                        }
                         if forward.is_none()
                             && self.domain_follows_reference(current, next, &reference.span)
                         {
@@ -1472,6 +1499,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for id in path.into_iter().rev() {
             if let Some(TypeSyntax::EnumTree { domain, .. }) = self.symbols[id].syntax {
                 result = result.and_then(|value| self.enum_tree_type(id, value, &domain.span));
+            } else if self.symbols[id].base.is_some()
+                && let Some(TypeSyntax::Enumeration {
+                    enumeration, order, ..
+                }) = self.symbols[id].syntax
+            {
+                let order = order.as_ref().map(|order| order.value);
+                result =
+                    result.and_then(|value| self.extend_enumeration(value, enumeration, order));
             }
             if let Some(mut value) = result {
                 value.mandatory |= self.symbols[id]

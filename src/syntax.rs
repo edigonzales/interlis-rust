@@ -1102,7 +1102,6 @@ mod unsupported_regressions {
                 "DOMAIN Angle=0..360 CIRCULAR;",
                 "DOMAIN Length=0..100 [INTERLIS.m];",
                 "STRUCTURE S=value:0..100 [INTERLIS.m]; END S;",
-                "DOMAIN Code (FINAL)=TEXT*4;",
                 "DOMAIN Code (ABSTRACT)=TEXT*4;",
                 "DOMAIN Angle=0..360 CLOCKWISE;",
                 "DOMAIN Angle=0..360 COUNTERCLOCKWISE;",

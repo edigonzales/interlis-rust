@@ -321,6 +321,8 @@ impl Serialize for DeclarationsOutput<'_> {
             kind: crate::DeclarationKind,
             mandatory: Option<bool>,
             declared_mandatory: Option<bool>,
+            #[serde(rename = "final")]
+            final_declaration: bool,
             type_reference: Option<Reference<'a>>,
             effective_type: Option<TypeOutput<'a>>,
             #[serde(flatten)]
@@ -340,6 +342,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 kind: declaration.kind(),
                 mandatory: declaration.mandatory(),
                 declared_mandatory: declaration.declared_mandatory(),
+                final_declaration: declaration.is_final(),
                 type_reference: reference,
                 effective_type: declaration
                     .type_id
