@@ -339,6 +339,7 @@ pub struct ContextMapping {
 pub struct TopicGenericBinding {
     pub generic_domain: String,
     pub concrete_domains: Vec<String>,
+    pub contexts: Vec<String>,
     pub deferred: bool,
 }
 
@@ -575,6 +576,7 @@ pub struct Declaration {
     pub(crate) generic: bool,
     pub(crate) context: Option<Box<[ContextMapping]>>,
     pub(crate) generic_bindings: Option<Box<[TopicGenericBinding]>>,
+    pub(crate) deferred_generics: Option<Box<[TypeReference]>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -639,6 +641,9 @@ impl Declaration {
     }
     pub fn generic_bindings(&self) -> &[TopicGenericBinding] {
         self.generic_bindings.as_deref().unwrap_or_default()
+    }
+    pub fn declared_deferred_generics(&self) -> &[TypeReference] {
+        self.deferred_generics.as_deref().unwrap_or_default()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

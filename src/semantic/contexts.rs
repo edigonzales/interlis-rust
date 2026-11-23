@@ -1,11 +1,17 @@
 use super::{
-    Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl,
-    collections::structure_targets, domains::scalar_extension,
+    Analyzer, BoundName, Kind, LookupError, Namespace, QualifiedName, SyntaxDecl,
+    collections::structure_targets, domains::scalar_extension, reference_systems::reference_ranges,
 };
-use crate::{ContextMapping, Span, TopicGenericBinding, TypeInfo, TypeReference};
+use crate::{ContextMapping, RelatedLocation, Span, TopicGenericBinding, TypeInfo, TypeReference};
 use std::collections::{BTreeMap, BTreeSet};
 
-type ContextAlternatives = BTreeMap<usize, Vec<usize>>;
+#[derive(Clone)]
+struct Alternatives {
+    domains: Vec<usize>,
+    origins: BTreeSet<usize>,
+}
+
+type ContextAlternatives = BTreeMap<usize, Alternatives>;
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_contexts(
@@ -19,6 +25,22 @@ impl Analyzer<'_, '_> {
             let Some(SyntaxDecl::Context(syntax)) = self.symbols[id].ast else {
                 continue;
             };
+            if let Some(owner) = self.symbols[id].declaration.parent
+                && let Some(&other) =
+                    self.scope_names
+                        .get(&(owner, Namespace::Type, syntax.name.value.clone()))
+            {
+                self.diagnostics.push_related(
+                    "ILI-CONTEXT-NAME",
+                    "A context name must be distinct from type names in its model",
+                    Some(syntax.name.span.clone()),
+                    vec![RelatedLocation {
+                        span: self.symbols[other].name_span.clone(),
+                        message: "Conflicting model type name".into(),
+                    }],
+                );
+                return None;
+            }
             let mut mappings = Vec::new();
             let mut used = BTreeSet::new();
             for mapping in &syntax.bindings {
@@ -88,16 +110,20 @@ impl Analyzer<'_, '_> {
                 }
                 own.extend(incoming.iter().copied());
                 for (&generic, candidates) in &alternatives[imported] {
-                    if !self.step(candidates.len(), &span) {
+                    if !self.step(candidates.domains.len() + candidates.origins.len(), &span) {
                         return None;
                     }
                     if let Some(previous) = effective.get_mut(&generic) {
-                        let joint: BTreeSet<_> =
-                            previous.iter().chain(candidates).copied().collect();
+                        let joint: BTreeSet<_> = previous
+                            .domains
+                            .iter()
+                            .chain(&candidates.domains)
+                            .copied()
+                            .collect();
                         let mut intersection = Vec::new();
                         for candidate in joint {
-                            if self.refines_context(candidate, previous, &span)?
-                                && self.refines_context(candidate, candidates, &span)?
+                            if self.refines_context(candidate, &previous.domains, &span)?
+                                && self.refines_context(candidate, &candidates.domains, &span)?
                             {
                                 intersection.push(candidate);
                             }
@@ -110,7 +136,8 @@ impl Analyzer<'_, '_> {
                             );
                             return None;
                         }
-                        *previous = intersection;
+                        previous.domains = intersection;
+                        previous.origins.extend(candidates.origins.iter().copied());
                     } else {
                         effective.insert(generic, candidates.clone());
                     }
@@ -136,7 +163,7 @@ impl Analyzer<'_, '_> {
                 for (generic, candidates) in mappings {
                     if let Some(previous) = effective.get(&generic) {
                         for &candidate in &candidates {
-                            if !self.refines_context(candidate, previous, &span)? {
+                            if !self.refines_context(candidate, &previous.domains, &span)? {
                                 self.diagnostics.push(
                                     "ILI-CONTEXT-EXTENSION",
                                     "A context override must narrow the existing alternatives",
@@ -146,7 +173,13 @@ impl Analyzer<'_, '_> {
                             }
                         }
                     }
-                    effective.insert(generic, candidates);
+                    effective.insert(
+                        generic,
+                        Alternatives {
+                            domains: candidates,
+                            origins: BTreeSet::from([context]),
+                        },
+                    );
                 }
             }
             alternatives[model] = effective;
@@ -305,6 +338,7 @@ impl Analyzer<'_, '_> {
                 }
                 deferred[topic] = deferred[base].clone();
             }
+            let mut local_deferred = Vec::new();
             for reference in &options.deferred_generics {
                 let (id, reference) = self.context_domain(topic, reference)?;
                 let error = if !self.symbols[id].declaration.is_generic() {
@@ -317,7 +351,7 @@ impl Analyzer<'_, '_> {
                         "ILI-GENERIC-CONTEXT-MISSING",
                         "A deferred generic domain needs an effective context",
                     ))
-                } else if !used.contains(&id) {
+                } else if !used.contains_key(&id) {
                     Some((
                         "ILI-GENERIC-DEFERRED-UNUSED",
                         "The topic does not use this deferred generic domain",
@@ -330,12 +364,12 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
                 deferred[topic].insert(id);
+                local_deferred.push(reference);
             }
             let mut bindings = Vec::new();
-            for generic in used {
-                let choice = alternatives[model]
-                    .get(&generic)
-                    .map_or(&[][..], Vec::as_slice);
+            for (generic, type_uses) in used {
+                let selection = alternatives[model].get(&generic);
+                let choice = selection.map_or(&[][..], |selection| selection.domains.as_slice());
                 if choice.is_empty() && !self.symbols[topic].declaration.is_abstract() {
                     self.diagnostics.push(
                         "ILI-GENERIC-CONTEXT-MISSING",
@@ -352,9 +386,19 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 }
+                for &alternative in choice {
+                    for &type_use in &type_uses {
+                        self.validate_context_use(type_use, generic, alternative, &span)?;
+                    }
+                }
                 let bytes = choice
                     .iter()
                     .chain(std::iter::once(&generic))
+                    .chain(
+                        selection
+                            .into_iter()
+                            .flat_map(|selection| &selection.origins),
+                    )
                     .map(|&id| self.symbols[id].declaration.qualified.len() + 1)
                     .sum();
                 if !self.step(bytes, &span) {
@@ -366,12 +410,21 @@ impl Analyzer<'_, '_> {
                         .iter()
                         .map(|&id| self.symbols[id].declaration.qualified.clone())
                         .collect(),
+                    contexts: selection
+                        .into_iter()
+                        .flat_map(|selection| &selection.origins)
+                        .map(|&id| self.symbols[id].declaration.qualified.clone())
+                        .collect(),
                     deferred: choice.len() > 1,
                 });
             }
             if !bindings.is_empty() {
                 self.symbols[topic].declaration.generic_bindings =
                     Some(bindings.into_boxed_slice());
+            }
+            if !local_deferred.is_empty() {
+                self.symbols[topic].declaration.deferred_generics =
+                    Some(local_deferred.into_boxed_slice());
             }
         }
         Some(())
@@ -384,7 +437,7 @@ impl Analyzer<'_, '_> {
         derived_structures: &[Vec<usize>],
         visible_models: &BTreeSet<usize>,
         span: &Span,
-    ) -> Option<BTreeSet<usize>> {
+    ) -> Option<BTreeMap<usize, BTreeSet<usize>>> {
         let mut scope = Some(topic);
         let mut containers = Vec::new();
         let mut visible_topics = BTreeSet::new();
@@ -404,7 +457,8 @@ impl Analyzer<'_, '_> {
         }
         let mut checked_containers = BTreeSet::new();
         let mut checked_types = BTreeSet::new();
-        let mut generic_domains = BTreeSet::new();
+        let mut generic_domains = BTreeMap::<usize, BTreeSet<usize>>::new();
+        let mut expanded_any = false;
         while let Some(container) = containers.pop() {
             if !self.step(1, span) {
                 return None;
@@ -428,35 +482,62 @@ impl Analyzer<'_, '_> {
                     continue;
                 }
                 if let Some(&generic) = self.generic_types.get(&id) {
-                    generic_domains.insert(generic);
+                    generic_domains.entry(generic).or_default();
                 }
                 match &self.types[id] {
                     TypeInfo::Collection(collection) => types.push(collection.element),
-                    TypeInfo::Structure(structure) => containers.extend(
-                        structure_targets(structure)
-                            .iter()
-                            .map(|reference| self.names[reference.target_name()]),
-                    ),
-                    TypeInfo::Geometry(geometry) => self
-                        .record_generic_reference(geometry.vertex.as_ref(), &mut generic_domains),
-                    TypeInfo::Numeric(range) => self.record_generic_reference(
-                        range
-                            .reference_system
+                    TypeInfo::Structure(structure) => {
+                        let targets = structure_targets(structure);
+                        if targets.is_empty() && !expanded_any {
+                            expanded_any = true;
+                            if !self.step(self.symbols.len(), span) {
+                                return None;
+                            }
+                            containers.extend(self.symbols.iter().enumerate().filter_map(
+                                |(id, symbol)| {
+                                    (symbol.declaration.kind == Kind::Structure
+                                        && visible_models.contains(&symbol.model)
+                                        && self
+                                            .containing_topic(id)
+                                            .is_none_or(|scope| visible_topics.contains(&scope)))
+                                    .then_some(id)
+                                },
+                            ));
+                        } else {
+                            containers.extend(
+                                targets
+                                    .iter()
+                                    .map(|reference| self.names[reference.target_name()]),
+                            );
+                        }
+                    }
+                    TypeInfo::Geometry(geometry) => {
+                        self.record_generic_reference(
+                            id,
+                            geometry.vertex.as_ref(),
+                            &mut generic_domains,
+                        );
+                        if let Some(ty) = geometry
+                            .vertex
                             .as_ref()
-                            .map(|reference| &reference.domain),
-                        &mut generic_domains,
-                    ),
-                    TypeInfo::Coordinate(coordinate) => {
-                        for axis in &coordinate.axes {
+                            .and_then(|vertex| self.names.get(vertex.target_name()))
+                            .and_then(|&vertex| self.symbols[vertex].declaration.type_id)
+                        {
+                            types.push(ty);
+                        }
+                    }
+                    ty => {
+                        for range in reference_ranges(ty) {
                             self.record_generic_reference(
-                                axis.reference_system
+                                id,
+                                range
+                                    .reference_system
                                     .as_ref()
                                     .map(|reference| &reference.domain),
                                 &mut generic_domains,
                             );
                         }
                     }
-                    _ => {}
                 }
             }
             let owner_scope = self.containing_topic(container);
@@ -479,13 +560,14 @@ impl Analyzer<'_, '_> {
 
     fn record_generic_reference(
         &self,
+        use_type: usize,
         reference: Option<&TypeReference>,
-        used: &mut BTreeSet<usize>,
+        used: &mut BTreeMap<usize, BTreeSet<usize>>,
     ) {
         if let Some(id) = reference.and_then(|reference| self.names.get(reference.target_name()))
             && self.symbols[*id].declaration.is_generic()
         {
-            used.insert(*id);
+            used.entry(*id).or_default().insert(use_type);
         }
     }
 }

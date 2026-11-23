@@ -384,6 +384,8 @@ impl Serialize for DeclarationsOutput<'_> {
             context_mappings: &'a [crate::ContextMapping],
             #[serde(skip_serializing_if = "<[crate::TopicGenericBinding]>::is_empty")]
             generic_bindings: &'a [crate::TopicGenericBinding],
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            deferred_generics: Vec<Reference<'a>>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -442,6 +444,11 @@ impl Serialize for DeclarationsOutput<'_> {
                 generic: declaration.is_generic(),
                 context_mappings: declaration.context_mappings(),
                 generic_bindings: declaration.generic_bindings(),
+                deferred_generics: declaration
+                    .declared_deferred_generics()
+                    .iter()
+                    .map(|reference| project_reference(reference, self.sources))
+                    .collect(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

@@ -498,6 +498,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 generic: false,
                 context: None,
                 generic_bindings: None,
+                deferred_generics: None,
             },
             name_span: name.span.clone(),
             model,

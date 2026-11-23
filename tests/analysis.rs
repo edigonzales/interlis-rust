@@ -3031,10 +3031,20 @@ fn generic_contexts_follow_imports_and_narrow_in_extending_topics() {
     let old = &graph.declaration("Base.T").unwrap().generic_bindings()[0];
     assert!(old.deferred);
     assert_eq!(old.concrete_domains, ["Base.West", "Base.East"]);
+    assert_eq!(old.contexts, ["Base.standard"]);
+    assert_eq!(
+        graph
+            .declaration("Base.T")
+            .unwrap()
+            .declared_deferred_generics()[0]
+            .declared_name(),
+        "Generic"
+    );
     let current = &graph.declaration("Refined.T").unwrap().generic_bindings()[0];
     assert!(!current.deferred);
     assert_eq!(current.generic_domain, "Base.Generic");
     assert_eq!(current.concrete_domains, ["Refined.Local"]);
+    assert_eq!(current.contexts, ["Refined.local"]);
 }
 
 #[test]
@@ -3136,4 +3146,45 @@ fn invalid_model_header_values_are_rejected_at_the_original_literal() {
         Status::CheckedSubset,
         None,
     );
+}
+
+#[test]
+fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
+    let domains =
+        "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;
+        CONTEXT default=G=A OR B;";
+    for model in [
+        "STRUCTURE Nested=position:G; END Nested; TOPIC T={deferred} CLASS Obj=geometry:ANYSTRUCTURE; END Obj; END T;",
+        "DOMAIN Vertex=COORD 0..10 <G[1]>,0..10; Line=POLYLINE WITH (STRAIGHTS) VERTEX Vertex;
+         TOPIC T={deferred} CLASS Obj=geometry:Line; END Obj; END T;",
+    ] {
+        for (deferred, status, code) in [
+            ("", Status::Rejected, Some("ILI-GENERIC-DEFERRED-REQUIRED")),
+            ("DEFERRED GENERICS G;", Status::CheckedSubset, None),
+        ] {
+            outcome(
+                single(&format!(
+                    "{domains}{}",
+                    model.replace("{deferred}", deferred)
+                )),
+                status,
+                code,
+            );
+        }
+    }
+}
+
+#[test]
+fn contexts_recheck_units_and_rotation_in_each_concrete_alternative() {
+    for (body, code) in [
+        ("DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; P=COORD 0..1 [INTERLIS.m],0..1 [INTERLIS.m];
+          N=0..1 [INTERLIS.s] <G[1]>; CONTEXT default=G=P; TOPIC T=CLASS Obj=x:N; END Obj; END T;", "ILI-REFSYSTEM-CONTEXT"),
+        ("DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; P=COORD 0..1,0..1;
+          N=0..1 [INTERLIS.rad] <G>; CONTEXT default=G=P; TOPIC T=CLASS Obj=x:N; END Obj; END T;", "ILI-REFSYSTEM-CONTEXT"),
+        ("DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; P=COORD 0..1 [INTERLIS.s],0..1 [INTERLIS.s];
+          Line=POLYLINE WITH (STRAIGHTS) VERTEX G; CONTEXT default=G=P; TOPIC T=CLASS Obj=x:Line; END Obj; END T;", "ILI-GEOMETRY-VERTEX-UNIT"),
+        ("DOMAIN G (GENERIC)=COORD NUMERIC; P=COORD 0..1; CONTEXT P=G=P;", "ILI-CONTEXT-NAME"),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
 }

@@ -391,7 +391,7 @@ impl Analyzer<'_, '_> {
         None
     }
 
-    fn check_line_precision(
+    pub(super) fn check_line_precision(
         &mut self,
         geometry: usize,
         coordinates: usize,

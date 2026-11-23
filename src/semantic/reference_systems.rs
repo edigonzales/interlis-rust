@@ -1,8 +1,11 @@
 use super::{
-    Analyzer, Kind, LookupError,
+    Analyzer, Kind, LookupError, NumberError, Symbol,
     units::{unit_extends, units_convertible},
 };
-use crate::{DomainReferenceSystem, NumericRange, OidType, Span, TypeInfo, TypeReference, syntax};
+use crate::{
+    DomainReferenceSystem, LanguageVersion, NumericRange, OidType, RelatedLocation, Span, TypeInfo,
+    TypeReference, limits::WorkBudget, syntax,
+};
 use std::collections::BTreeMap;
 
 impl Analyzer<'_, '_> {
@@ -145,29 +148,13 @@ impl Analyzer<'_, '_> {
                     return None;
                 };
                 if let Some(required) = &range_target.unit {
-                    let compatible = match &range.unit {
-                        Some(actual) => unit_extends(
-                            &self.symbols,
-                            &self.names,
-                            actual,
-                            required,
-                            &mut self.work,
-                        )
-                        .and_then(|extends| {
-                            if extends {
-                                Ok(true)
-                            } else {
-                                units_convertible(
-                                    &self.symbols,
-                                    &self.names,
-                                    actual,
-                                    required,
-                                    &mut self.work,
-                                )
-                            }
-                        }),
-                        None => Ok(required.target_name() == "INTERLIS.ANYUNIT"),
-                    };
+                    let compatible = compatible_reference_unit(
+                        &self.symbols,
+                        &self.names,
+                        range.unit.as_ref(),
+                        required,
+                        &mut self.work,
+                    );
                     match compatible {
                         Ok(true) => {}
                         Ok(false) => {
@@ -184,6 +171,70 @@ impl Analyzer<'_, '_> {
             }
         }
         self.check_reference_system_cycles(edges)
+    }
+
+    pub(super) fn validate_context_use(
+        &mut self,
+        use_type: usize,
+        generic: usize,
+        concrete: usize,
+        span: &Span,
+    ) -> Option<()> {
+        if !self.step(1, span) {
+            return None;
+        }
+        let concrete_type = self.symbols[concrete].declaration.type_id?;
+        let TypeInfo::Coordinate(coordinates) = &self.types[concrete_type] else {
+            unreachable!("context alternatives are concrete coordinates");
+        };
+        if let TypeInfo::Geometry(geometry) = &self.types[use_type] {
+            if geometry.language == LanguageVersion::V24 {
+                self.check_line_precision(use_type, concrete_type, span)?;
+            }
+            return Some(());
+        }
+        for range in reference_ranges(&self.types[use_type]) {
+            let Some(reference) = &range.reference_system else {
+                continue;
+            };
+            if self.names.get(reference.domain.target_name()) != Some(&generic) {
+                continue;
+            }
+            let result = if let Some(axis) = reference.axis {
+                match coordinates.axes[usize::from(axis - 1)].unit.as_ref() {
+                    None => Ok(true),
+                    Some(required) => compatible_reference_unit(
+                        &self.symbols,
+                        &self.names,
+                        range.unit.as_ref(),
+                        required,
+                        &mut self.work,
+                    ),
+                }
+            } else {
+                Ok(coordinates.rotation.is_some())
+            };
+            match result {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.diagnostics.push_related(
+                        "ILI-REFSYSTEM-CONTEXT",
+                        "The selected coordinate alternative cannot serve as this numeric reference system",
+                        Some(span.clone()),
+                        vec![
+                            RelatedLocation { span: reference.domain.span.clone(), message: "Generic reference system".into() },
+                            RelatedLocation { span: self.symbols[concrete].name_span.clone(), message: "Coordinate alternative".into() },
+                        ],
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    self.number_error(error, span);
+                    return None;
+                }
+            }
+        }
+        Some(())
     }
 
     fn check_reference_system_cycles(
@@ -216,11 +267,28 @@ impl Analyzer<'_, '_> {
     }
 }
 
-fn reference_ranges(ty: &TypeInfo) -> &[NumericRange] {
+pub(super) fn reference_ranges(ty: &TypeInfo) -> &[NumericRange] {
     match ty {
         TypeInfo::Numeric(range) => std::slice::from_ref(range),
         TypeInfo::Coordinate(coordinate) => &coordinate.axes,
         TypeInfo::Oid(OidType::Typed(ty)) => reference_ranges(ty),
         _ => &[],
+    }
+}
+
+fn compatible_reference_unit(
+    symbols: &[Symbol<'_>],
+    names: &BTreeMap<String, usize>,
+    actual: Option<&TypeReference>,
+    required: &TypeReference,
+    work: &mut WorkBudget,
+) -> Result<bool, NumberError> {
+    let Some(actual) = actual else {
+        return Ok(required.target_name() == "INTERLIS.ANYUNIT");
+    };
+    if unit_extends(symbols, names, actual, required, work)? {
+        Ok(true)
+    } else {
+        units_convertible(symbols, names, actual, required, work)
     }
 }
