@@ -7,6 +7,18 @@ pub fn compiler_version() -> String {
 
 #[wasm_bindgen(js_name = analyzeJson)]
 pub fn analyze_json(input: js_sys::JsString) -> Result<js_sys::JsString, JsValue> {
+    invoke_json(input, crate::analyze_json)
+}
+
+#[wasm_bindgen(js_name = parseJson)]
+pub fn parse_json(input: js_sys::JsString) -> Result<js_sys::JsString, JsValue> {
+    invoke_json(input, crate::parse_json)
+}
+
+fn invoke_json(
+    input: js_sys::JsString,
+    operation: fn(&str) -> Result<String, crate::RequestError>,
+) -> Result<js_sys::JsString, JsValue> {
     if !input.is_string() {
         return Err(JsValue::from_str(
             "REQUEST_STRING: Expected a JavaScript string",
@@ -25,7 +37,7 @@ pub fn analyze_json(input: js_sys::JsString) -> Result<js_sys::JsString, JsValue
     let text = input
         .as_string()
         .ok_or_else(|| JsValue::from_str("REQUEST_STRING: Expected a JavaScript string"))?;
-    crate::analyze_json(&text)
+    operation(&text)
         .map(|s| s.into())
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }

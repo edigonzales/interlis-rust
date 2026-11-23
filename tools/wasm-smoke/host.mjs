@@ -15,11 +15,11 @@ window.hostReady = new Promise((resolve, reject) => {
     job.resolve(data);
   };
 });
-window.callWorker = async (request) => {
+window.callWorker = async (request, syntaxOnly = false) => {
   await window.hostReady; if (failed) throw new Error('Worker is no longer usable');
   return new Promise((resolve, reject) => {
     const id = ++next;
     const timer = setTimeout(() => { failed = true; pending.delete(id); worker.terminate(); reject(new Error('Worker request timeout')); }, 10_000);
-    pending.set(id, { resolve, reject, timer }); worker.postMessage({ id, request });
+    pending.set(id, { resolve, reject, timer }); worker.postMessage({ id, request, syntaxOnly });
   });
 };

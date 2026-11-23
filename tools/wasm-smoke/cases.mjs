@@ -2,6 +2,27 @@ export const request = JSON.stringify({ sources: [{ name: 'memory:///ä😀.ili'
 export const limited = JSON.stringify({ sources: [{ name: 'a', text: 'ab' }], limits: { max_source_bytes: 1 } });
 export const escapedRequest = request.replaceAll('😀', '\\ud83d\\ude00');
 export const badRequests = ['{', '{"sources":[],"sources":[]}', '{"sources":[],"unknown":0}', '\uD800', '{"sources":[{"name":"a","text":"\\ud800"}]}', 42, null];
+const syntaxRequest = (text) => JSON.stringify({ sources: [{ name: 'syntax', text }] });
+export const parseCases = [
+  [request, 'parsed', 0],
+  [syntaxRequest('INTERLIS 2.5; ? "foreign'), 'unsupported_version', 4],
+  [syntaxRequest('INTERLIS 2.4; MODEL A AT "😀" VERSION "1" = DOMAIN A=; B=; END A.'), 'invalid', 1],
+  [limited, 'limit_exceeded', 4],
+  [syntaxRequest('INTERLIS 2.4; MODEL A AT "x" VERSION "1" = IMPORTS Missing; TOPIC T=VIEW V PROJECTION OF Missing.C; = ALL OF C; END V; END T; END A.'), 'parsed', 0],
+  [request, 'parsed', 0],
+];
+export function verifyParse(report, status) {
+  if (report.status !== status || report.validationScope !== 'syntax' || report.fullValidation !== false || 'model' in report) {
+    throw new Error(`Unexpected syntax report: ${JSON.stringify(report)}`);
+  }
+  if (status === 'parsed') {
+    if (report.diagnostics.length !== 0 || report.documents.length !== 1 || report.documents[0].languageVersion !== '2.4' || report.documents[0].models[0].name !== 'A') {
+      throw new Error(`Unexpected parsed document: ${JSON.stringify(report)}`);
+    }
+  } else if (report.documents !== null || report.diagnostics.length === 0) {
+    throw new Error(`Unexpected failure report: ${JSON.stringify(report)}`);
+  }
+}
 export function verify(report, expected = 'checked_subset') {
   if (report.status !== expected || report.fullValidation !== false || report.validationScope !== 'i0-subset') throw new Error(`Unexpected analysis contract: ${JSON.stringify(report)}`);
   if (expected === 'checked_subset') {

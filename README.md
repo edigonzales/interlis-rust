@@ -1,9 +1,17 @@
 # interlis-rust
 
-Experimental Rust foundation for an INTERLIS 2.3/2.4 compiler, shared by native
-and WebAssembly hosts. A successful result is **`checked_subset`**, with
-`validationScope: "i0-subset"` and `fullValidation: false`. It contains a read-only
-provisional model graph. It is not a full INTERLIS validator.
+INTERLIS 2.3 and 2.4 syntax parsing and experimental model analysis, shared by
+native and WebAssembly hosts. `parse(CompileRequest)` returns an owned syntax
+report. `analyze(CompileRequest)` checks the implemented model subset and returns
+`checked_subset` with a read-only provisional model graph on success.
+
+The syntax report uses `validationScope: "syntax"` and `fullValidation: false`.
+Its statuses in descending priority are `limit_exceeded`, `invalid`,
+`unsupported_version`, and `parsed`. JSON includes document and model summaries
+only for `parsed`. A header-only file has an empty `models` list. A model summary
+contains `name`, `kind`, `version`, and original source positions. Each document
+uses the language version in its own header. Imports and names are resolved by
+model analysis.
 
 The current subset includes simple data-model headers, ordinary explicit imports,
 topics, classes within topics, structures, bounded TEXT/BOOLEAN/numeric domains
@@ -77,6 +85,8 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 cargo run -- version
+cargo run -- parse --json model.ili
+cargo run -- parse --request request.json --json
 cargo run -- probe --json model.ili
 cargo run -- probe --request request.json --json
 ```
@@ -127,9 +137,11 @@ take precedence over incomplete analysis; resource limits take precedence over b
 Unsupported diagnostics are warnings; resource-limit errors mean analysis could
 not finish, without a language-invalidity verdict.
 
-CLI exits: 0 checked subset, 1 rejected, 2 invalid request/usage, 3 operational
-failure, 4 incomplete or limit exceeded. JSON stdout contains one report; host
-errors go to stderr. No implicit repository lookup exists.
+CLI success exits 0 for `parsed` or `checked_subset`. Exit 1 means invalid syntax
+or a rejected model, 2 an invalid request or usage, 3 an operational failure, and
+4 an unsupported version, incomplete analysis, or exceeded limit. JSON stdout
+contains one report. Text diagnostics and host errors go to stderr. All model
+files must be provided explicitly.
 
 ```sh
 wasm-pack build --target nodejs --out-dir target/pkg-node --out-name interlis --no-opt --no-default-features --features wasm --locked
@@ -141,7 +153,8 @@ npm run test:node
 npm run test:browser
 ```
 
-Generated packages export `compilerVersion()` and `analyzeJson(string)`. Malformed
+Generated packages export `compilerVersion()`, `parseJson(string)`, and
+`analyzeJson(string)`. Malformed
 requests (including unpaired JavaScript surrogates) throw controlled boundary
 errors. Language outcomes are normal JSON reports. The browser test loads the
 real web package in a module worker over a local HTTP server; it has no UI.
@@ -157,6 +170,5 @@ scope/type analysis and an owned model graph. CLI and WASM share the same reques
 decoder and report projection. Syntax follows the original 2.3/2.4 reference
 manuals, cross-checked against the
 [geostandards ANTLR4 grammar](https://github.com/geostandards-ch/interlis-antlr4/tree/f8f97238c2540a49915f8bb97ee99bbf434b74da)
-and targeted ili2c comparisons. The `.g4` files are references, not product build
-inputs; the geostandards grammar targets 2.4. This subset implementation does not
-establish a parser-generator choice for the complete language.
+and targeted ili2c comparisons. The `.g4` files serve as grammar references. The
+geostandards grammar targets 2.4.

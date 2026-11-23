@@ -1,7 +1,8 @@
 //! Model/container/relationship syntax. References remain unresolved source names.
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ModelKind {
     Data,
     Type,

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use interlis::{AnalysisStatus, CompileRequest, Limits, SourceInput};
+use interlis::{AnalysisStatus, CompileRequest, Limits, SourceInput, SourceSet, SyntaxStatus};
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -9,7 +9,7 @@ use std::{
 };
 
 const HELP: &str = "interlis-compiler (experimental; no full INTERLIS validation)\n\
-Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n";
+Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
 const MAX_HOST_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -129,14 +129,11 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
     Ok(sources)
 }
 
-fn render_diagnostic(
-    report: &interlis::AnalysisReport,
-    diagnostic: &interlis::Diagnostic,
-) -> String {
+fn render_diagnostic(sources: &SourceSet, diagnostic: &interlis::Diagnostic) -> String {
     let place = diagnostic
         .primary
         .as_ref()
-        .and_then(|span| report.sources().location(span));
+        .and_then(|span| sources.location(span));
     let prefix = place
         .map(|p| {
             format!(
@@ -173,12 +170,18 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
             println!("{}", interlis::compiler_version());
             Ok(0)
         }
-        Some("probe") => probe(args),
+        Some("probe") => compile(args, false),
+        Some("parse") => compile(args, true),
         _ => Err(usage(HELP)),
     }
 }
 
-fn probe(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
+enum Input {
+    Json(String),
+    Sources(CompileRequest),
+}
+
+fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Result<u8, CliError> {
     let mut json = false;
     let mut request = None;
     let mut paths = vec![];
@@ -201,27 +204,53 @@ fn probe(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
             _ => paths.push(PathBuf::from(arg)),
         }
     }
-    let report = if let Some(path) = request {
+    let input = if let Some(path) = request {
         if !paths.is_empty() || !json {
             return Err(usage("--request requires --json and no source files"));
         }
-        interlis::analyze_request_json(&read_bounded(&path)?).map_err(|e| usage(&e.to_string()))?
+        Input::Json(read_bounded(&path)?)
     } else {
         if paths.is_empty() || paths.len() > 4096 {
             return Err(usage("Expected 1 to 4096 explicit source files"));
         }
-        interlis::analyze(CompileRequest {
+        Input::Sources(CompileRequest {
             sources: read_sources(&paths)?,
             limits: Limits::default(),
         })
-        .map_err(|e| usage(&e.to_string()))?
     };
+    if syntax_only {
+        let report = match input {
+            Input::Json(text) => interlis::parse_request_json(&text),
+            Input::Sources(request) => interlis::parse(request),
+        }
+        .map_err(|e| usage(&e.to_string()))?;
+        if json {
+            println!("{}", report.to_json().map_err(operational)?);
+        } else {
+            if report.status() == SyntaxStatus::Parsed {
+                println!("Syntax parsed. Semantic validity was not checked.");
+            }
+            for diagnostic in report.diagnostics() {
+                eprintln!("{}", render_diagnostic(report.sources(), diagnostic));
+            }
+        }
+        return Ok(match report.status() {
+            SyntaxStatus::Parsed => 0,
+            SyntaxStatus::Invalid => 1,
+            SyntaxStatus::UnsupportedVersion | SyntaxStatus::LimitExceeded => 4,
+        });
+    }
+    let report = match input {
+        Input::Json(text) => interlis::analyze_request_json(&text),
+        Input::Sources(request) => interlis::analyze(request),
+    }
+    .map_err(|e| usage(&e.to_string()))?;
     if json {
         println!("{}", report.to_json().map_err(operational)?);
     } else {
         println!("{:?} (i0-subset; full validation: false)", report.status());
         for diagnostic in report.diagnostics() {
-            eprintln!("{}", render_diagnostic(&report, diagnostic));
+            eprintln!("{}", render_diagnostic(report.sources(), diagnostic));
         }
     }
     Ok(match report.status() {

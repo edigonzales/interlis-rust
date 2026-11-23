@@ -100,6 +100,84 @@ fn version_and_help_and_usage() {
 }
 
 #[test]
+fn parse_cli_reports_syntax_status_without_changing_probe() {
+    let root = std::env::temp_dir().join(format!("interlis syntax {}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("a.ili");
+    let input = root.join("request.json");
+    let text = "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = IMPORTS Missing; END A.";
+    fs::write(&file, text).unwrap();
+    let syntax = binary().arg("parse").arg(&file).output().unwrap();
+    assert_eq!(syntax.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&syntax.stdout).trim(),
+        "Syntax parsed. Semantic validity was not checked."
+    );
+    assert!(syntax.stderr.is_empty());
+    let semantic = binary().arg("probe").arg(&file).output().unwrap();
+    assert_eq!(semantic.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&semantic.stderr).contains("ILI-IMPORT-NOT-FOUND"));
+
+    for (text, extra, status, exit) in [
+        (text, serde_json::json!({}), "parsed", 0),
+        ("INTERLIS ;", serde_json::json!({}), "invalid", 1),
+        (
+            "INTERLIS 2.5;",
+            serde_json::json!({}),
+            "unsupported_version",
+            4,
+        ),
+        (
+            text,
+            serde_json::json!({"max_tokens":1}),
+            "limit_exceeded",
+            4,
+        ),
+    ] {
+        let request =
+            serde_json::json!({"sources":[{"name":"explicit", "text":text}], "limits":extra})
+                .to_string();
+        fs::write(&input, &request).unwrap();
+        let out = binary()
+            .args(["parse", "--request"])
+            .arg(&input)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(exit));
+        assert!(out.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            interlis::parse_json(&request).unwrap()
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["status"], status);
+        assert_eq!(report["documents"].is_array(), exit == 0);
+    }
+
+    fs::write(&input, "{").unwrap();
+    let invalid = binary()
+        .args(["parse", "--request"])
+        .arg(&input)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("REQUEST_JSON"));
+    fs::write(&file, [0xff]).unwrap();
+    let invalid_encoding = binary()
+        .args(["parse", "--json"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(invalid_encoding.status.code(), Some(3));
+    assert!(invalid_encoding.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid_encoding.stderr).contains("UTF-8"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn file_sources_have_portable_names_and_detect_physical_duplicates() {
     let root = std::env::temp_dir().join(format!("interlis identities {}", std::process::id()));
     fs::create_dir_all(root.join("other")).unwrap();

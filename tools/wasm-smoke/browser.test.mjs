@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse } from './cases.mjs';
 test('Chromium module worker loads generated web package and shares the core', { timeout: 45_000 }, async () => {
   const assets = new Map([
     ['/', [new URL('./index.html', import.meta.url), 'text/html']],
@@ -43,6 +43,15 @@ test('Chromium module worker loads generated web package and shares the core', {
     for(const [input,status,detail] of semanticCases) {
       const r=await page.evaluate(input=>window.callWorker(input),input);assert.equal(r.ok,true);
       verifySemantic(JSON.parse(r.response),input,status,detail);
+    }
+    const badSyntaxInput = await page.evaluate(() => window.callWorker('\uD800', true));
+    assert.equal(badSyntaxInput.ok, false);
+    assert.equal(badSyntaxInput.fatal, false);
+    assert.match(badSyntaxInput.error, /REQUEST_UTF16/);
+    for (const [input, status] of parseCases) {
+      const result = await page.evaluate((text) => window.callWorker(text, true), input);
+      assert.equal(result.ok, true);
+      verifyParse(JSON.parse(result.response), status);
     }
     assert.deepEqual(errors, []); assert.equal(requests.length, initialRequests, 'No network after initialization');
   } finally {

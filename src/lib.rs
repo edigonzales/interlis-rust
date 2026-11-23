@@ -20,7 +20,7 @@ pub use model::{
     TypeReference,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
-pub use wire::{analyze_json, analyze_request_json};
+pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,15 @@ pub enum AnalysisStatus {
     CheckedSubset,
     Rejected,
     Incomplete,
+    LimitExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyntaxStatus {
+    Parsed,
+    Invalid,
+    UnsupportedVersion,
     LimitExceeded,
 }
 
@@ -92,6 +101,34 @@ impl AnalysisReport {
     }
 }
 
+/// An owned syntax result with original sources and diagnostics.
+#[derive(Debug)]
+pub struct SyntaxReport {
+    sources: SourceSet,
+    status: SyntaxStatus,
+    diagnostics: Vec<Diagnostic>,
+    documents: Option<Vec<syntax::Document>>,
+}
+
+impl SyntaxReport {
+    pub fn status(&self) -> SyntaxStatus {
+        self.status
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn sources(&self) -> &SourceSet {
+        &self.sources
+    }
+
+    /// Encodes diagnostics and document summaries using original source positions.
+    pub fn to_json(&self) -> Result<String, RequestError> {
+        wire::encode_syntax_report(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestError {
     code: &'static str,
@@ -118,51 +155,89 @@ pub const fn compiler_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Checks the declared syntax/semantic subset with deterministic budgets.
-/// Unknown constructs remain incomplete; no request receives full validation. No host I/O.
-pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
-    request.limits.validate()?;
-    let mut sources = SourceSet::new(request.sources)?;
-    let mut diagnostics = diagnostic::Diagnostics::new(&request.limits);
+struct Frontend {
+    sources: SourceSet,
+    documents: Vec<syntax::Document>,
+    diagnostics: diagnostic::Diagnostics,
+}
+
+impl Frontend {
+    fn status(&self) -> SyntaxStatus {
+        if self.diagnostics.limited {
+            SyntaxStatus::LimitExceeded
+        } else if self.diagnostics.syntax_invalid {
+            SyntaxStatus::Invalid
+        } else if self.diagnostics.unsupported_version {
+            SyntaxStatus::UnsupportedVersion
+        } else {
+            SyntaxStatus::Parsed
+        }
+    }
+}
+
+fn frontend(inputs: Vec<SourceInput>, limits: &Limits) -> Result<Frontend, RequestError> {
+    limits.validate()?;
+    let mut sources = SourceSet::new(inputs)?;
+    let mut diagnostics = diagnostic::Diagnostics::new(limits);
+    let mut documents = Vec::new();
     let mut total = Some(0_u64);
     let mut over = false;
     for file in sources.files() {
         let len = u64::try_from(file.text().len())
             .map_err(|_| RequestError::new("REQUEST_SOURCE_SIZE", "Unaddressable source"))?;
         total = total.and_then(|n| n.checked_add(len));
-        over |= len > u64::from(request.limits.max_source_bytes);
+        over |= len > u64::from(limits.max_source_bytes);
     }
-    over |= total.is_none_or(|n| n > u64::from(request.limits.max_total_source_bytes));
-    let mut graph = None;
+    over |= total.is_none_or(|n| n > u64::from(limits.max_total_source_bytes));
     if over {
-        diagnostics.push("ILI-LIMIT", "Source byte budget exceeded", None);
+        diagnostics.limit("Source byte budget exceeded", None);
     } else {
         sources.index_lines();
-        let mut remaining = limits::SyntaxBudget::new(&request.limits);
-        let mut documents = Vec::new();
+        let mut remaining = limits::SyntaxBudget::new(limits);
         for file in 0..sources.files().len() {
-            if let Some(document) = syntax::parse(
-                &sources,
-                file,
-                &request.limits,
-                &mut remaining,
-                &mut diagnostics,
-            ) {
+            if let Some(document) =
+                syntax::parse(&sources, file, limits, &mut remaining, &mut diagnostics)
+            {
                 documents.push(document);
             }
             if diagnostics.limited {
                 break;
             }
         }
-        if !diagnostics.limited
-            && !diagnostics.syntax_invalid
-            && !diagnostics.unsupported_version
-            && !diagnostics.incomplete
-            && !diagnostics.rejected
-        {
-            graph = semantic::analyze(&documents, &request.limits, &mut diagnostics);
-        }
     }
+    Ok(Frontend {
+        sources,
+        documents,
+        diagnostics,
+    })
+}
+
+/// Parses the supplied sources as INTERLIS 2.3 or 2.4. Model validity is unchecked.
+pub fn parse(request: CompileRequest) -> Result<SyntaxReport, RequestError> {
+    let frontend = frontend(request.sources, &request.limits)?;
+    let status = frontend.status();
+    Ok(SyntaxReport {
+        status,
+        sources: frontend.sources,
+        diagnostics: frontend.diagnostics.into_sorted(),
+        documents: (status == SyntaxStatus::Parsed).then_some(frontend.documents),
+    })
+}
+
+/// Checks the declared syntax/semantic subset with deterministic budgets.
+/// Unknown constructs remain incomplete; no request receives full validation. No host I/O.
+pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
+    let mut frontend = frontend(request.sources, &request.limits)?;
+    let graph = if frontend.status() == SyntaxStatus::Parsed {
+        semantic::analyze(
+            &frontend.documents,
+            &request.limits,
+            &mut frontend.diagnostics,
+        )
+    } else {
+        None
+    };
+    let diagnostics = frontend.diagnostics;
 
     let status = if diagnostics.limited {
         AnalysisStatus::LimitExceeded
@@ -177,17 +252,10 @@ pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> 
     } else {
         AnalysisStatus::Incomplete
     };
-    diagnostics.entries.sort_by(|a, b| {
-        let location = |d: &Diagnostic| d.primary.as_ref().map(Span::sort_key);
-        location(a)
-            .cmp(&location(b))
-            .then_with(|| a.code.cmp(&b.code))
-            .then_with(|| a.message.cmp(&b.message))
-    });
     Ok(AnalysisReport {
-        sources,
+        sources: frontend.sources,
         status,
-        diagnostics: diagnostics.entries,
+        diagnostics: diagnostics.into_sorted(),
         graph,
     })
 }

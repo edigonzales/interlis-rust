@@ -22,6 +22,16 @@ impl Diagnostics {
             cap: limits.max_diagnostics as usize,
         }
     }
+    pub fn into_sorted(mut self) -> Vec<Diagnostic> {
+        self.entries.sort_by(|a, b| {
+            let location = |d: &Diagnostic| d.primary.as_ref().map(Span::sort_key);
+            location(a)
+                .cmp(&location(b))
+                .then_with(|| a.code.cmp(&b.code))
+                .then_with(|| a.message.cmp(&b.message))
+        });
+        self.entries
+    }
     pub fn syntax_error(&mut self, message: &str, primary: Option<Span>) {
         self.syntax_invalid = true;
         self.push("ILI-SYNTAX", message, primary);

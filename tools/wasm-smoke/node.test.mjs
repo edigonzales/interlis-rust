@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse } from './cases.mjs';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const wasm = createRequire(import.meta.url)(join(root, 'target/pkg-node/interlis.js'));
 test('generated Node package: boundary, Unicode, budget and subsequent calls', () => {
@@ -26,6 +26,17 @@ test('generated Node package: boundary, Unicode, budget and subsequent calls', (
       writeFileSync(path,input);
       const cli=spawnSync(resolve(root,`target/debug/interlis-compiler${process.platform==='win32'?'.exe':''}`),['probe','--request',path,'--json'],{encoding:'utf8',timeout:10000});
       assert.ifError(cli.error);assert.equal(cli.status,status==='checked_subset'?0:status==='rejected'?1:4);assert.equal(cli.stderr,'');assert.deepEqual(JSON.parse(cli.stdout),report);
+    }
+    for (const input of badRequests) assert.throws(() => wasm.parseJson(input), /REQUEST_/);
+    for (const [input, status, exit] of parseCases) {
+      const report = JSON.parse(wasm.parseJson(input));
+      verifyParse(report, status);
+      writeFileSync(path, input);
+      const cli = spawnSync(resolve(root, `target/debug/interlis-compiler${process.platform === 'win32' ? '.exe' : ''}`), ['parse', '--request', path, '--json'], { encoding: 'utf8', timeout: 10_000 });
+      assert.ifError(cli.error);
+      assert.equal(cli.status, exit);
+      assert.equal(cli.stderr, '');
+      assert.deepEqual(JSON.parse(cli.stdout), report);
     }
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 });

@@ -1,4 +1,4 @@
-use crate::{AnalysisReport, CompileRequest, RequestError, SourceLocation};
+use crate::{AnalysisReport, CompileRequest, RequestError, SourceLocation, SyntaxReport};
 use crate::{DecimalInfo, ModelGraph, SourceSet, TypeInfo};
 use serde::{
     Serialize, Serializer,
@@ -16,15 +16,28 @@ pub fn analyze_json(input: &str) -> Result<String, RequestError> {
 
 /// Strict JSON boundary returning the owned report for native host presentation.
 pub fn analyze_request_json(input: &str) -> Result<AnalysisReport, RequestError> {
+    crate::analyze(decode_request(input)?)
+}
+
+/// Strict JSON request to a bounded JSON syntax report.
+pub fn parse_json(input: &str) -> Result<String, RequestError> {
+    encode_syntax_report(&parse_request_json(input)?)
+}
+
+/// Strict JSON request to an owned syntax report.
+pub fn parse_request_json(input: &str) -> Result<SyntaxReport, RequestError> {
+    crate::parse(decode_request(input)?)
+}
+
+fn decode_request(input: &str) -> Result<CompileRequest, RequestError> {
     if input.len() > MAX_WIRE_BYTES {
         return Err(RequestError::new(
             "REQUEST_WIRE_SIZE",
             "JSON input exceeds 16 MiB",
         ));
     }
-    let request: CompileRequest = serde_json::from_str(input)
-        .map_err(|_| RequestError::new("REQUEST_JSON", "Invalid JSON request"))?;
-    crate::analyze(request)
+    serde_json::from_str(input)
+        .map_err(|_| RequestError::new("REQUEST_JSON", "Invalid JSON request"))
 }
 
 pub(crate) fn encode_report(report: &AnalysisReport) -> Result<String, RequestError> {
@@ -34,66 +47,165 @@ pub(crate) fn encode_report(report: &AnalysisReport) -> Result<String, RequestEr
         status: crate::AnalysisStatus,
         validation_scope: &'static str,
         full_validation: bool,
-        diagnostics: Vec<Diagnostic<'a>>,
+        diagnostics: Vec<DiagnosticOutput<'a>>,
         model: Option<GraphOutput<'a>>,
     }
+    bounded_json(&Output {
+        status: report.status(),
+        validation_scope: "i0-subset",
+        full_validation: false,
+        diagnostics: diagnostic_output(report.diagnostics(), report.sources()),
+        model: report.graph().map(|graph| GraphOutput {
+            graph,
+            sources: report.sources(),
+        }),
+    })
+}
+
+pub(crate) fn encode_syntax_report(report: &SyntaxReport) -> Result<String, RequestError> {
     #[derive(Serialize)]
-    struct Related<'a> {
-        message: &'a str,
-        #[serde(flatten)]
-        location: SourceLocation,
+    #[serde(rename_all = "camelCase")]
+    struct Output<'a> {
+        status: crate::SyntaxStatus,
+        validation_scope: &'static str,
+        full_validation: bool,
+        diagnostics: Vec<DiagnosticOutput<'a>>,
+        documents: Option<DocumentsOutput<'a>>,
     }
-    #[derive(Serialize)]
-    struct Diagnostic<'a> {
-        code: &'a str,
-        severity: crate::Severity,
-        message: &'a str,
-        #[serde(flatten)]
-        location: Option<SourceLocation>,
-        related: Vec<Related<'a>>,
-    }
-    let diagnostics = report
-        .diagnostics()
+    bounded_json(&Output {
+        status: report.status(),
+        validation_scope: "syntax",
+        full_validation: false,
+        diagnostics: diagnostic_output(report.diagnostics(), report.sources()),
+        documents: report
+            .documents
+            .as_deref()
+            .map(|documents| DocumentsOutput {
+                documents,
+                sources: report.sources(),
+            }),
+    })
+}
+
+#[derive(Serialize)]
+struct RelatedOutput<'a> {
+    message: &'a str,
+    #[serde(flatten)]
+    location: SourceLocation,
+}
+
+#[derive(Serialize)]
+struct DiagnosticOutput<'a> {
+    code: &'a str,
+    severity: crate::Severity,
+    message: &'a str,
+    #[serde(flatten)]
+    location: Option<SourceLocation>,
+    related: Vec<RelatedOutput<'a>>,
+}
+
+fn diagnostic_output<'a>(
+    diagnostics: &'a [crate::Diagnostic],
+    sources: &SourceSet,
+) -> Vec<DiagnosticOutput<'a>> {
+    diagnostics
         .iter()
-        .map(|d| Diagnostic {
+        .map(|d| DiagnosticOutput {
             code: &d.code,
             severity: d.severity,
             message: &d.message,
-            location: d
-                .primary
-                .as_ref()
-                .and_then(|span| report.sources().location(span)),
+            location: d.primary.as_ref().and_then(|span| sources.location(span)),
             related: d
                 .related
                 .iter()
                 .filter_map(|r| {
-                    report.sources().location(&r.span).map(|location| Related {
+                    sources.location(&r.span).map(|location| RelatedOutput {
                         message: &r.message,
                         location,
                     })
                 })
                 .collect(),
         })
-        .collect();
-    let output = Output {
-        status: report.status(),
-        validation_scope: "i0-subset",
-        full_validation: false,
-        diagnostics,
-        model: report.graph().map(|graph| GraphOutput {
-            graph,
-            sources: report.sources(),
-        }),
-    };
+        .collect()
+}
+
+struct DocumentsOutput<'a> {
+    documents: &'a [crate::syntax::Document],
+    sources: &'a SourceSet,
+}
+
+impl Serialize for DocumentsOutput<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Document<'a> {
+            source: &'a str,
+            language_version: crate::LanguageVersion,
+            models: SyntaxModelsOutput<'a>,
+        }
+        let files = self.sources.files();
+        if files.len() != self.documents.len() {
+            return Err(serde::ser::Error::custom(
+                "Missing document in syntax report",
+            ));
+        }
+        let mut seq = serializer.serialize_seq(Some(self.documents.len()))?;
+        for (document, file) in self.documents.iter().zip(files) {
+            seq.serialize_element(&Document {
+                source: file.name(),
+                language_version: document.language,
+                models: SyntaxModelsOutput {
+                    models: &document.models,
+                    sources: self.sources,
+                },
+            })?;
+        }
+        seq.end()
+    }
+}
+
+struct SyntaxModelsOutput<'a> {
+    models: &'a [crate::syntax::ModelDecl],
+    sources: &'a SourceSet,
+}
+
+impl Serialize for SyntaxModelsOutput<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Model<'a> {
+            name: &'a str,
+            kind: crate::syntax::ModelKind,
+            version: &'a str,
+            #[serde(flatten)]
+            location: SourceLocation,
+        }
+        let mut seq = serializer.serialize_seq(Some(self.models.len()))?;
+        for model in self.models {
+            let location = self
+                .sources
+                .location(&model.span)
+                .ok_or_else(|| serde::ser::Error::custom("Invalid model span in syntax report"))?;
+            seq.serialize_element(&Model {
+                name: &model.name.value,
+                kind: model.kind,
+                version: &model.version.value,
+                location,
+            })?;
+        }
+        seq.end()
+    }
+}
+
+fn bounded_json(output: &impl Serialize) -> Result<String, RequestError> {
     let mut writer = ReportWriter {
         bytes: Vec::new(),
         overflow: false,
     };
-    if serde_json::to_writer(&mut writer, &output).is_err() {
+    if serde_json::to_writer(&mut writer, output).is_err() {
         return Err(if writer.overflow {
             RequestError::new("REPORT_WIRE_SIZE", "JSON report exceeds 32 MiB")
         } else {
-            RequestError::new("REPORT_JSON", "Cannot serialize analysis report")
+            RequestError::new("REPORT_JSON", "Cannot serialize report")
         });
     }
     String::from_utf8(writer.bytes)
