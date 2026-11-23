@@ -9,7 +9,7 @@ use std::{
 };
 
 const HELP: &str = "interlis-compiler (experimental; no full INTERLIS validation)\n\
-Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
+Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
 const MAX_HOST_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -185,6 +185,7 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
     let mut json = false;
     let mut request = None;
     let mut paths = vec![];
+    let mut roots = vec![];
     let mut literal_paths = false;
     while let Some(arg) = args.next() {
         if literal_paths {
@@ -194,6 +195,13 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
         match arg.to_str() {
             Some("--") => literal_paths = true,
             Some("--json") if !json => json = true,
+            Some("--root") if !syntax_only => {
+                roots.push(
+                    args.next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .ok_or_else(|| usage("--root requires a model name"))?,
+                );
+            }
             Some("--request") if request.is_none() => {
                 request = Some(PathBuf::from(
                     args.next()
@@ -205,8 +213,10 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
         }
     }
     let input = if let Some(path) = request {
-        if !paths.is_empty() || !json {
-            return Err(usage("--request requires --json and no source files"));
+        if !paths.is_empty() || !roots.is_empty() || !json {
+            return Err(usage(
+                "--request requires --json without source or root arguments",
+            ));
         }
         Input::Json(read_bounded(&path)?)
     } else {
@@ -242,6 +252,7 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
     }
     let report = match input {
         Input::Json(text) => interlis::analyze_request_json(&text),
+        Input::Sources(request) if !roots.is_empty() => interlis::analyze_roots(request, &roots),
         Input::Sources(request) => interlis::analyze(request),
     }
     .map_err(|e| usage(&e.to_string()))?;

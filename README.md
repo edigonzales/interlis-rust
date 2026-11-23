@@ -57,9 +57,11 @@ systems, views, constraints and other omitted constructs produce `incomplete`.
 Broader namespace/visibility and declaration-order rules, issuer URI validation
 and full FLOAT transfer semantics are outside this subset check. Metadata is
 preserved without claiming those rules are validated. There is no transfer-object,
-geometry or database validation. Mixed 2.3/2.4 input sets are explicitly incomplete.
-Every supplied source is analyzed; an I-0 source without a model produces a normal
-`ILI-MODEL-MISSING` report, not a malformed-request error.
+geometry or database validation. The subset supports mixed 2.3/2.4 model sources.
+The compiler binds imports by declared model name, detects import cycles, and
+uses the referring model's edition for references to predefined domains.
+`IMPORTS UNQUALIFIED` exposes direct model-level types after local scope lookup.
+An INTERLIS header alone is a valid document with no model declarations.
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,
@@ -75,6 +77,12 @@ Other outcomes expose diagnostics and original sources, with no public partial
 graph. Numeric bounds retain original spelling, exact decimal coefficient,
 fractional digits and written exponent. JSON numeric bounds and text lengths are
 strings, including values beyond JavaScript's safe integer range.
+
+`analyze_roots(request, roots)` checks the named models and their transitive
+imports. All supplied documents must parse successfully. Semantic checks run
+only on the selected model closure. Pass `roots` as a nonempty array of distinct
+model names to `analyzeJson` or `probe --request`, or repeat `--root MODEL` in
+`probe` file mode. Omit the selection to analyze all supplied models.
 
 Rust 1.99.1 is pinned. Local package tests use Node 22.13.0 and wasm-pack 0.15.1.
 Build dependencies may be downloaded; analysis never downloads models or issuers.

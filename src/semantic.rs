@@ -2,14 +2,14 @@ use crate::{
     Limits, RelatedLocation, Span,
     diagnostic::Diagnostics,
     limits::WorkBudget,
-    model::{self, DeclarationKind as Kind, ModelGraph, ModelInfo, TypeInfo, TypeReference},
+    model::{
+        self, DeclarationKind as Kind, LanguageVersion, ModelGraph, ModelInfo, TypeInfo,
+        TypeReference,
+    },
     number::{DecimalLiteral, NumberError},
     syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::{cmp::Ordering, collections::BTreeMap};
 
 #[derive(Clone, Copy)]
 struct Effective {
@@ -30,15 +30,11 @@ struct Symbol<'a> {
     syntax: Option<&'a TypeSyntax>,
     base: Option<&'a QualifiedName>,
 }
-struct Root<'a> {
-    syntax: &'a syntax::ModelDecl,
-    model: usize,
-}
 enum Target {
     Domain(usize),
     Structure,
     Other,
-    Boolean,
+    Predefined(&'static str),
 }
 struct Analyzer<'a, 'd> {
     documents: &'a [syntax::Document],
@@ -46,15 +42,13 @@ struct Analyzer<'a, 'd> {
     diagnostics: &'d mut Diagnostics,
     work: WorkBudget,
     symbols: Vec<Symbol<'a>>,
-    roots: Vec<Root<'a>>,
+    selected_models: Vec<&'a syntax::ModelDecl>,
     models: Vec<ModelInfo>,
-    bound_imports: Vec<BTreeSet<String>>,
+    bound_imports: Vec<BTreeMap<&'a str, bool>>,
     model_names: BTreeMap<String, usize>,
     names: BTreeMap<String, usize>,
-    child_names: BTreeMap<(usize, String), usize>,
+    member_names: BTreeMap<(usize, String), usize>,
     type_names: BTreeMap<(usize, String), usize>,
-    blocked_models: BTreeSet<usize>,
-    ambiguous_models: bool,
     states: Vec<State>,
     types: Vec<TypeInfo>,
 }
@@ -85,10 +79,44 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::RestrictedStructure { .. } => false,
     }
 }
+
+fn predefined_domain(language: LanguageVersion, name: &str) -> Option<&'static str> {
+    Some(match name {
+        "URI" => "URI",
+        "NAME" => "NAME",
+        "INTERLIS_1_DATE" => "INTERLIS_1_DATE",
+        "BOOLEAN" => "BOOLEAN",
+        "HALIGNMENT" => "HALIGNMENT",
+        "VALIGNMENT" => "VALIGNMENT",
+        "ANYOID" => "ANYOID",
+        "I32OID" => "I32OID",
+        "STANDARDOID" => "STANDARDOID",
+        "UUIDOID" => "UUIDOID",
+        "LineCoord" => "LineCoord",
+        "NOOID" if language == LanguageVersion::V24 => "NOOID",
+        "GregorianYear" => "GregorianYear",
+        "XMLTime" => "XMLTime",
+        "XMLDate" => "XMLDate",
+        "XMLDateTime" => "XMLDateTime",
+        "AXIS" => "AXIS",
+        "TimeOfDay" => "TimeOfDay",
+        "UTC" => "UTC",
+        "GregorianDate" => "GregorianDate",
+        "GregorianDateTime" => "GregorianDateTime",
+        "LineSegment" => "LineSegment",
+        "StartSegment" => "StartSegment",
+        "StraightSegment" => "StraightSegment",
+        "ArcSegment" => "ArcSegment",
+        "SurfaceEdge" => "SurfaceEdge",
+        "SurfaceBoundary" => "SurfaceBoundary",
+        "LineGeometry" => "LineGeometry",
+        _ => return None,
+    })
+}
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
 fn ensure_supported_semantics(
-    documents: &[syntax::Document],
+    selected_models: &[&syntax::ModelDecl],
     diagnostics: &mut Diagnostics,
     work: &mut WorkBudget,
 ) -> bool {
@@ -208,7 +236,11 @@ fn ensure_supported_semantics(
                 SyntaxDecl::View(view) => Some(&view.span),
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
                 SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
-                SyntaxDecl::RuntimeParameter { span, .. } => Some(span),
+                SyntaxDecl::RuntimeParameter { type_use, span, .. } => match &type_use.ty {
+                    Some(ty) if supported_type(ty) => None,
+                    Some(ty) => Some(ty.span()),
+                    None => Some(span),
+                },
             };
             if unsupported.is_some() {
                 return unsupported;
@@ -216,48 +248,43 @@ fn ensure_supported_semantics(
         }
         None
     }
-    for document in documents {
-        for model in &document.models {
-            if !charge(work, diagnostics, &model.span) {
-                return false;
-            }
-            let mut unqualified = None;
-            for import in &model.imports {
-                if !charge(work, diagnostics, &import.span) {
-                    return false;
-                }
-                if unqualified.is_none() {
-                    unqualified = import.unqualified.as_ref();
-                }
-            }
-            let header = model.kind != syntax::ModelKind::Data
-                || model.contracted.is_some()
-                || model.no_incremental_transfer.is_some()
-                || model.explanation.is_some()
-                || model.translation.is_some()
-                || model.charset.is_some()
-                || model.xmlns.is_some()
-                || unqualified.is_some();
-            let span = if header {
-                unqualified
-                    .or(model.no_incremental_transfer.as_ref())
-                    .or(model.contracted.as_ref())
-                    .or_else(|| model.explanation.as_ref().map(|e| &e.span))
-                    .or(Some(&model.span))
-            } else {
-                declarations(&model.declarations, work, diagnostics)
-            };
-            if diagnostics.limited {
-                return false;
-            }
-            if let Some(span) = span {
-                diagnostics.push(
-                    "ILI-UNSUPPORTED",
-                    "Parsed syntax has semantics outside the implemented subset",
-                    Some(span.clone()),
-                );
-                return false;
-            }
+    for model in selected_models {
+        if !charge(work, diagnostics, &model.span) {
+            return false;
+        }
+        let kind_supported = model.kind == syntax::ModelKind::Data
+            || model.kind == syntax::ModelKind::Type
+                && model
+                    .declarations
+                    .iter()
+                    .all(|d| matches!(d, SyntaxDecl::Domain { .. }));
+        let header = !kind_supported
+            || model.contracted.is_some()
+            || model.no_incremental_transfer.is_some()
+            || model.explanation.is_some()
+            || model.translation.is_some()
+            || model.charset.is_some()
+            || model.xmlns.is_some();
+        let span = if header {
+            model
+                .no_incremental_transfer
+                .as_ref()
+                .or(model.contracted.as_ref())
+                .or_else(|| model.explanation.as_ref().map(|e| &e.span))
+                .or(Some(&model.span))
+        } else {
+            declarations(&model.declarations, work, diagnostics)
+        };
+        if diagnostics.limited {
+            return false;
+        }
+        if let Some(span) = span {
+            diagnostics.push(
+                "ILI-UNSUPPORTED",
+                "Parsed syntax has semantics outside the implemented subset",
+                Some(span.clone()),
+            );
+            return false;
         }
     }
     true
@@ -275,15 +302,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             diagnostics,
             work: WorkBudget::new(limits),
             symbols: vec![],
-            roots: vec![],
+            selected_models: vec![],
             models: vec![],
             bound_imports: vec![],
             model_names: BTreeMap::new(),
             names: BTreeMap::new(),
-            child_names: BTreeMap::new(),
+            member_names: BTreeMap::new(),
             type_names: BTreeMap::new(),
-            blocked_models: BTreeSet::new(),
-            ambiguous_models: false,
             states: vec![],
             types: vec![],
         }
@@ -355,18 +380,29 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         let mut duplicate = false;
         if let Some(parent) = parent {
             let key = (parent, name.value.clone());
-            if let Some(&previous) = self.child_names.get(&key) {
+            let namespace = if matches!(kind, Kind::Attribute | Kind::RuntimeParameter) {
+                &mut self.member_names
+            } else {
+                &mut self.type_names
+            };
+            if let Some(&previous) = namespace.get(&key) {
                 let previous_span = self.symbols[previous].name_span.clone();
                 self.duplicate(&name.span, &previous_span);
                 duplicate = true;
             } else {
-                self.child_names.insert(key.clone(), id);
-            }
-            if kind != Kind::Attribute {
-                self.type_names.entry(key).or_insert(id);
+                namespace.insert(key, id);
             }
         }
-        self.names.entry(qualified.clone()).or_insert(id);
+        self.names
+            .entry(qualified.clone())
+            .and_modify(|previous| {
+                if self.symbols[*previous].declaration.kind == Kind::RuntimeParameter
+                    && kind != Kind::RuntimeParameter
+                {
+                    *previous = id;
+                }
+            })
+            .or_insert(id);
         self.symbols.push(Symbol {
             declaration: model::Declaration {
                 name: name.value.clone(),
@@ -391,62 +427,165 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         });
         Some(id)
     }
-    fn collect_models(&mut self) {
+    fn collect_models(&mut self, requested: Option<&[String]>) {
+        let mut candidates = Vec::new();
+        let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
         for document in self.documents {
-            if document.models.is_empty() {
-                self.diagnostics.push(
-                    "ILI-MODEL-MISSING",
-                    "An I-0 analysis source must declare a model",
-                    Some(document.span.clone()),
-                );
-                continue;
-            }
             for ast in &document.models {
-                if !self.step(1, &ast.name.span) {
+                if !self.step(ast.name.value.len().saturating_add(1), &ast.name.span) {
                     return;
                 }
+                by_name
+                    .entry(&ast.name.value)
+                    .or_default()
+                    .push(candidates.len());
+                candidates.push((document.language, ast));
+            }
+        }
+        let mut selected = vec![requested.is_none(); candidates.len()];
+        if let Some(requested) = requested {
+            let mut pending = Vec::new();
+            for name in requested {
+                if let Some(indices) = by_name.get(name.as_str()) {
+                    for &index in indices {
+                        selected[index] = true;
+                        pending.push(index);
+                    }
+                } else {
+                    self.diagnostics.push(
+                        "ILI-ROOT-NOT-FOUND",
+                        &format!("Requested model '{name}' is absent"),
+                        None,
+                    );
+                    if self.diagnostics.limited {
+                        return;
+                    }
+                }
+            }
+            while let Some(index) = pending.pop() {
+                for import in &candidates[index].1.imports {
+                    let targets = by_name
+                        .get(import.name.value.as_str())
+                        .map_or(&[][..], Vec::as_slice);
+                    if !self.step(
+                        import
+                            .name
+                            .value
+                            .len()
+                            .saturating_add(targets.len())
+                            .saturating_add(1),
+                        &import.span,
+                    ) {
+                        return;
+                    }
+                    for &target in targets {
+                        if !std::mem::replace(&mut selected[target], true) {
+                            pending.push(target);
+                        }
+                    }
+                }
+            }
+        }
+        for ((language, ast), present) in candidates.into_iter().zip(selected) {
+            if present {
                 self.end_name(&ast.name, &ast.end_name);
                 let model = self.models.len();
                 if let Some(&previous) = self.model_names.get(&ast.name.value) {
-                    let previous_span = self.roots[previous].syntax.name.span.clone();
+                    let previous_span = self.selected_models[previous].name.span.clone();
                     self.duplicate(&ast.name.span, &previous_span);
-                    self.ambiguous_models = true;
                 } else {
                     self.model_names.insert(ast.name.value.clone(), model);
                 }
                 self.models.push(ModelInfo {
                     name: ast.name.value.clone(),
-                    language: document.language,
+                    language,
                     language_tag: ast.language_tag.as_ref().map(|n| n.value.clone()),
                     issuer: ast.issuer.value.clone(),
                     version: ast.version.value.clone(),
                     imports: vec![],
                 });
-                self.bound_imports.push(BTreeSet::new());
-                self.roots.push(Root { syntax: ast, model });
+                self.bound_imports.push(BTreeMap::new());
+                self.selected_models.push(ast);
+                if self.diagnostics.limited {
+                    return;
+                }
             }
         }
     }
     fn bind_imports(&mut self) {
-        for root in 0..self.roots.len() {
-            let model = self.roots[root].model;
-            for import in &self.roots[root].syntax.imports {
+        for model in 0..self.selected_models.len() {
+            for import in &self.selected_models[model].imports {
                 if !self.step(import.name.value.len().saturating_add(1), &import.span) {
                     return;
                 }
                 if import.name.value == "INTERLIS"
                     || self.model_names.contains_key(&import.name.value)
                 {
-                    if self.bound_imports[model].insert(import.name.value.clone()) {
-                        self.models[model].imports.push(import.name.value.clone());
-                    }
+                    let name = import.name.value.as_str();
+                    self.bound_imports[model]
+                        .entry(name)
+                        .and_modify(|flag| *flag |= import.unqualified.is_some())
+                        .or_insert_with(|| {
+                            self.models[model].imports.push(name.to_owned());
+                            import.unqualified.is_some()
+                        });
                 } else {
-                    self.blocked_models.insert(model);
                     self.diagnostics.push(
                         "ILI-IMPORT-NOT-FOUND",
                         "Imported model is not present under its declared model name",
                         Some(import.span.clone()),
                     );
+                }
+            }
+        }
+    }
+    fn check_import_cycles(&mut self) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Visit {
+            Unseen,
+            Active,
+            Done,
+        }
+        let mut seen = vec![Visit::Unseen; self.selected_models.len()];
+        let mut stack = Vec::new();
+        for start in 0..self.selected_models.len() {
+            if seen[start] != Visit::Unseen {
+                continue;
+            }
+            seen[start] = Visit::Active;
+            stack.push((start, self.selected_models[start].imports.iter()));
+            while let Some((current, edges)) = stack.last_mut() {
+                let Some(edge) = edges.next() else {
+                    seen[*current] = Visit::Done;
+                    stack.pop();
+                    continue;
+                };
+                if !self.step(1, &edge.span) {
+                    return;
+                }
+                let Some(&target) = self.model_names.get(&edge.name.value) else {
+                    continue; // The predefined model has no supplied import edges.
+                };
+                match seen[target] {
+                    Visit::Done => {}
+                    Visit::Unseen => {
+                        seen[target] = Visit::Active;
+                        stack.push((target, self.selected_models[target].imports.iter()));
+                    }
+                    Visit::Active => {
+                        self.diagnostics.push_related(
+                            "ILI-IMPORT-CYCLE",
+                            "Model import closes a dependency cycle",
+                            Some(edge.name.span.clone()),
+                            vec![RelatedLocation {
+                                span: self.selected_models[target].name.span.clone(),
+                                message: "Model already on the import path".into(),
+                            }],
+                        );
+                        if self.diagnostics.limited {
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -533,6 +672,22 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         );
                     }
                 }
+                SyntaxDecl::RuntimeParameter {
+                    name,
+                    span,
+                    type_use,
+                } => {
+                    if let Some(id) = self.add(
+                        Kind::RuntimeParameter,
+                        name,
+                        span,
+                        Some(parent),
+                        model,
+                        Some(type_use.mandatory),
+                    ) {
+                        self.symbols[id].syntax = type_use.ty.as_ref();
+                    }
+                }
                 SyntaxDecl::Unit(_)
                 | SyntaxDecl::LineForm(_)
                 | SyntaxDecl::Function(_)
@@ -541,8 +696,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 | SyntaxDecl::Context(_)
                 | SyntaxDecl::View(_)
                 | SyntaxDecl::Graphic(_)
-                | SyntaxDecl::MetadataBasket(_)
-                | SyntaxDecl::RuntimeParameter { .. } => {
+                | SyntaxDecl::MetadataBasket(_) => {
                     unreachable!("unsupported semantics are checked before indexing")
                 }
             }
@@ -556,53 +710,108 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             return None;
         }
         let model = self.symbols[owner].model;
-        if self.blocked_models.contains(&model) {
-            return None;
-        }
         let parts = &name.segments;
+        let language = self.models[model].language;
+        let accepts_structure = self.symbols[owner].declaration.kind != Kind::Domain;
+        let accepts = |symbol: &Symbol<'_>| match symbol.declaration.kind {
+            Kind::Domain => true,
+            Kind::Structure => accepts_structure,
+            _ => false,
+        };
+        let mut builtin = None;
         let id = if parts.len() == 1 {
             let mut scope = self.symbols[owner].declaration.parent;
             let mut found = None;
+            let mut later_domain = None;
             while let Some(parent) = scope {
                 if !self.step(1, &name.span) {
                     return None;
                 }
-                if let Some(&id) = self.type_names.get(&(parent, parts[0].value.clone())) {
-                    found = Some(id);
-                    break;
+                if let Some(&id) = self.type_names.get(&(parent, parts[0].value.clone()))
+                    && accepts(&self.symbols[id])
+                {
+                    if self.symbols[id].declaration.kind == Kind::Domain
+                        && self.domain_follows_reference(owner, id, &name.span)
+                    {
+                        later_domain.get_or_insert(id);
+                    } else {
+                        found = Some(id);
+                        break;
+                    }
                 }
                 scope = self.symbols[parent].declaration.parent;
             }
-            found
+            if found.is_none() {
+                if !self.step(self.bound_imports[model].len(), &name.span) {
+                    return None;
+                }
+                for (&import, &unqualified) in &self.bound_imports[model] {
+                    if !unqualified {
+                        continue;
+                    }
+                    if import == "INTERLIS" {
+                        builtin = predefined_domain(language, &parts[0].value);
+                        continue;
+                    }
+                    let parent = self.names[import];
+                    if let Some(&candidate) = self.type_names.get(&(parent, parts[0].value.clone()))
+                        && accepts(&self.symbols[candidate])
+                    {
+                        if let Some(previous) = found {
+                            self.ambiguous_type(name, [previous, candidate]);
+                            return None;
+                        }
+                        found = Some(candidate);
+                    }
+                }
+                if found.is_some() {
+                    builtin = None;
+                }
+            }
+            if builtin.is_none() {
+                found.or(later_domain)
+            } else {
+                found
+            }
         } else {
             let first = &parts[0].value;
             if first == "INTERLIS" {
-                return if parts.len() == 2 && parts[1].value == "BOOLEAN" {
-                    Some(Target::Boolean)
-                } else {
-                    self.diagnostics.push(
-                        "ILI-UNSUPPORTED",
-                        "Predefined type is outside the supported subset",
-                        Some(name.span.clone()),
-                    );
-                    None
-                };
-            }
-            if first != &self.models[model].name && !self.bound_imports[model].contains(first) {
+                if parts.len() == 2 {
+                    builtin = predefined_domain(language, &parts[1].value);
+                }
+                None
+            } else if first != &self.models[model].name
+                && !self.bound_imports[model].contains_key(first.as_str())
+            {
                 self.diagnostics.push(
                     "ILI-TYPE-NOT-FOUND",
                     "Qualified domain must use the current or an explicitly imported model name",
                     Some(name.span.clone()),
                 );
                 return None;
+            } else {
+                let qualified = parts
+                    .iter()
+                    .map(|n| n.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                self.names.get(&qualified).copied()
             }
-            let qualified = parts
-                .iter()
-                .map(|n| n.value.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            self.names.get(&qualified).copied()
         };
+        let declared = parts
+            .iter()
+            .map(|n| n.value.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(builtin) = builtin {
+            self.symbols[owner].declaration.reference = Some(TypeReference {
+                declared,
+                target: format!("INTERLIS.{builtin}"),
+                span: name.span.clone(),
+                predefined_language: Some(language),
+            });
+            return Some(Target::Predefined(builtin));
+        }
         let Some(id) = id else {
             self.diagnostics.push(
                 "ILI-TYPE-NOT-FOUND",
@@ -612,26 +821,94 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             return None;
         };
         let target = &self.symbols[id];
-        if self.blocked_models.contains(&target.model) {
+        let kind = target.declaration.kind;
+        if kind == Kind::Domain
+            && self.symbols[owner].declaration.kind != Kind::Domain
+            && !self.check_domain_order(owner, id, &name.span)
+        {
             return None;
         }
-        let kind = target.declaration.kind;
-        if !self.step(target.declaration.qualified.len(), &name.span) {
+        if !self.step(self.symbols[id].declaration.qualified.len(), &name.span) {
             return None;
         }
         self.symbols[owner].declaration.reference = Some(TypeReference {
-            declared: parts
-                .iter()
-                .map(|n| n.value.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
+            declared,
             target: self.symbols[id].declaration.qualified.clone(),
             span: name.span.clone(),
+            predefined_language: None,
         });
         Some(match kind {
             Kind::Domain => Target::Domain(id),
             Kind::Structure => Target::Structure,
             _ => Target::Other,
+        })
+    }
+    fn domain_follows_reference(&self, owner: usize, target: usize, reference: &Span) -> bool {
+        let target = &self.symbols[target];
+        self.symbols[owner].model == target.model
+            && target.name_span.sort_key() > reference.sort_key()
+    }
+
+    fn check_domain_order(&mut self, owner: usize, target: usize, reference: &Span) -> bool {
+        if self.domain_follows_reference(owner, target, reference) {
+            let target = &self.symbols[target];
+            self.diagnostics.push_related(
+                "ILI-DOMAIN-ORDER",
+                "A domain must be defined before it is referenced in the same model",
+                Some(reference.clone()),
+                vec![RelatedLocation {
+                    span: target.name_span.clone(),
+                    message: "Later domain declaration".into(),
+                }],
+            );
+            false
+        } else {
+            true
+        }
+    }
+    fn ambiguous_type(&mut self, name: &QualifiedName, candidates: [usize; 2]) {
+        self.diagnostics.push_related(
+            "ILI-TYPE-AMBIGUOUS",
+            "Unqualified type is provided by more than one imported model",
+            Some(name.span.clone()),
+            candidates
+                .iter()
+                .map(|&id| RelatedLocation {
+                    span: self.symbols[id].name_span.clone(),
+                    message: "Candidate declaration".into(),
+                })
+                .collect(),
+        );
+    }
+    fn predefined_type(&mut self, name: &str, span: &Span) -> Option<Effective> {
+        let max_length = match name {
+            "URI" => "1023",
+            "NAME" => "255",
+            "INTERLIS_1_DATE" => "8",
+            "BOOLEAN" => {
+                let id = self.types.len();
+                self.types.push(TypeInfo::Boolean);
+                return Some(Effective {
+                    ty: id,
+                    mandatory: false,
+                });
+            }
+            _ => {
+                self.diagnostics.push(
+                    "ILI-UNSUPPORTED",
+                    "Predefined domain type is outside the implemented subset",
+                    Some(span.clone()),
+                );
+                return None;
+            }
+        };
+        let id = self.types.len();
+        self.types.push(TypeInfo::Text {
+            max_length: max_length.into(),
+        });
+        Some(Effective {
+            ty: id,
+            mandatory: false,
         })
     }
     fn number_error(&mut self, error: NumberError, span: &Span) {
@@ -731,19 +1008,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Named(name) => {
                 return match self.bind_name(owner, name)? {
                     Target::Domain(id) => self.resolve_domain(id),
-                    Target::Boolean => {
-                        let id = self.types.len();
-                        self.types.push(TypeInfo::Boolean);
-                        self.symbols[owner].declaration.reference = Some(TypeReference {
-                            declared: "INTERLIS.BOOLEAN".into(),
-                            target: "INTERLIS.BOOLEAN".into(),
-                            span: name.span.clone(),
-                        });
-                        Some(Effective {
-                            ty: id,
-                            mandatory: false,
-                        })
-                    }
+                    Target::Predefined(domain) => self.predefined_type(domain, &name.span),
                     Target::Structure => {
                         self.diagnostics.push(
                             "ILI-UNSUPPORTED",
@@ -755,7 +1020,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     Target::Other => {
                         self.diagnostics.push(
                             "ILI-TYPE-NOT-FOUND",
-                            "Referenced declaration is not a supported domain",
+                            "Referenced declaration is not a domain or structure",
                             Some(name.span.clone()),
                         );
                         None
@@ -835,6 +1100,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     fn resolve_domain(&mut self, start: usize) -> Option<Effective> {
         let mut current = start;
         let mut path = vec![];
+        let mut forward = None;
         let result = loop {
             let span = self.symbols[current].name_span.clone();
             if !self.step(1, &span) {
@@ -851,20 +1117,33 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
             self.states[current] = State::Resolving;
             path.push(current);
-            if self.blocked_models.contains(&self.symbols[current].model) {
-                break None;
-            }
-            if let Some(base) = self.symbols[current].base {
-                match self.bind_name(current, base) {
+            if let Some(reference) = self.symbols[current].base {
+                match self.bind_name(current, reference) {
                     Some(Target::Domain(next)) => {
+                        if forward.is_none()
+                            && self.domain_follows_reference(current, next, &reference.span)
+                        {
+                            forward = Some((current, next, &reference.span));
+                        }
                         current = next;
                         continue;
                     }
-                    Some(Target::Boolean) => {
+                    Some(Target::Predefined(
+                        "BOOLEAN" | "URI" | "NAME" | "INTERLIS_1_DATE" | "HALIGNMENT"
+                        | "VALIGNMENT",
+                    )) => {
                         self.diagnostics.push(
                             "ILI-DERIVATION",
-                            "Predefined BOOLEAN is final and cannot be derived",
-                            Some(base.span.clone()),
+                            "This predefined domain is final and cannot be derived",
+                            Some(reference.span.clone()),
+                        );
+                        break None;
+                    }
+                    Some(Target::Predefined(_)) => {
+                        self.diagnostics.push(
+                            "ILI-UNSUPPORTED",
+                            "This predefined domain derivation is outside the implemented subset",
+                            Some(reference.span.clone()),
                         );
                         break None;
                     }
@@ -872,7 +1151,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         self.diagnostics.push(
                             "ILI-TYPE-NOT-FOUND",
                             "A domain derivation must reference a domain",
-                            Some(base.span.clone()),
+                            Some(reference.span.clone()),
                         );
                         break None;
                     }
@@ -884,6 +1163,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             };
             break self.concrete_type(current, syntax);
         };
+        let result = result.filter(|_| {
+            forward.is_none_or(|(owner, target, span)| self.check_domain_order(owner, target, span))
+        });
         if let Some(mut value) = result {
             for &id in path.iter().rev() {
                 value.mandatory |= self.symbols[id]
@@ -904,49 +1186,28 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             None
         }
     }
-    fn run(mut self) -> Option<ModelGraph> {
-        if let Some(first) = self.documents.first() {
-            for document in self.documents.iter().skip(1) {
-                if document.language != first.language {
-                    self.diagnostics.push_related(
-                        "ILI-UNSUPPORTED",
-                        "Mixed 2.3/2.4 source closure is not implemented",
-                        Some(document.span.clone()),
-                        vec![RelatedLocation {
-                            span: first.span.clone(),
-                            message: "Other source language".into(),
-                        }],
-                    );
-                }
-            }
-        }
-        if self.diagnostics.incomplete {
+    fn run(mut self, requested: Option<&[String]>) -> Option<ModelGraph> {
+        self.collect_models(requested);
+        if self.diagnostics.limited || self.diagnostics.rejected {
             return None;
         }
-        if !ensure_supported_semantics(self.documents, self.diagnostics, &mut self.work) {
+        self.bind_imports();
+        if !self.diagnostics.rejected && !self.diagnostics.limited {
+            self.check_import_cycles();
+        }
+        if self.diagnostics.limited || self.diagnostics.rejected {
             return None;
         }
-        self.collect_models();
-        if self.diagnostics.limited {
+        if !ensure_supported_semantics(&self.selected_models, self.diagnostics, &mut self.work) {
             return None;
         }
-        if !self.ambiguous_models {
-            self.bind_imports();
-        }
-        if self.diagnostics.limited {
-            return None;
-        }
-        for root in 0..self.roots.len() {
-            let ast = self.roots[root].syntax;
-            let model = self.roots[root].model;
+        for model in 0..self.selected_models.len() {
+            let ast = self.selected_models[model];
             let symbol = self.add(Kind::Model, &ast.name, &ast.span, None, model, None)?;
             self.index_declarations(symbol, model, &ast.declarations);
             if self.diagnostics.limited {
                 return None;
             }
-        }
-        if self.ambiguous_models {
-            return None;
         }
         if self.diagnostics.limited {
             return None;
@@ -960,9 +1221,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         for id in 0..self.symbols.len() {
-            if self.symbols[id].declaration.kind != Kind::Attribute
-                || self.blocked_models.contains(&self.symbols[id].model)
-            {
+            if !matches!(
+                self.symbols[id].declaration.kind,
+                Kind::Attribute | Kind::RuntimeParameter
+            ) {
                 continue;
             }
             let Some(syntax) = self.symbols[id].syntax else {
@@ -995,10 +1257,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
 }
 pub(crate) fn analyze(
     documents: &[syntax::Document],
+    requested: Option<&[String]>,
     limits: &Limits,
     diagnostics: &mut Diagnostics,
 ) -> Option<ModelGraph> {
-    Analyzer::new(documents, limits, diagnostics).run()
+    Analyzer::new(documents, limits, diagnostics).run(requested)
 }
 
 #[cfg(test)]
@@ -1025,10 +1288,10 @@ mod tests {
         let document = syntax::parse(&sources, 0, &limits, &mut tokens, &mut diagnostics).unwrap();
         let documents = [document];
         let mut analyzer = Analyzer::new(&documents, &limits, &mut diagnostics);
-        analyzer.collect_models();
+        analyzer.collect_models(None);
         analyzer.bind_imports();
-        let ast = analyzer.roots[0].syntax;
-        let model = analyzer.roots[0].model;
+        let ast = analyzer.selected_models[0];
+        let model = 0;
         let owner = analyzer
             .add(Kind::Model, &ast.name, &ast.span, None, model, None)
             .unwrap();

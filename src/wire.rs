@@ -1,7 +1,7 @@
 use crate::{AnalysisReport, CompileRequest, RequestError, SourceLocation, SyntaxReport};
-use crate::{DecimalInfo, ModelGraph, SourceSet, TypeInfo};
+use crate::{DecimalInfo, Limits, ModelGraph, SourceInput, SourceSet, TypeInfo};
 use serde::{
-    Serialize, Serializer,
+    Deserialize, Serialize, Serializer,
     ser::{SerializeSeq, SerializeStruct},
 };
 use std::io::Write;
@@ -16,7 +16,24 @@ pub fn analyze_json(input: &str) -> Result<String, RequestError> {
 
 /// Strict JSON boundary returning the owned report for native host presentation.
 pub fn analyze_request_json(input: &str) -> Result<AnalysisReport, RequestError> {
-    crate::analyze(decode_request(input)?)
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AnalysisInput {
+        sources: Vec<SourceInput>,
+        #[serde(default)]
+        limits: Limits,
+        #[serde(default)]
+        roots: Option<Vec<String>>,
+    }
+    let input: AnalysisInput = decode_request(input)?;
+    let request = CompileRequest {
+        sources: input.sources,
+        limits: input.limits,
+    };
+    match input.roots {
+        Some(roots) => crate::analyze_roots(request, &roots),
+        None => crate::analyze(request),
+    }
 }
 
 /// Strict JSON request to a bounded JSON syntax report.
@@ -29,7 +46,7 @@ pub fn parse_request_json(input: &str) -> Result<SyntaxReport, RequestError> {
     crate::parse(decode_request(input)?)
 }
 
-fn decode_request(input: &str) -> Result<CompileRequest, RequestError> {
+fn decode_request<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, RequestError> {
     if input.len() > MAX_WIRE_BYTES {
         return Err(RequestError::new(
             "REQUEST_WIRE_SIZE",
@@ -291,6 +308,8 @@ impl Serialize for DeclarationsOutput<'_> {
         struct Reference<'a> {
             declared_name: &'a str,
             target_name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            predefined_language: Option<crate::LanguageVersion>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -312,6 +331,7 @@ impl Serialize for DeclarationsOutput<'_> {
             let reference = declaration.type_reference().map(|r| Reference {
                 declared_name: r.declared_name(),
                 target_name: r.target_name(),
+                predefined_language: r.predefined_language(),
                 location: self.sources.location(r.source_span()),
             });
             seq.serialize_element(&Declaration {
@@ -321,9 +341,9 @@ impl Serialize for DeclarationsOutput<'_> {
                 mandatory: declaration.mandatory(),
                 declared_mandatory: declaration.declared_mandatory(),
                 type_reference: reference,
-                effective_type: self
-                    .graph
-                    .effective_type(declaration.qualified_name())
+                effective_type: declaration
+                    .type_id
+                    .and_then(|id| self.graph.types.get(id))
                     .map(TypeOutput),
                 location: self.sources.location(declaration.source_span()),
             })?;

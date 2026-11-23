@@ -227,10 +227,46 @@ pub fn parse(request: CompileRequest) -> Result<SyntaxReport, RequestError> {
 /// Checks the declared syntax/semantic subset with deterministic budgets.
 /// Unknown constructs remain incomplete; no request receives full validation. No host I/O.
 pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
+    analyze_models(request, None)
+}
+
+/// Analyzes the specified models and their transitive imports. Every supplied
+/// document must parse successfully before model selection is applied.
+pub fn analyze_roots(
+    request: CompileRequest,
+    roots: &[String],
+) -> Result<AnalysisReport, RequestError> {
+    analyze_models(request, Some(roots))
+}
+
+fn analyze_models(
+    request: CompileRequest,
+    roots: Option<&[String]>,
+) -> Result<AnalysisReport, RequestError> {
+    if let Some(roots) = roots
+        && (roots.is_empty()
+            || roots.len() > request.limits.max_syntax_nodes as usize
+            || roots.iter().any(|name| {
+                name.len() > 255
+                    || !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                    || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+            || roots
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != roots.len())
+    {
+        return Err(RequestError::new(
+            "REQUEST_ROOTS",
+            "Expected a nonempty list of distinct model names",
+        ));
+    }
     let mut frontend = frontend(request.sources, &request.limits)?;
     let graph = if frontend.status() == SyntaxStatus::Parsed {
         semantic::analyze(
             &frontend.documents,
+            roots,
             &request.limits,
             &mut frontend.diagnostics,
         )

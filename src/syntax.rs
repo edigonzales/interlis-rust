@@ -92,6 +92,7 @@ pub(crate) struct Document {
     pub models: Vec<ModelDecl>,
     #[allow(dead_code)] // Document-local expression storage; no expression evaluation.
     pub expressions: Vec<Expression>,
+    #[allow(dead_code)] // Whole-document range, including header-only sources.
     pub span: Span,
     // Preserved original comment ranges, without semantic interpretation.
     #[allow(dead_code)]
@@ -157,7 +158,6 @@ pub(crate) enum Declaration {
     View(ViewDecl),
     Graphic(GraphicDecl),
     MetadataBasket(MetadataBasketDecl),
-    #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
     RuntimeParameter {
         name: Name,
         type_use: TypeUseSyntax,
@@ -1188,52 +1188,47 @@ mod continuation_regressions {
         .unwrap()
     }
     #[test]
-    fn unsupported_at_each_model_import_and_attribute_transition() {
+    fn unqualified_import_and_unsupported_attribute_transitions() {
         for language in ["2.3", "2.4"] {
             let head = format!("INTERLIS {language};");
             let models = "MODEL Base AT \"https://example.invalid\" VERSION \"1\" = DOMAIN Label=TEXT*4; END Base. MODEL Other AT \"https://example.invalid\" VERSION \"1\" = DOMAIN Code=TEXT*6; END Other.";
             let data = "MODEL Data AT \"https://example.invalid\" VERSION \"1\" =";
-            for (source, marker) in [
+            for (imports, name, target) in [
+                ("IMPORTS UNQUALIFIED Base;", "Label", "Base.Label"),
+                ("IMPORTS Base, UNQUALIFIED Other;", "Code", "Other.Code"),
                 (
-                    format!("{head} {models} {data} IMPORTS UNQUALIFIED Base; END Data."),
-                    "UNQUALIFIED",
-                ),
-                (
-                    format!("{head} {models} {data} IMPORTS Base, UNQUALIFIED Other; END Data."),
-                    "UNQUALIFIED",
-                ),
-                (
-                    format!(
-                        "{head} {models} {data} IMPORTS Base; IMPORTS UNQUALIFIED Other; END Data."
-                    ),
-                    "UNQUALIFIED",
-                ),
-                (
-                    format!(
-                        "{head} {data} TOPIC T=CLASS C=value:TEXT*4 := \"X\"; END C; END T; END Data."
-                    ),
-                    "value:TEXT*4 := \"X\";",
+                    "IMPORTS Base; IMPORTS UNQUALIFIED Other;",
+                    "Code",
+                    "Other.Code",
                 ),
             ] {
-                let expected = source.find(marker).unwrap();
-                let report = run(source);
-                assert_eq!(report.status(), AnalysisStatus::Incomplete);
-                assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
-                let d = report
-                    .diagnostics()
-                    .iter()
-                    .find(|d| {
-                        d.code == "ILI-UNSUPPORTED"
-                            && d.message != "Semantic analysis is not implemented yet"
-                    })
+                let report = run(format!(
+                    "{head} {models} {data} {imports} STRUCTURE S=value:{name}; END S; END Data."
+                ));
+                assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+                let reference = report
+                    .graph()
+                    .unwrap()
+                    .declaration("Data.S.value")
+                    .unwrap()
+                    .type_reference()
                     .unwrap();
-                let location = report
-                    .sources()
-                    .location(d.primary.as_ref().unwrap())
-                    .unwrap();
-                assert_eq!(location.start_byte as usize, expected);
-                assert_eq!(location.end_byte as usize, expected + marker.len());
+                assert_eq!(reference.declared_name(), name);
+                assert_eq!(reference.target_name(), target);
             }
+            let marker = "value:TEXT*4 := \"X\";";
+            let source = format!("{head} {data} TOPIC T=CLASS C={marker} END C; END T; END Data.");
+            let expected = source.find(marker).unwrap();
+            let report = run(source);
+            assert_eq!(report.status(), AnalysisStatus::Incomplete);
+            let d = &report.diagnostics()[0];
+            assert_eq!(d.code, "ILI-UNSUPPORTED");
+            let location = report
+                .sources()
+                .location(d.primary.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(location.start_byte as usize, expected);
+            assert_eq!(location.end_byte as usize, expected + marker.len());
         }
         let valid = "INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT \"https://example.invalid\" VERSION \"1\" = END A.";
         let report = run(valid.into());
@@ -1354,22 +1349,8 @@ mod definite_syntax_regressions {
                     limits,
                 })
                 .unwrap();
-                assert_eq!(
-                    report.status(),
-                    if doc.models.is_empty() {
-                        AnalysisStatus::Rejected
-                    } else {
-                        AnalysisStatus::CheckedSubset
-                    }
-                );
-                if doc.models.is_empty() {
-                    assert!(
-                        report
-                            .diagnostics()
-                            .iter()
-                            .any(|d| d.code == "ILI-MODEL-MISSING")
-                    );
-                }
+                assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+                assert_eq!(report.graph().unwrap().models().len(), doc.models.len());
                 assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
             }
         }

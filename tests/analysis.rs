@@ -1,6 +1,6 @@
 use interlis::{
     AnalysisReport, AnalysisStatus as Status, CompileRequest, DeclarationKind, LanguageVersion,
-    Limits, SourceInput, TypeInfo, analyze,
+    Limits, SourceInput, TypeInfo, analyze, analyze_roots,
 };
 const BASE: &str = r#"INTERLIS 2.3;
 MODEL ProbeBase (en) AT "https://example.invalid" VERSION "2026-11-10" =
@@ -522,18 +522,22 @@ fn numeric_order_precision_spelling_and_operational_limits_are_distinct() {
     );
 }
 #[test]
-fn every_supplied_source_is_checked_and_mixed_language_is_incomplete() {
+fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     let mut input = pair("2.3");
     input.sources[1].text = input.sources[1].text.replacen("2.3", "2.4", 1);
-    outcome(input, Status::Incomplete, Some("ILI-UNSUPPORTED"));
+    let report = outcome(input, Status::CheckedSubset, None);
+    let models = report.graph().unwrap().models();
+    assert_eq!(models[0].language(), LanguageVersion::V23);
+    assert_eq!(models[1].language(), LanguageVersion::V24);
     let mut input = pair("2.3");
     input.sources.push(SourceInput {name:"unused".into(),text:"INTERLIS 2.3; MODEL Unused AT \"https://example.invalid\" VERSION \"1\" = DOMAIN X=TEXT*0; END Unused.".into()});
     outcome(input, Status::Rejected, Some("ILI-TEXT-LENGTH"));
-    outcome(
+    let empty = outcome(
         request(vec![("empty-model-file", "INTERLIS 2.3;".into())]),
-        Status::Rejected,
-        Some("ILI-MODEL-MISSING"),
+        Status::CheckedSubset,
+        None,
     );
+    assert!(empty.graph().unwrap().models().is_empty());
     for body in [
         "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
         "TOPIC T = VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
@@ -543,6 +547,277 @@ fn every_supplied_source_is_checked_and_mixed_language_is_incomplete() {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
     outcome(pair("2.4"), Status::CheckedSubset, None);
+}
+
+#[test]
+fn roots_include_transitive_imports_and_ignore_unselected_model_semantics() {
+    let sources = || {
+        request(vec![
+            ("z-main", DATA.replace("2.3", "2.4")),
+            ("a-base", BASE.replace("=\n DOMAIN", "= IMPORTS Units;\n DOMAIN")),
+            ("b-units", "INTERLIS 2.4; TYPE MODEL Units AT \"x\" VERSION \"1\" = DOMAIN Count=0..10; END Units.".into()),
+            ("c-unselected", "INTERLIS 2.4; MODEL Unused AT \"x\" VERSION \"1\" = IMPORTS Missing; END Unused. MODEL UnitsUnused AT \"x\" VERSION \"1\" = END UnitsUnused.".into()),
+        ])
+    };
+    let report = analyze_roots(sources(), &["ProbeData".into()]).unwrap();
+    assert_eq!(
+        report.status(),
+        Status::CheckedSubset,
+        "{:?}",
+        report.diagnostics()
+    );
+    let graph = report.graph().unwrap();
+    assert_eq!(
+        graph.models().iter().map(|m| m.name()).collect::<Vec<_>>(),
+        ["ProbeBase", "Units", "ProbeData"]
+    );
+    assert_eq!(graph.models()[0].imports(), &["Units"]);
+    assert_eq!(graph.models()[2].imports(), &["ProbeBase"]);
+    assert_eq!(
+        graph
+            .declaration("ProbeData.Items.Item.count")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .target_name(),
+        "ProbeBase.Count"
+    );
+    assert!(graph.declaration("Unused").is_none());
+    outcome(sources(), Status::Rejected, Some("ILI-IMPORT-NOT-FOUND"));
+    let absent = analyze_roots(sources(), &["Absent".into()]).unwrap();
+    assert_eq!(absent.status(), Status::Rejected);
+    assert_eq!(absent.diagnostics()[0].code, "ILI-ROOT-NOT-FOUND");
+    let mut ambiguous = sources();
+    ambiguous.sources.push(SourceInput {
+        name: "second-base".into(),
+        text: BASE.replace("2026-11-10", "2026-11-11"),
+    });
+    let ambiguous = analyze_roots(ambiguous, &["ProbeData".into()]).unwrap();
+    assert_eq!(ambiguous.status(), Status::Rejected);
+    assert_eq!(ambiguous.diagnostics()[0].code, "ILI-DUPLICATE");
+    assert_eq!(ambiguous.diagnostics()[0].related.len(), 1);
+}
+
+#[test]
+fn import_cycles_require_a_path_back_to_an_active_model() {
+    let sources = |last: &str| {
+        request(vec![
+            (
+                "a",
+                "INTERLIS 2.4; MODEL A AT \"x\" VERSION \"1\" = IMPORTS B,C; END A.".into(),
+            ),
+            (
+                "b",
+                "INTERLIS 2.4; MODEL B AT \"x\" VERSION \"1\" = IMPORTS C; END B.".into(),
+            ),
+            (
+                "c",
+                format!("INTERLIS 2.4; MODEL C AT \"x\" VERSION \"1\" = {last} END C."),
+            ),
+        ])
+    };
+    assert_eq!(
+        analyze_roots(sources(""), &["A".into()]).unwrap().status(),
+        Status::CheckedSubset
+    );
+    for (target, expected_source) in [("C", "c"), ("A", "a")] {
+        let cyclic = analyze_roots(sources(&format!("IMPORTS {target};")), &["A".into()]).unwrap();
+        assert_eq!(cyclic.status(), Status::Rejected);
+        let [d] = cyclic.diagnostics() else {
+            panic!("{:?}", cyclic.diagnostics());
+        };
+        assert_eq!(d.code, "ILI-IMPORT-CYCLE");
+        assert_eq!(
+            cyclic
+                .sources()
+                .location(d.primary.as_ref().unwrap())
+                .unwrap()
+                .source,
+            "c"
+        );
+        assert_eq!(
+            cyclic
+                .sources()
+                .location(&d.related[0].span)
+                .unwrap()
+                .source,
+            expected_source
+        );
+    }
+}
+
+#[test]
+fn unqualified_imports_detect_ambiguity_without_leaking_transitive_visibility() {
+    let source = |imports: &str, name: &str| {
+        request(vec![
+            ("a", BASE.into()),
+            ("b", BASE.replace("ProbeBase", "Other")),
+            (
+                "c",
+                format!(
+                    "INTERLIS 2.3; MODEL M AT \"x\" VERSION \"1\" = {imports} STRUCTURE S=value:{name}; END S; END M."
+                ),
+            ),
+        ])
+    };
+    let report = outcome(
+        source("IMPORTS UNQUALIFIED ProbeBase, UNQUALIFIED Other;", "Label"),
+        Status::Rejected,
+        Some("ILI-TYPE-AMBIGUOUS"),
+    );
+    assert_eq!(report.diagnostics()[0].related.len(), 2);
+    outcome(
+        source("IMPORTS UNQUALIFIED ProbeBase, Other;", "Label"),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        source("IMPORTS ProbeBase;", "Label"),
+        Status::Rejected,
+        Some("ILI-TYPE-NOT-FOUND"),
+    );
+    let mut input = source("IMPORTS UNQUALIFIED Other;", "Label");
+    input.sources[1].text = "INTERLIS 2.3; MODEL Other AT \"x\" VERSION \"1\" = IMPORTS UNQUALIFIED ProbeBase; END Other.".into();
+    outcome(input, Status::Rejected, Some("ILI-TYPE-NOT-FOUND"));
+    let mut input = source(
+        "IMPORTS UNQUALIFIED ProbeBase, UNQUALIFIED INTERLIS;",
+        "XMLDate",
+    );
+    input.sources[0].text = BASE.replace("Label=TEXT*40", "XMLDate=BOOLEAN");
+    let report = outcome(input, Status::CheckedSubset, None);
+    let attr = report.graph().unwrap().declaration("M.S.value").unwrap();
+    assert_eq!(
+        attr.type_reference().unwrap().target_name(),
+        "ProbeBase.XMLDate"
+    );
+}
+
+#[test]
+fn runtime_parameters_and_types_have_distinct_namespaces() {
+    for body in [
+        "PARAMETER Value:BOOLEAN; DOMAIN Value=TEXT*3;",
+        "DOMAIN Value=TEXT*3; PARAMETER Value:BOOLEAN;",
+    ] {
+        let report = outcome(single(body), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        assert!(
+            matches!(graph.effective_type("M.Value"), Some(TypeInfo::Text { max_length }) if max_length == "3")
+        );
+        let (parameter, ty) = graph.runtime_parameter("M.Value").unwrap();
+        assert_eq!(parameter.kind(), DeclarationKind::RuntimeParameter);
+        assert!(matches!(ty, TypeInfo::Boolean));
+        let report: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        let parameter = report["model"]["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["kind"] == "runtime_parameter")
+            .unwrap();
+        assert_eq!(parameter["effectiveType"]["kind"], "boolean");
+    }
+    let report = outcome(
+        single("PARAMETER Value:BOOLEAN; Value:TEXT*3;"),
+        Status::Rejected,
+        Some("ILI-DUPLICATE"),
+    );
+    assert_eq!(report.diagnostics()[0].related.len(), 1);
+}
+
+#[test]
+fn same_model_domain_references_require_prior_definition() {
+    for body in [
+        "STRUCTURE S=value:Later; END S; DOMAIN Later=TEXT*4;",
+        "DOMAIN X EXTENDS Later=MANDATORY; Later=BOOLEAN;",
+    ] {
+        let report = outcome(single(body), Status::Rejected, Some("ILI-DOMAIN-ORDER"));
+        let diag = &report.diagnostics()[0];
+        let reference = report
+            .sources()
+            .location(diag.primary.as_ref().unwrap())
+            .unwrap();
+        let declaration = report.sources().location(&diag.related[0].span).unwrap();
+        assert!(reference.start_byte < declaration.start_byte);
+    }
+    outcome(
+        single("DOMAIN Later=TEXT*4; STRUCTURE S=value:Later; END S;"),
+        Status::CheckedSubset,
+        None,
+    );
+    let report = outcome(
+        single("DOMAIN D=TEXT*4; TOPIC T=STRUCTURE S=value:D; END S; DOMAIN D=TEXT*8; END T;"),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert_eq!(
+        graph
+            .declaration("M.T.S.value")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .target_name(),
+        "M.D"
+    );
+    assert!(
+        matches!(graph.effective_type("M.T.S.value"), Some(TypeInfo::Text { max_length }) if max_length == "4")
+    );
+}
+
+#[test]
+fn predefined_domains_preserve_language_origin_and_visibility() {
+    let src = |version: &str, model: &str| {
+        format!(
+            "INTERLIS {version}; MODEL {model} AT \"x\" VERSION \"1\" = IMPORTS UNQUALIFIED INTERLIS; STRUCTURE S=ref:INTERLIS.URI; date:INTERLIS_1_DATE; END S; END {model}."
+        )
+    };
+    let report = outcome(
+        request(vec![("a", src("2.3", "Old")), ("b", src("2.4", "New"))]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    for (model, version) in [("Old", LanguageVersion::V23), ("New", LanguageVersion::V24)] {
+        for (attr, name, length) in [("ref", "URI", "1023"), ("date", "INTERLIS_1_DATE", "8")] {
+            let qualified = format!("{model}.S.{attr}");
+            let reference = graph
+                .declaration(&qualified)
+                .unwrap()
+                .type_reference()
+                .unwrap();
+            assert_eq!(reference.predefined_language(), Some(version));
+            assert_eq!(reference.target_name(), format!("INTERLIS.{name}"));
+            assert!(
+                matches!(graph.effective_type(&qualified), Some(TypeInfo::Text { max_length }) if max_length == length)
+            );
+        }
+    }
+    for (language, expected, code) in [
+        ("2.3", Status::Rejected, "ILI-TYPE-NOT-FOUND"),
+        ("2.4", Status::Incomplete, "ILI-UNSUPPORTED"),
+    ] {
+        let text = format!(
+            "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=value:INTERLIS.NOOID; END S; END M."
+        );
+        outcome(request(vec![("a", text)]), expected, Some(code));
+    }
+    let report = outcome(
+        single(
+            "IMPORTS UNQUALIFIED INTERLIS; TOPIC INTERLIS_1_DATE=END INTERLIS_1_DATE; STRUCTURE S=value:INTERLIS_1_DATE; END S;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    assert_eq!(
+        report
+            .graph()
+            .unwrap()
+            .declaration("M.S.value")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .target_name(),
+        "INTERLIS.INTERLIS_1_DATE"
+    );
 }
 #[test]
 fn semantic_error_ranges_keep_original_utf8_and_utf16_with_bom_and_crlf() {

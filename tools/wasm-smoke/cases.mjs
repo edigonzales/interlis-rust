@@ -53,7 +53,7 @@ export const syntaxCases = [
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CONTEXT first=G=X; empty= END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
-  ['INTERLIS 2.4; CONTRACTED TYPE MODEL M (de) NOINCREMENTALTRANSFER AT "x" VERSION "1" // details // TRANSLATION OF Original ["old"] = CHARSET "UTF-8"; XMLNS "urn:x"; IMPORTS UNQUALIFIED Missing, INTERLIS; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; CONTRACTED TYPE MODEL M (de) NOINCREMENTALTRANSFER AT "x" VERSION "1" // details // TRANSLATION OF Original ["old"] = CHARSET "UTF-8"; XMLNS "urn:x"; IMPORTS UNQUALIFIED Missing, INTERLIS; END M.', 'rejected', 'ILI-IMPORT-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=ASSOCIATION = first -- {9007199254740993..*} Unknown.C OR ANYCLASS; second -<#> {1} Missing; ATTRIBUTE flag:BOOLEAN; END; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CONTEXT first=G=C OR D; TOPIC T=DEFERRED GENERICS G; CLASS C (ABSTRACT) EXTENDS Unknown.C = NO OID; ATTRIBUTE SUBDIVISION n (EXTENDED):BOOLEAN; PARAMETER p:METAOBJECT; END C; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=ASSOCIATION = a -- {1..} C; END; END T; END M.', 'rejected', 'ILI-SYNTAX'],
@@ -97,6 +97,10 @@ function pair(version) {
   ]};
 }
 const valid23=pair('2.3'),valid24=pair('2.4');
+const selected=pair('2.4');
+selected.roots=['Data'];
+selected.sources[0].text=selected.sources[0].text.replace('2.4','2.3');
+selected.sources.push({name:'unselected',text:'INTERLIS 2.4; MODEL Other AT "x" VERSION "1" = IMPORTS Missing; END Other.'});
 const missing=pair('2.4');missing.sources.shift();
 const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('Base','Other');
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
@@ -114,6 +118,7 @@ export const semanticCases = [
   [JSON.stringify(valid24),'checked_subset','2.4'],
   [JSON.stringify(deepEnumeration),'limit_exceeded','ILI-LIMIT'],
   [JSON.stringify(valid23),'checked_subset','2.3'],
+  [JSON.stringify(selected),'checked_subset','2.3/2.4'],
   [JSON.stringify(valid24),'checked_subset','2.4'],
   [JSON.stringify(missing),'rejected','ILI-IMPORT-NOT-FOUND'],
   [JSON.stringify(wrong),'rejected','ILI-IMPORT-NOT-FOUND'],
@@ -134,7 +139,8 @@ export function verifySemantic(report,input,status,detail) {
     }
     return;
   }
-  const graph=report.model;if(!graph || report.diagnostics.length!==0 || graph.models.length!==2 || graph.models[0].name!=='Base' || graph.models[1].name!=='Data' || graph.models[1].imports.join(',')!=='Base' || graph.models.some(m=>m.languageVersion!==detail)) throw new Error('Incorrect bound model headers');
+  const versions=detail.includes('/')?detail.split('/'):[detail,detail];
+  const graph=report.model;if(!graph || report.diagnostics.length!==0 || graph.models.length!==2 || graph.models[0].name!=='Base' || graph.models[1].name!=='Data' || graph.models[1].imports.join(',')!=='Base' || graph.models.some((m,i)=>m.languageVersion!==versions[i])) throw new Error('Incorrect bound model headers');
   const declaration=name=>graph.declarations.find(d=>d.qualifiedName===name);
   const members=graph.declarations.filter(d=>d.kind==='attribute' && d.qualifiedName.startsWith('Data.Items.Item.'));
   if(members.map(d=>d.name).join(',')!=='label,count') throw new Error('Incorrect member order');

@@ -1332,7 +1332,7 @@ mod tests {
             "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
             "TOPIC T=ASSOCIATION = a -- Unknown; END; END T;",
             "CONTEXT C=G=Unknown;",
-            "PARAMETER p:BOOLEAN;",
+            "PARAMETER p:MANDATORY;",
         ] {
             let text = model("2.4", body);
             parse(&text);
@@ -1348,12 +1348,7 @@ mod tests {
             assert!(report.graph().is_none());
             assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         }
-        for header in [
-            "TYPE MODEL",
-            "REFSYSTEM MODEL",
-            "SYMBOLOGY MODEL",
-            "CONTRACTED MODEL",
-        ] {
+        for header in ["REFSYSTEM MODEL", "SYMBOLOGY MODEL", "CONTRACTED MODEL"] {
             let text = format!("INTERLIS 2.4; {header} M AT \"x\" VERSION \"1\" = END M.");
             parse(&text);
             let report = analyze(CompileRequest {

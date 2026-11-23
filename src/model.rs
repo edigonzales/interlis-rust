@@ -19,6 +19,7 @@ pub enum DeclarationKind {
     Structure,
     Domain,
     Attribute,
+    RuntimeParameter,
 }
 #[derive(Debug)]
 pub struct ModelInfo {
@@ -97,6 +98,7 @@ pub struct TypeReference {
     pub(crate) declared: String,
     pub(crate) target: String,
     pub(crate) span: Span,
+    pub(crate) predefined_language: Option<LanguageVersion>,
 }
 impl TypeReference {
     pub fn declared_name(&self) -> &str {
@@ -107,6 +109,9 @@ impl TypeReference {
     }
     pub fn source_span(&self) -> &Span {
         &self.span
+    }
+    pub fn predefined_language(&self) -> Option<LanguageVersion> {
+        self.predefined_language
     }
 }
 #[derive(Debug)]
@@ -134,11 +139,11 @@ impl Declaration {
     pub fn source_span(&self) -> &Span {
         &self.span
     }
-    /// Effective definition requirement, only for attributes. Domain derivations contribute.
+    /// Effective definition requirement for attributes or runtime parameters.
     pub fn mandatory(&self) -> Option<bool> {
         self.effective_mandatory
     }
-    /// The literal MANDATORY modifier, only for domain/attribute declarations.
+    /// The literal MANDATORY modifier for typed declarations.
     pub fn declared_mandatory(&self) -> Option<bool> {
         self.declared_mandatory
     }
@@ -161,7 +166,8 @@ impl ModelGraph {
     pub fn declarations(&self) -> &[Declaration] {
         &self.declarations
     }
-    /// Exact full qualified-name lookup; never strips prefixes or exposes arena IDs.
+    /// Exact full qualified-name lookup. A type takes precedence over a same-name
+    /// runtime parameter; use `runtime_parameter` for its separate namespace.
     pub fn declaration(&self, name: &str) -> Option<&Declaration> {
         self.names
             .get(name)
@@ -191,5 +197,14 @@ impl ModelGraph {
         self.declaration(name)?
             .type_id
             .and_then(|id| self.types.get(id))
+    }
+
+    /// Looks up a runtime parameter by its qualified name in the member namespace.
+    pub fn runtime_parameter(&self, name: &str) -> Option<(&Declaration, &TypeInfo)> {
+        let declaration = self
+            .declarations
+            .iter()
+            .find(|d| d.kind == DeclarationKind::RuntimeParameter && d.qualified == name)?;
+        Some((declaration, self.types.get(declaration.type_id?)?))
     }
 }

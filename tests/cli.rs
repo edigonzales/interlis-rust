@@ -26,6 +26,16 @@ fn real_cli_streams_files_and_request_errors() {
     assert_eq!(report["status"], "checked_subset");
     assert_eq!(report["fullValidation"], false);
     assert_eq!(report["model"]["models"][0]["name"], "A");
+    fs::write(&source, "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = END A. MODEL B AT \"x\" VERSION \"1\" = IMPORTS Missing; END B.").unwrap();
+    let selected = binary()
+        .args(["probe", "--json", "--root", "A"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(selected.status.code(), Some(0));
+    assert_eq!(report["model"]["models"].as_array().unwrap().len(), 1);
+    assert_eq!(report["model"]["models"][0]["name"], "A");
     let duplicate = binary()
         .arg("probe")
         .arg(&source)
@@ -71,6 +81,15 @@ fn real_cli_streams_files_and_request_errors() {
     assert_eq!(limited.status.code(), Some(4));
     let report: serde_json::Value = serde_json::from_slice(&limited.stdout).unwrap();
     assert_eq!(report["status"], "limit_exceeded");
+    fs::write(&request, r#"{"sources":[{"name":"a","text":"INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = END A."}],"roots":["Missing"]}"#).unwrap();
+    let missing_root = binary()
+        .args(["probe", "--json", "--request"])
+        .arg(&request)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&missing_root.stdout).unwrap();
+    assert_eq!(missing_root.status.code(), Some(1));
+    assert_eq!(report["diagnostics"][0]["code"], "ILI-ROOT-NOT-FOUND");
     fs::remove_dir_all(root).unwrap();
 }
 
