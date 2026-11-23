@@ -1325,8 +1325,6 @@ mod tests {
     #[test]
     fn new_syntax_cannot_silently_enter_the_partial_semantic_graph() {
         for body in [
-            "TOPIC A=END A; TOPIC T EXTENDS A=END T;",
-            "TOPIC A=END A; TOPIC T=DEPENDS ON A; END T;",
             "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
             "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
             "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",

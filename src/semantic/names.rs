@@ -179,6 +179,34 @@ impl Analyzer<'_, '_> {
         }
     }
 
+    pub(super) fn visible_name(
+        &mut self,
+        mut scope: usize,
+        name: &str,
+        kinds: Option<&[Kind]>,
+        location: &Span,
+    ) -> Result<Option<usize>, LookupError> {
+        loop {
+            let declared = if let Some(kinds) = kinds {
+                self.scoped_name(scope, name, kinds)
+            } else {
+                self.scope_names
+                    .get(&(scope, Namespace::Type, name.to_owned()))
+                    .copied()
+            };
+            if declared.is_some() {
+                return Ok(declared);
+            }
+            let Some(base) = self.symbols[scope].base_scope else {
+                return Ok(None);
+            };
+            if !self.step(name.len() + 1, location) {
+                return Err(LookupError::Limit);
+            }
+            scope = base;
+        }
+    }
+
     pub(super) fn lookup_name(
         &mut self,
         owner: usize,
@@ -210,13 +238,12 @@ impl Analyzer<'_, '_> {
             let mut scope = self.names[first];
             let last = parts.len() - 1;
             for part in &parts[1..last] {
-                scope = *self
-                    .scope_names
-                    .get(&(scope, Namespace::Type, part.value.clone()))
+                scope = self
+                    .visible_name(scope, &part.value, None, location)?
                     .ok_or_else(|| self.missing_from_scope(scope))?;
             }
             return self
-                .scoped_name(scope, &parts[last].value, kinds)
+                .visible_name(scope, &parts[last].value, Some(kinds), location)?
                 .map(BoundName::Declared)
                 .ok_or_else(|| self.missing_from_scope(scope));
         }
@@ -227,7 +254,7 @@ impl Analyzer<'_, '_> {
             if !self.step(first.len() + 1, location) {
                 return Err(LookupError::Limit);
             }
-            if let Some(id) = self.scoped_name(parent, first, kinds) {
+            if let Some(id) = self.visible_name(parent, first, Some(kinds), location)? {
                 if self.symbols[id].declaration.kind == Kind::Domain
                     && self.domain_follows_reference(owner, id, location)
                 {

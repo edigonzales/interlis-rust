@@ -396,6 +396,7 @@ pub struct Declaration {
     pub(crate) base_reference: Option<TypeReference>,
     pub(crate) unit: Option<Box<UnitInfo>>,
     pub(crate) oids: Option<Box<OidRules>>,
+    pub(crate) topic_dependencies: Option<Box<[TypeReference]>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -435,6 +436,9 @@ impl Declaration {
     }
     pub fn oid_rules(&self) -> Option<&OidRules> {
         self.oids.as_deref()
+    }
+    pub fn topic_dependencies(&self) -> &[TypeReference] {
+        self.topic_dependencies.as_deref().unwrap_or_default()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

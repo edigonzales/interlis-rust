@@ -3,6 +3,7 @@ mod enumeration;
 mod names;
 mod oid;
 mod references;
+mod topics;
 mod units;
 
 use self::names::{BoundName, LookupError};
@@ -37,6 +38,7 @@ struct Symbol<'a> {
     model: usize,
     syntax: Option<&'a TypeSyntax>,
     base: Option<&'a QualifiedName>,
+    base_scope: Option<usize>,
     ast: Option<&'a SyntaxDecl>,
 }
 impl<'a> Symbol<'a> {
@@ -54,7 +56,6 @@ impl<'a> Symbol<'a> {
                 .any(|p| p.value == syntax::Property::Extended)
         };
         match self.ast {
-            Some(SyntaxDecl::Topic { options, .. }) => options.base.is_some(),
             Some(SyntaxDecl::Container {
                 base, properties, ..
             }) => base.is_some() || extended(properties),
@@ -175,11 +176,7 @@ fn ensure_supported_semantics(
                     span,
                     ..
                 } => {
-                    if options.view.is_some()
-                        || options.base.is_some()
-                        || !options.dependencies.is_empty()
-                        || !options.deferred_generics.is_empty()
-                    {
+                    if options.view.is_some() || !options.deferred_generics.is_empty() {
                         Some(span)
                     } else {
                         declarations(children, work, diagnostics)
@@ -456,11 +453,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 base_reference: None,
                 unit: None,
                 oids: None,
+                topic_dependencies: None,
             },
             name_span: name.span.clone(),
             model,
             syntax: None,
             base: None,
+            base_scope: None,
             ast: None,
         });
         self.states.push(if duplicate {
@@ -1687,6 +1686,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         if self.diagnostics.limited {
             return None;
         }
+        let topics = self.bind_topics()?;
         self.check_direct_references();
         if self.diagnostics.limited
             || self.diagnostics.rejected
@@ -1694,6 +1694,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         {
             return None;
         }
+        self.check_topic_members()?;
+        self.check_abstract_topics(&topics)?;
         self.bind_units()?;
         for symbol in &self.symbols {
             if symbol.declaration.kind == Kind::Class
@@ -1709,18 +1711,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     Some(symbol.name_span.clone()),
                 );
             }
-            if symbol.declaration.kind == Kind::Class
-                && symbol.declaration.is_abstract()
-                && let Some(topic) = symbol.declaration.parent.map(|id| &self.symbols[id])
-                && topic.declaration.kind == Kind::Topic
-                && !topic.declaration.is_abstract()
-            {
-                self.diagnostics.push(
-                    "ILI-TOPIC-ABSTRACT",
-                    "An abstract class requires an abstract topic or a concrete specialization",
-                    Some(symbol.name_span.clone()),
-                );
-            }
         }
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind == Kind::Domain {
@@ -1730,7 +1720,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
-        self.bind_oid_rules()?;
+        self.bind_oid_rules(&topics)?;
         for id in 0..self.symbols.len() {
             if !matches!(
                 self.symbols[id].declaration.kind,

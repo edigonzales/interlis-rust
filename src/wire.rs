@@ -346,6 +346,8 @@ impl Serialize for DeclarationsOutput<'_> {
             unit: Option<&'a crate::UnitInfo>,
             #[serde(skip_serializing_if = "Option::is_none")]
             oid_rules: Option<&'a crate::OidRules>,
+            #[serde(skip_serializing_if = "<[crate::TypeReference]>::is_empty")]
+            topic_dependencies: &'a [crate::TypeReference],
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -372,6 +374,7 @@ impl Serialize for DeclarationsOutput<'_> {
                     .map(TypeOutput),
                 unit: declaration.unit(),
                 oid_rules: declaration.oid_rules(),
+                topic_dependencies: declaration.topic_dependencies(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

@@ -2,58 +2,89 @@ use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl};
 use crate::{OidKind, OidRule, OidRules, OidType, TypeInfo, syntax};
 
 impl Analyzer<'_, '_> {
-    pub(super) fn bind_oid_rules(&mut self) -> Option<()> {
-        for id in 0..self.symbols.len() {
-            let rules = match self.symbols[id].ast {
-                Some(SyntaxDecl::Topic { options, .. }) => OidRules {
-                    basket: match &options.basket_oid {
-                        Some(name) => Some(self.bind_oid_domain(id, name)?),
-                        None => None,
-                    },
-                    object: match &options.oid {
-                        Some(name) => Some(self.bind_oid_domain(id, name)?),
-                        None => None,
-                    },
-                },
-                Some(SyntaxDecl::Container {
-                    kind: syntax::ContainerKind::Class,
-                    oid,
-                    ..
-                }) => {
-                    let object = match oid {
-                        syntax::OidRule::None(span) => Some(OidRule {
-                            kind: OidKind::Unstable,
-                            domain: None,
-                            span: span.clone(),
-                        }),
-                        syntax::OidRule::Domain(name) => Some(self.bind_oid_domain(id, name)?),
-                        syntax::OidRule::Unspecified => self.topic_oid(id)?,
-                    };
-                    OidRules {
-                        basket: None,
-                        object,
-                    }
-                }
-                _ => continue,
+    pub(super) fn bind_oid_rules(&mut self, topics: &[usize]) -> Option<()> {
+        for &id in topics {
+            let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[id].ast else {
+                unreachable!("topic ordering only contains topics");
             };
-            if rules.object.is_none() && rules.basket.is_none() {
+            let base = self.symbols[id].base_scope;
+            let basket = self.topic_rule(id, base, options.basket_oid.as_ref(), true)?;
+            let object = self.topic_rule(id, base, options.oid.as_ref(), false)?;
+            self.store_oid_rules(id, OidRules { basket, object })?;
+        }
+        for id in 0..self.symbols.len() {
+            let Some(SyntaxDecl::Container {
+                kind: syntax::ContainerKind::Class,
+                oid,
+                ..
+            }) = self.symbols[id].ast
+            else {
                 continue;
-            }
-            let declaration = &self.symbols[id].declaration;
-            if !declaration.is_abstract()
-                && let Some(rule) = rules
-                    .object
-                    .iter()
-                    .chain(rules.basket.iter())
-                    .find(|rule| rule.kind == OidKind::Any)
+            };
+            let object = match oid {
+                syntax::OidRule::None(span) => Some(OidRule {
+                    kind: OidKind::Unstable,
+                    domain: None,
+                    span: span.clone(),
+                }),
+                syntax::OidRule::Domain(name) => Some(self.bind_oid_domain(id, name)?),
+                syntax::OidRule::Unspecified => {
+                    self.inherit_oid(self.symbols[id].declaration.parent, false)?
+                }
+            };
+            self.store_oid_rules(
+                id,
+                OidRules {
+                    basket: None,
+                    object,
+                },
+            )?;
+        }
+        Some(())
+    }
+
+    fn topic_rule(
+        &mut self,
+        owner: usize,
+        base: Option<usize>,
+        name: Option<&QualifiedName>,
+        basket: bool,
+    ) -> Option<Option<OidRule>> {
+        if let Some(name) = name {
+            let rule = self.bind_oid_domain(owner, name)?;
+            if let Some(inherited) = self.existing_oid(base, basket)
+                && inherited.domain.as_ref().map(|domain| domain.target_name())
+                    != rule.domain.as_ref().map(|domain| domain.target_name())
             {
                 self.diagnostics.push(
-                    "ILI-OID-ABSTRACT",
-                    "An open OID rule requires an abstract declaration",
-                    Some(rule.span.clone()),
+                    "ILI-OID-OVERRIDE",
+                    "An extending topic cannot change its inherited OID domain",
+                    Some(name.span.clone()),
                 );
                 return None;
             }
+            Some(Some(rule))
+        } else {
+            self.inherit_oid(base, basket)
+        }
+    }
+
+    fn store_oid_rules(&mut self, id: usize, rules: OidRules) -> Option<()> {
+        if !self.symbols[id].declaration.is_abstract()
+            && let Some(rule) = rules
+                .object
+                .iter()
+                .chain(rules.basket.iter())
+                .find(|rule| rule.kind == OidKind::Any)
+        {
+            self.diagnostics.push(
+                "ILI-OID-ABSTRACT",
+                "An open OID rule requires an abstract declaration",
+                Some(rule.span.clone()),
+            );
+            return None;
+        }
+        if rules.object.is_some() || rules.basket.is_some() {
             self.symbols[id].declaration.oids = Some(Box::new(rules));
         }
         Some(())
@@ -102,13 +133,17 @@ impl Analyzer<'_, '_> {
         })
     }
 
-    fn topic_oid(&mut self, owner: usize) -> Option<Option<OidRule>> {
-        let parent = self.symbols[owner].declaration.parent?;
-        let object = self.symbols[parent]
-            .declaration
-            .oid_rules()
-            .and_then(|rule| rule.object.as_ref());
-        if let Some(rule) = object {
+    fn existing_oid(&self, owner: Option<usize>, basket: bool) -> Option<&OidRule> {
+        let rules = self.symbols[owner?].declaration.oid_rules()?;
+        if basket {
+            rules.basket.as_ref()
+        } else {
+            rules.object.as_ref()
+        }
+    }
+
+    fn inherit_oid(&mut self, owner: Option<usize>, basket: bool) -> Option<Option<OidRule>> {
+        if let Some(rule) = self.existing_oid(owner, basket) {
             let bytes = rule.domain.as_ref().map_or(0, |domain| {
                 domain.declared_name().len() + domain.target_name().len()
             });
@@ -117,11 +152,6 @@ impl Analyzer<'_, '_> {
                 return None;
             }
         }
-        Some(
-            self.symbols[parent]
-                .declaration
-                .oid_rules()
-                .and_then(|rule| rule.object.clone()),
-        )
+        Some(self.existing_oid(owner, basket).cloned())
     }
 }

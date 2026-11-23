@@ -2122,3 +2122,122 @@ fn a_concrete_topic_cannot_leave_an_abstract_class_unspecialized() {
         None,
     );
 }
+
+#[test]
+fn topics_inherit_names_oids_and_direct_dependencies() {
+    let report = outcome(
+        single(
+            "TOPIC Child EXTENDS Base=DEPENDS ON Extra,Shared; CLASS Item=value:Label; END Item; END Child;
+             TOPIC Shared=END Shared; TOPIC Extra=END Extra;
+             TOPIC Base=BASKET OID AS INTERLIS.STANDARDOID; OID AS INTERLIS.I32OID; DEPENDS ON Shared;
+             DOMAIN Label=TEXT*12; END Base;",
+        ),
+        // The inherited domain is still subject to the ordering requirement.
+        Status::Rejected,
+        Some("ILI-DOMAIN-ORDER"),
+    );
+    assert!(report.graph().is_none());
+    let report = outcome(
+        single(
+            "TOPIC Shared=END Shared; TOPIC Extra=END Extra;
+             TOPIC Base=BASKET OID AS INTERLIS.STANDARDOID; OID AS INTERLIS.I32OID; DEPENDS ON Shared;
+             DOMAIN Label=TEXT*12; END Base;
+             TOPIC Child EXTENDS Base=DEPENDS ON Extra,Shared; CLASS Item=value:Label; END Item; END Child;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let child = graph.declaration("M.Child").unwrap();
+    assert_eq!(child.base_reference().unwrap().target_name(), "M.Base");
+    assert_eq!(
+        child
+            .topic_dependencies()
+            .iter()
+            .map(|dep| dep.target_name())
+            .collect::<Vec<_>>(),
+        ["M.Shared", "M.Extra"]
+    );
+    let source = report.sources();
+    let origin = source
+        .location(child.topic_dependencies()[0].source_span())
+        .unwrap();
+    let input = source.files()[0].text();
+    assert_eq!(
+        &input[origin.start_byte as usize..origin.end_byte as usize],
+        "Shared"
+    );
+    assert_eq!(
+        child
+            .oid_rules()
+            .unwrap()
+            .basket
+            .as_ref()
+            .unwrap()
+            .domain
+            .as_ref()
+            .unwrap()
+            .target_name(),
+        "INTERLIS.STANDARDOID"
+    );
+    assert_eq!(
+        graph
+            .declaration("M.Child.Item")
+            .unwrap()
+            .oid_rules()
+            .unwrap()
+            .object
+            .as_ref()
+            .unwrap()
+            .domain
+            .as_ref()
+            .unwrap()
+            .target_name(),
+        "INTERLIS.I32OID"
+    );
+    assert_eq!(
+        graph
+            .declaration("M.Child.Item.value")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .target_name(),
+        "M.Base.Label"
+    );
+}
+
+#[test]
+fn topic_inheritance_and_dependencies_reject_cycles_and_illegal_redefinitions() {
+    for (body, code) in [
+        (
+            "TOPIC A EXTENDS B=END A; TOPIC B EXTENDS A=END B;",
+            "ILI-TOPIC-CYCLE",
+        ),
+        (
+            "TOPIC A=DEPENDS ON B; END A; TOPIC B=DEPENDS ON A; END B;",
+            "ILI-TOPIC-DEPENDENCY-CYCLE",
+        ),
+        (
+            "TOPIC A=DEPENDS ON B; END A; TOPIC B EXTENDS A=END B;",
+            "ILI-TOPIC-DEPENDENCY-CYCLE",
+        ),
+        (
+            "TOPIC A (FINAL)=END A; TOPIC B EXTENDS A=END B;",
+            "ILI-TOPIC-FINAL",
+        ),
+        (
+            "TOPIC A=OID AS INTERLIS.UUIDOID; END A; TOPIC B EXTENDS A=OID AS INTERLIS.I32OID; END B;",
+            "ILI-OID-OVERRIDE",
+        ),
+        (
+            "TOPIC A=DOMAIN D=BOOLEAN; END A; TOPIC B EXTENDS A=DOMAIN D=TEXT; END B;",
+            "ILI-TOPIC-INHERITED-NAME",
+        ),
+        (
+            "TOPIC A (ABSTRACT)=CLASS C (ABSTRACT)=END C; END A; TOPIC B EXTENDS A=END B;",
+            "ILI-TOPIC-ABSTRACT",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
