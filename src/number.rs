@@ -161,6 +161,32 @@ impl DecimalLiteral {
             self.value.cmp(&(&other.value * power))
         })
     }
+
+    /// Compares this bound after rounding to the base bound's declared scale.
+    pub fn compare_rounded_to(
+        &self,
+        base: &Self,
+        work: &mut WorkBudget,
+    ) -> Result<Ordering, NumberError> {
+        let scale = self.info.scale();
+        let base_scale = base.info.scale();
+        if scale <= base_scale {
+            return self.compare_value(base, work);
+        }
+        let distance = scale.abs_diff(base_scale);
+        work.charge(distance).map_err(|_| NumberError::Work)?;
+        let divisor = BigInt::from(10_u8).pow(distance);
+        let mut rounded = &self.value / &divisor;
+        let remainder = &self.value % &divisor;
+        if remainder.magnitude() * 2_u8 >= *divisor.magnitude() {
+            if self.value.sign() == Sign::Minus {
+                rounded -= 1;
+            } else {
+                rounded += 1;
+            }
+        }
+        Ok(rounded.cmp(&base.value))
+    }
 }
 
 #[cfg(test)]

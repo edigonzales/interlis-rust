@@ -1,7 +1,7 @@
 use interlis::{
     AlignmentKind, AnalysisReport, AnalysisStatus as Status, BlackboxKind, CompileRequest,
-    DeclarationKind, EnumerationOrder, LanguageVersion, Limits, SourceInput, TemporalKind,
-    TypeInfo, analyze, analyze_roots,
+    DeclarationKind, EnumerationOrder, FixedTextFormat, LanguageVersion, Limits, SourceInput,
+    TemporalKind, TypeInfo, analyze, analyze_roots,
 };
 const BASE: &str = r#"INTERLIS 2.3;
 MODEL ProbeBase (en) AT "https://example.invalid" VERSION "2026-11-10" =
@@ -44,8 +44,12 @@ fn scalar_types_keep_bounds_families_and_predefined_origins() {
         assert!(
             matches!(ty("M.Bounded"), TypeInfo::MultilineText { max_length: Some(length) } if length == "9007199254740993")
         );
-        assert!(matches!(ty("M.Identifier"), TypeInfo::Text { max_length } if max_length == "255"));
-        assert!(matches!(ty("M.Link"), TypeInfo::Text { max_length } if max_length == "1023"));
+        assert!(
+            matches!(ty("M.Identifier"), TypeInfo::FixedText { max_length, format: FixedTextFormat::Name } if max_length == "255")
+        );
+        assert!(
+            matches!(ty("M.Link"), TypeInfo::FixedText { max_length, format: FixedTextFormat::Uri } if max_length == "1023")
+        );
         assert!(matches!(
             ty("M.Horizontal"),
             TypeInfo::Alignment(AlignmentKind::Horizontal)
@@ -1214,7 +1218,7 @@ fn predefined_domains_preserve_language_origin_and_visibility() {
             assert_eq!(reference.predefined_language(), Some(version));
             assert_eq!(reference.target_name(), format!("INTERLIS.{name}"));
             assert!(
-                matches!(graph.effective_type(&qualified), Some(TypeInfo::Text { max_length }) if max_length == length)
+                matches!(graph.effective_type(&qualified), Some(TypeInfo::FixedText { max_length, .. }) if max_length == length)
             );
         }
     }
@@ -1422,4 +1426,107 @@ fn enum_extensions_reject_final_additions_duplicates_and_unbound_paths() {
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }
+}
+
+#[test]
+fn domain_specializations_preserve_base_provenance_and_narrow_values() {
+    let report = outcome(
+        single(
+            "DOMAIN Base=MANDATORY TEXT; Short EXTENDS Base=TEXT*0010; Smaller EXTENDS Short=TEXT*4; Long=MTEXT; Bounded EXTENDS Long=MTEXT*75; N=-20.00..20.00; Refined EXTENDS N=-19.01..019.99; Id=NAME; SameId EXTENDS Id=NAME; STRUCTURE S=value:Smaller; END S;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(
+        matches!(graph.effective_type("M.Smaller"), Some(TypeInfo::Text { max_length }) if max_length == "4")
+    );
+    assert_eq!(
+        graph.declaration("M.S.value").unwrap().mandatory(),
+        Some(true)
+    );
+    let first = graph
+        .declaration("M.Smaller")
+        .unwrap()
+        .base_reference()
+        .unwrap();
+    assert_eq!(first.target_name(), "M.Short");
+    assert!(
+        matches!(graph.effective_type("M.Bounded"), Some(TypeInfo::MultilineText { max_length: Some(cap) }) if cap == "75")
+    );
+    let Some(TypeInfo::Numeric { lower, upper }) = graph.effective_type("M.Refined") else {
+        panic!("refined range");
+    };
+    assert_eq!((lower.original(), upper.original()), ("-19.01", "019.99"));
+    let id = graph.declaration("M.SameId").unwrap();
+    assert_eq!(id.type_reference().unwrap().target_name(), "INTERLIS.NAME");
+    assert_eq!(id.base_reference().unwrap().target_name(), "M.Id");
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let id = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "SameId")
+        .unwrap();
+    assert_eq!(id["baseReference"]["targetName"], "M.Id");
+    assert_eq!(id["effectiveType"]["format"], "name");
+}
+
+#[test]
+fn domain_specializations_cannot_widen_or_change_scalar_families() {
+    for (base, own, code) in [
+        ("TEXT*4", "TEXT*0010", "ILI-DOMAIN-EXTENSION"),
+        ("TEXT*10", "TEXT", "ILI-DOMAIN-EXTENSION"),
+        ("TEXT*10", "MTEXT*5", "ILI-DOMAIN-EXTENSION"),
+        ("NAME", "TEXT*255", "ILI-DOMAIN-EXTENSION"),
+        ("-20.00..20.00", "-21.00..19.99", "ILI-DOMAIN-EXTENSION"),
+        ("-20.00..20.00", "-19.00..20.01", "ILI-DOMAIN-EXTENSION"),
+        ("-20.00..20.00", "-19.000..19.999", "ILI-DOMAIN-PRECISION"),
+    ] {
+        let report = outcome(
+            single(&format!("DOMAIN Base={base}; Child EXTENDS Base={own};")),
+            Status::Rejected,
+            Some(code),
+        );
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.related.len(), 1);
+    }
+}
+
+#[test]
+fn numeric_extension_rounds_23_bounds_and_preserves_24_precision() {
+    let input = |version: &str, low: &str, high: &str| {
+        request(vec![(
+            "ranges",
+            format!(
+                "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = DOMAIN Normal=-1.00..7.99; Fine EXTENDS Normal={low}..{high}; END M."
+            ),
+        )])
+    };
+    let report = outcome(
+        input("2.3", "-1.0049", "7.9949"),
+        Status::CheckedSubset,
+        None,
+    );
+    let Some(TypeInfo::Numeric { upper, .. }) = report.graph().unwrap().effective_type("M.Fine")
+    else {
+        panic!("expected rounded-compatible range");
+    };
+    assert_eq!(upper.original(), "7.9949");
+    outcome(
+        input("2.3", "-1.0049", "7.9999"),
+        Status::Rejected,
+        Some("ILI-DOMAIN-EXTENSION"),
+    );
+    outcome(
+        input("2.3", "-1.0050", "7.9949"),
+        Status::Rejected,
+        Some("ILI-DOMAIN-EXTENSION"),
+    );
+    outcome(
+        input("2.4", "-1.0000", "7.0000"),
+        Status::Rejected,
+        Some("ILI-DOMAIN-PRECISION"),
+    );
+    outcome(input("2.4", "-1.00", "7.00"), Status::CheckedSubset, None);
 }

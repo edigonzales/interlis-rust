@@ -2170,7 +2170,6 @@ mod tests {
         );
         assert!(!result.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         for body in [
-            "DOMAIN Parent=TEXT*10; D EXTENDS Parent=TEXT*4;",
             "DOMAIN D=MANDATORY;",
             "UNIT metre[m];",
             "STRUCTURE Segment=END Segment; LINE FORM curve:Segment;",

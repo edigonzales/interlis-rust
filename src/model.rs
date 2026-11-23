@@ -102,6 +102,10 @@ pub enum TypeInfo {
     MultilineText {
         max_length: Option<String>,
     },
+    FixedText {
+        format: FixedTextFormat,
+        max_length: String,
+    },
     Boolean,
     Alignment(AlignmentKind),
     Temporal(TemporalKind),
@@ -118,6 +122,14 @@ pub enum TypeInfo {
         lower: DecimalInfo,
         upper: DecimalInfo,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedTextFormat {
+    Name,
+    Uri,
+    Interlis1Date,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -221,6 +233,7 @@ pub struct Declaration {
     pub(crate) final_declaration: bool,
     pub(crate) effective_mandatory: Option<bool>,
     pub(crate) reference: Option<TypeReference>,
+    pub(crate) base_reference: Option<TypeReference>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -247,7 +260,10 @@ impl Declaration {
         self.final_declaration
     }
     pub fn type_reference(&self) -> Option<&TypeReference> {
-        self.reference.as_ref()
+        self.reference.as_ref().or(self.base_reference.as_ref())
+    }
+    pub fn base_reference(&self) -> Option<&TypeReference> {
+        self.base_reference.as_ref()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

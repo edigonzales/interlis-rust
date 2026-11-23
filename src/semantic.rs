@@ -1,3 +1,4 @@
+mod domains;
 mod enumeration;
 mod names;
 mod references;
@@ -7,7 +8,10 @@ use crate::{
     Limits, RelatedLocation, Span,
     diagnostic::Diagnostics,
     limits::WorkBudget,
-    model::{self, DeclarationKind as Kind, ModelGraph, ModelInfo, TypeInfo, TypeReference},
+    model::{
+        self, DeclarationKind as Kind, FixedTextFormat, ModelGraph, ModelInfo, TypeInfo,
+        TypeReference,
+    },
     number::{DecimalLiteral, NumberError},
     syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
@@ -130,6 +134,12 @@ fn supported_type(ty: &TypeSyntax) -> bool {
     }
 }
 
+fn supported_specialization(ty: &TypeSyntax) -> bool {
+    matches!(
+        ty,
+        TypeSyntax::Text(_) | TypeSyntax::Numeric(_) | TypeSyntax::Enumeration { .. }
+    ) && supported_type(ty)
+}
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
 fn ensure_supported_semantics(
@@ -230,8 +240,11 @@ fn ensure_supported_semantics(
                 } => {
                     let supported = match ty {
                         Some(t) => {
-                            supported_type(t)
-                                && (base.is_none() || matches!(t, TypeSyntax::Enumeration { .. }))
+                            if base.is_none() {
+                                supported_type(t)
+                            } else {
+                                supported_specialization(t)
+                            }
                         }
                         None => *mandatory && base.is_some(),
                     };
@@ -430,6 +443,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 final_declaration: false,
                 effective_mandatory: None,
                 reference: None,
+                base_reference: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1132,13 +1146,16 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     }
     fn predefined_type(&mut self, name: &str, span: &Span) -> Option<Effective> {
         let ty = match name {
-            "URI" => TypeInfo::Text {
+            "URI" => TypeInfo::FixedText {
+                format: FixedTextFormat::Uri,
                 max_length: "1023".into(),
             },
-            "NAME" => TypeInfo::Text {
+            "NAME" => TypeInfo::FixedText {
+                format: FixedTextFormat::Name,
                 max_length: "255".into(),
             },
-            "INTERLIS_1_DATE" => TypeInfo::Text {
+            "INTERLIS_1_DATE" => TypeInfo::FixedText {
+                format: FixedTextFormat::Interlis1Date,
                 max_length: "8".into(),
             },
             "BOOLEAN" => TypeInfo::Boolean,
@@ -1428,6 +1445,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             if let Some(reference) = self.symbols[current].domain_dependency() {
                 match self.bind_name(current, reference) {
                     Some(Target::Domain(next)) => {
+                        if self.symbols[current].base.is_some() {
+                            let declaration = &mut self.symbols[current].declaration;
+                            declaration.base_reference = declaration.reference.take();
+                        }
                         if self.symbols[current].base.is_some()
                             && self.symbols[next].declaration.is_final()
                         {
@@ -1507,6 +1528,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 let order = order.as_ref().map(|order| order.value);
                 result =
                     result.and_then(|value| self.extend_enumeration(value, enumeration, order));
+            } else if self.symbols[id].base.is_some()
+                && let Some(ty) = self.symbols[id].syntax
+            {
+                result = result.and_then(|value| self.specialize_scalar(id, value, ty));
             }
             if let Some(mut value) = result {
                 value.mandatory |= self.symbols[id]

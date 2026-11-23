@@ -313,6 +313,17 @@ impl Serialize for DeclarationsOutput<'_> {
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
+        fn project_reference<'a>(
+            r: &'a crate::TypeReference,
+            sources: &SourceSet,
+        ) -> Reference<'a> {
+            Reference {
+                declared_name: r.declared_name(),
+                target_name: r.target_name(),
+                predefined_language: r.predefined_language(),
+                location: sources.location(r.source_span()),
+            }
+        }
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Declaration<'a> {
@@ -324,18 +335,17 @@ impl Serialize for DeclarationsOutput<'_> {
             #[serde(rename = "final")]
             final_declaration: bool,
             type_reference: Option<Reference<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            base_reference: Option<Reference<'a>>,
             effective_type: Option<TypeOutput<'a>>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
         let mut seq = serializer.serialize_seq(Some(self.graph.declarations().len()))?;
         for declaration in self.graph.declarations() {
-            let reference = declaration.type_reference().map(|r| Reference {
-                declared_name: r.declared_name(),
-                target_name: r.target_name(),
-                predefined_language: r.predefined_language(),
-                location: self.sources.location(r.source_span()),
-            });
+            let reference = declaration
+                .type_reference()
+                .map(|r| project_reference(r, self.sources));
             seq.serialize_element(&Declaration {
                 name: declaration.name(),
                 qualified_name: declaration.qualified_name(),
@@ -344,6 +354,9 @@ impl Serialize for DeclarationsOutput<'_> {
                 declared_mandatory: declaration.declared_mandatory(),
                 final_declaration: declaration.is_final(),
                 type_reference: reference,
+                base_reference: declaration
+                    .base_reference()
+                    .map(|r| project_reference(r, self.sources)),
                 effective_type: declaration
                     .type_id
                     .and_then(|id| self.graph.types.get(id))
@@ -388,6 +401,8 @@ impl Serialize for TypeOutput<'_> {
         enum Type<'a> {
             Text {
                 max_length: &'a str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                format: Option<crate::FixedTextFormat>,
             },
             UnboundedText,
             MultilineText {
@@ -417,7 +432,16 @@ impl Serialize for TypeOutput<'_> {
             },
         }
         match self.0 {
-            TypeInfo::Text { max_length } => Type::Text { max_length }.serialize(serializer),
+            TypeInfo::Text { max_length } => Type::Text {
+                max_length,
+                format: None,
+            }
+            .serialize(serializer),
+            TypeInfo::FixedText { max_length, format } => Type::Text {
+                max_length,
+                format: Some(*format),
+            }
+            .serialize(serializer),
             TypeInfo::UnboundedText => Type::UnboundedText.serialize(serializer),
             TypeInfo::MultilineText { max_length } => Type::MultilineText {
                 max_length: max_length.as_deref(),
