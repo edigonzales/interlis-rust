@@ -136,6 +136,7 @@ pub(crate) struct AssociationDecl {
     pub cardinality: Option<Cardinality>,
     pub constraints: Vec<ConstraintSyntax>,
     pub end_name: Option<Name>,
+    pub end_span: Span,
     pub span: Span,
 }
 #[derive(Debug)]
@@ -840,7 +841,9 @@ impl Parser<'_> {
             None
         };
         let constraints = self.constraints()?;
+        let end_start = self.start();
         self.expect("END")?;
+        let end_span = self.span(end_start, self.end());
         let end_name = if self.unreserved_name() {
             Some(self.name(false)?)
         } else {
@@ -860,6 +863,7 @@ impl Parser<'_> {
             cardinality,
             constraints,
             end_name,
+            end_span,
             span: self.span(start, self.end()),
         })
     }
@@ -1322,15 +1326,15 @@ mod tests {
     fn new_syntax_cannot_silently_enter_the_partial_semantic_graph() {
         for body in [
             "TOPIC T (ABSTRACT)=END T;",
-            "TOPIC T EXTENDS Unknown.T=END T;",
-            "TOPIC T=DEPENDS ON Other.T; END T;",
-            "CLASS C=NO OID; END C;",
+            "TOPIC A=END A; TOPIC T EXTENDS A=END T;",
+            "TOPIC A=END A; TOPIC T=DEPENDS ON A; END T;",
+            "TOPIC T=CLASS C=NO OID; END C; END T;",
             "STRUCTURE S (ABSTRACT)=END S;",
             "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
             "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
             "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
-            "TOPIC T=ASSOCIATION = a -- Unknown; END; END T;",
-            "CONTEXT C=G=Unknown;",
+            "TOPIC T=CLASS C=END C; ASSOCIATION = a -- C; b -- C; END; END T;",
+            "DOMAIN G=COORD NUMERIC,NUMERIC; D=COORD 0..1,0..1; CONTEXT C=G=D;",
             "PARAMETER p:MANDATORY;",
         ] {
             let text = model("2.4", body);
@@ -1529,7 +1533,7 @@ mod review_regressions {
             let report = analyze(CompileRequest {
                 sources: vec![SourceInput {
                     name: "x".into(),
-                    text: model(&format!("CONTEXT first=G=X; empty= {tail}"), "2.4"),
+                    text: model(&format!("DOMAIN G=BOOLEAN; X=BOOLEAN; STRUCTURE Segment=END Segment; TOPIC S=END S; CONTEXT first=G=X; empty= {tail}"), "2.4"),
                 }],
                 limits: Limits::default(),
             })
@@ -1653,8 +1657,8 @@ mod reference_and_type_start_regressions {
                 "CLASS",
                 "STRUCTURE",
                 "ATTRIBUTE",
-                "CLASS RESTRICTION (A.B)",
-                "STRUCTURE RESTRICTION (A.B)",
+                "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
+                "STRUCTURE RESTRICTION (INTERLIS.AXIS)",
                 "ATTRIBUTE OF a->b",
             ] {
                 for body in [
@@ -1751,10 +1755,9 @@ mod reference_and_type_start_regressions {
                 };
                 assert_eq!(q.segments[1].value, expected);
             }
-            assert_eq!(
-                run("CLASS C EXTENDS INTERLIS.Unknown=END C;", version).status(),
-                AnalysisStatus::Incomplete
-            );
+            let unknown = run("CLASS C EXTENDS INTERLIS.Unknown=END C;", version);
+            assert_eq!(unknown.status(), AnalysisStatus::Rejected);
+            assert_eq!(unknown.diagnostics()[0].code, "ILI-NAME-NOT-FOUND");
         }
     }
 }

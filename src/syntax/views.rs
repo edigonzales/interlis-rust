@@ -826,7 +826,13 @@ mod tests {
         );
 
         let report = analyze_text(FIXTURE, Limits::default());
-        assert_eq!(report.status(), AnalysisStatus::Incomplete);
+        assert_eq!(report.status(), AnalysisStatus::Rejected);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "ILI-NAME-NOT-FOUND")
+        );
         assert!(report.graph().is_none());
     }
 
@@ -914,10 +920,8 @@ mod tests {
             .replace("p->visible AND s->visible", "p->visible")
             .replace("CONSTRAINT keep:", "CONSTRAINT");
         for text in [&legacy, FIXTURE] {
-            assert_eq!(
-                analyze_text(text, Limits::default()).status(),
-                AnalysisStatus::Incomplete
-            );
+            let (_, _, diagnostics) = syntax(text, Limits::default());
+            assert!(diagnostics.entries.is_empty(), "{:?}", diagnostics.entries);
         }
         for bad in [
             legacy.replace(

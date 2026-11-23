@@ -2162,19 +2162,19 @@ mod tests {
             "HALIGNMENT",
             "DATE",
             "(red,green)",
-            "ALL OF Unknown.E",
+            "ALL OF INTERLIS.BOOLEAN",
             "NUMERIC",
             "0..360 CIRCULAR",
-            "0..1 [m]",
+            "0..1 [INTERLIS.m]",
             "0..1 CLOCKWISE",
             "0..1 {Systems.R}",
-            "FORMAT BASED ON S (a/4)",
+            "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
             "COORD NUMERIC,NUMERIC",
             "MULTICOORD NUMERIC,NUMERIC",
-            "POLYLINE WITH (STRAIGHTS) VERTEX Unknown.C",
+            "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",
             "OID ANY",
             "BLACKBOX XML",
-            "CLASS RESTRICTION (Unknown.C)",
+            "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",
         ] {
             let body = format!("DOMAIN New={ty};");
@@ -2201,10 +2201,10 @@ mod tests {
         assert!(!result.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         for body in [
             "DOMAIN D (FINAL)=BOOLEAN;",
-            "DOMAIN D EXTENDS Unknown=TEXT*4;",
+            "DOMAIN Parent=TEXT*10; D EXTENDS Parent=TEXT*4;",
             "DOMAIN D=MANDATORY;",
             "UNIT metre[m];",
-            "LINE FORM curve:Segment;",
+            "STRUCTURE Segment=END Segment; LINE FORM curve:Segment;",
         ] {
             clean("2.4", body);
             assert_eq!(report("2.4", body).status(), AnalysisStatus::Incomplete);

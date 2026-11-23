@@ -1,5 +1,5 @@
-use super::{Analyzer, Kind, Namespace, QualifiedName, namespace};
-use crate::LanguageVersion;
+use super::{Analyzer, Kind, Name, Namespace, namespace};
+use crate::{LanguageVersion, Span};
 
 pub(super) enum BoundName {
     Declared(usize),
@@ -11,6 +11,7 @@ pub(super) enum LookupError {
     NotImported,
     Ambiguous([usize; 2]),
     Limit,
+    Deferred,
 }
 
 // Names and declaration kinds from both editions of Appendix A. They are
@@ -169,22 +170,31 @@ impl Analyzer<'_, '_> {
         None
     }
 
+    fn missing_from_scope(&self, scope: usize) -> LookupError {
+        if self.symbols[scope].inherits_names() {
+            LookupError::Deferred
+        } else {
+            LookupError::Missing
+        }
+    }
+
     pub(super) fn lookup_name(
         &mut self,
         owner: usize,
-        name: &QualifiedName,
+        parts: &[Name],
+        location: &Span,
         kinds: &[Kind],
     ) -> Result<BoundName, LookupError> {
-        let charge = name.segments.iter().map(|s| s.value.len() + 1).sum();
-        if !self.step(charge, &name.span) {
+        let charge = parts.iter().map(|s| s.value.len() + 1).sum();
+        if !self.step(charge, location) {
             return Err(LookupError::Limit);
         }
         let model = self.symbols[owner].model;
         let language = self.models[model].language;
-        let first = &name.segments[0].value;
-        if name.segments.len() > 1 {
+        let first = &parts[0].value;
+        if parts.len() > 1 {
             if first == "INTERLIS" {
-                let spelling = name.segments[1..]
+                let spelling = parts[1..]
                     .iter()
                     .map(|s| s.value.as_str())
                     .collect::<Vec<_>>()
@@ -197,33 +207,36 @@ impl Analyzer<'_, '_> {
                 return Err(LookupError::NotImported);
             }
             let mut scope = self.names[first];
-            let last = name.segments.len() - 1;
-            for part in &name.segments[1..last] {
+            let last = parts.len() - 1;
+            for part in &parts[1..last] {
                 scope = *self
                     .scope_names
                     .get(&(scope, Namespace::Type, part.value.clone()))
-                    .ok_or(LookupError::Missing)?;
+                    .ok_or_else(|| self.missing_from_scope(scope))?;
             }
             return self
-                .scoped_name(scope, &name.segments[last].value, kinds)
+                .scoped_name(scope, &parts[last].value, kinds)
                 .map(BoundName::Declared)
-                .ok_or(LookupError::Missing);
+                .ok_or_else(|| self.missing_from_scope(scope));
         }
 
         let mut scope = self.symbols[owner].declaration.parent;
         let mut later_domain = None;
         while let Some(parent) = scope {
-            if !self.step(first.len() + 1, &name.span) {
+            if !self.step(first.len() + 1, location) {
                 return Err(LookupError::Limit);
             }
             if let Some(id) = self.scoped_name(parent, first, kinds) {
                 if self.symbols[id].declaration.kind == Kind::Domain
-                    && self.domain_follows_reference(owner, id, &name.span)
+                    && self.domain_follows_reference(owner, id, location)
                 {
                     later_domain.get_or_insert(id);
                 } else {
                     return Ok(BoundName::Declared(id));
                 }
+            }
+            if self.symbols[parent].inherits_names() {
+                return Err(LookupError::Deferred);
             }
             scope = self.symbols[parent].declaration.parent;
         }
@@ -232,7 +245,7 @@ impl Analyzer<'_, '_> {
             self.bound_imports[model]
                 .len()
                 .saturating_mul(first.len() + 1),
-            &name.span,
+            location,
         ) {
             return Err(LookupError::Limit);
         }

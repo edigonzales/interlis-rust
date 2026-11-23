@@ -1,4 +1,5 @@
 mod names;
+mod references;
 
 use self::names::{BoundName, LookupError};
 use crate::{
@@ -29,6 +30,29 @@ struct Symbol<'a> {
     model: usize,
     syntax: Option<&'a TypeSyntax>,
     base: Option<&'a QualifiedName>,
+    ast: Option<&'a SyntaxDecl>,
+}
+impl Symbol<'_> {
+    fn inherits_names(&self) -> bool {
+        let extended = |properties: &[syntax::Located<syntax::Property>]| {
+            properties
+                .iter()
+                .any(|p| p.value == syntax::Property::Extended)
+        };
+        match self.ast {
+            Some(SyntaxDecl::Topic { options, .. }) => options.base.is_some(),
+            Some(SyntaxDecl::Container {
+                base, properties, ..
+            }) => base.is_some() || extended(properties),
+            Some(SyntaxDecl::Association(a)) => {
+                a.base.is_some() || a.derived_from.is_some() || extended(&a.properties)
+            }
+            Some(SyntaxDecl::MetadataBasket(b)) => b.base.is_some(),
+            Some(SyntaxDecl::Graphic(g)) => g.base.is_some() || extended(&g.properties),
+            Some(SyntaxDecl::View(_)) => true,
+            _ => false,
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Namespace {
@@ -397,6 +421,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             model,
             syntax: None,
             base: None,
+            ast: None,
         });
         self.states.push(if duplicate {
             State::Failed
@@ -425,6 +450,24 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         if let Some(requested) = requested {
             for name in requested {
                 if let Some(indices) = by_name.get(name.as_str()) {
+                    if let &[first, second, ..] = indices.as_slice() {
+                        self.diagnostics.push_related(
+                            "ILI-ROOT-AMBIGUOUS",
+                            "More than one supplied model has the requested name",
+                            None,
+                            [first, second]
+                                .into_iter()
+                                .map(|candidate| RelatedLocation {
+                                    span: candidates[candidate].1.name.span.clone(),
+                                    message: "Candidate model".into(),
+                                })
+                                .collect(),
+                        );
+                        if self.diagnostics.limited {
+                            return;
+                        }
+                        continue;
+                    }
                     for &index in indices {
                         selected[index] = true;
                         pending.push(index);
@@ -460,6 +503,24 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         &import.span,
                     ) {
                         return;
+                    }
+                    if let &[first, second, ..] = targets {
+                        self.diagnostics.push_related(
+                            "ILI-IMPORT-AMBIGUOUS",
+                            "More than one supplied model has the imported name",
+                            Some(import.name.span.clone()),
+                            [first, second]
+                                .into_iter()
+                                .map(|candidate| RelatedLocation {
+                                    span: candidates[candidate].1.name.span.clone(),
+                                    message: "Candidate imported model".into(),
+                                })
+                                .collect(),
+                        );
+                        if self.diagnostics.limited {
+                            return;
+                        }
+                        continue;
                     }
                     for &target in targets {
                         if !std::mem::replace(&mut selected[target], true) {
@@ -670,6 +731,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             if self.diagnostics.limited {
                 return;
             }
+            let first_symbol = self.symbols.len();
             match ast {
                 SyntaxDecl::Topic {
                     name,
@@ -810,11 +872,26 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     );
                 }
                 SyntaxDecl::Association(association) => {
+                    match (&association.name, &association.end_name) {
+                        (Some(name), Some(end)) => self.end_name(name, end),
+                        (Some(name), None) => self.diagnostics.push_related(
+                            "ILI-END-NAME",
+                            "A named association must repeat its name after END",
+                            Some(association.end_span.clone()),
+                            vec![RelatedLocation {
+                                span: name.span.clone(),
+                                message: "Association name".into(),
+                            }],
+                        ),
+                        (None, Some(end)) => self.diagnostics.push(
+                            "ILI-END-NAME",
+                            "An anonymous association ends without a name",
+                            Some(end.span.clone()),
+                        ),
+                        (None, None) => {}
+                    }
                     let implicit;
                     let name = if let Some(name) = &association.name {
-                        if let Some(end) = &association.end_name {
-                            self.end_name(name, end);
-                        }
                         name
                     } else if !association.roles.is_empty() {
                         let bytes = association.roles.iter().map(|r| r.name.value.len()).sum();
@@ -910,6 +987,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 SyntaxDecl::Constraints(_) => {} // A block augments its target's namespace.
             }
+            if let Some(symbol) = self.symbols.get_mut(first_symbol) {
+                symbol.ast = Some(ast);
+            }
         }
     }
     fn bind_name(&mut self, owner: usize, name: &QualifiedName) -> Option<Target> {
@@ -918,7 +998,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         } else {
             &[Kind::Domain, Kind::Structure]
         };
-        let (target, qualified, predefined_language) = match self.lookup_name(owner, name, kinds) {
+        let (target, qualified, predefined_language) = match self.lookup_name(
+            owner,
+            &name.segments,
+            &name.span,
+            kinds,
+        ) {
             Ok(BoundName::Declared(id)) => {
                 let declaration = &self.symbols[id].declaration;
                 if declaration.kind == Kind::Domain
@@ -953,6 +1038,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
             Err(LookupError::Limit) => return None,
+            Err(LookupError::Deferred) => {
+                self.diagnostics.push(
+                    "ILI-UNSUPPORTED",
+                    "This type reference requires inherited names",
+                    Some(name.span.clone()),
+                );
+                return None;
+            }
             Err(error @ (LookupError::NotImported | LookupError::Missing)) => {
                 let message = match error {
                     LookupError::NotImported => {
@@ -1337,7 +1430,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         if self.diagnostics.limited {
             return None;
         }
-        if self.diagnostics.rejected
+        self.check_direct_references();
+        if self.diagnostics.limited
+            || self.diagnostics.rejected
             || !ensure_supported_semantics(&self.selected_models, self.diagnostics, &mut self.work)
         {
             return None;

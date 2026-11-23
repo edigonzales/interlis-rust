@@ -118,9 +118,13 @@ fn failure_priorities_hide_all_partial_documents() {
         limits: Limits::default(),
     };
     assert_eq!(parse(request()).unwrap().status(), SyntaxStatus::Parsed);
-    assert_eq!(
-        analyze(request()).unwrap().status(),
-        AnalysisStatus::Incomplete
+    let report = analyze(request()).unwrap();
+    assert_eq!(report.status(), AnalysisStatus::Rejected);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "ILI-NAME-NOT-FOUND")
     );
 }
 

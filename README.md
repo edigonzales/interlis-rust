@@ -62,6 +62,12 @@ The compiler binds imports by declared model name, detects import cycles, and
 uses the referring model's edition for references to predefined domains.
 `IMPORTS UNQUALIFIED` exposes direct model-level types after local scope lookup.
 An INTERLIS header alone is a valid document with no model declarations.
+`TRANSLATION OF` adds the original model at the exact stated version to the
+selected closure. Its name space is available through a separate `IMPORTS`
+declaration. Models may import a later declaration in the same source.
+Direct declaration and visibility errors can be diagnosed in an otherwise
+incomplete model. References which need effective inherited names are deferred
+to the corresponding semantic checks.
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,

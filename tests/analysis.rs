@@ -540,8 +540,8 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
         "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
-        "TOPIC T = VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
-        "STRUCTURE S EXTENDS Base=END S;",
+        "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
+        "STRUCTURE Base=END Base; STRUCTURE S EXTENDS Base=END S;",
         "DOMAIN N=0..360 CIRCULAR;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -594,8 +594,17 @@ fn roots_include_transitive_imports_and_ignore_unselected_model_semantics() {
     });
     let ambiguous = analyze_roots(ambiguous, &["ProbeData".into()]).unwrap();
     assert_eq!(ambiguous.status(), Status::Rejected);
-    assert_eq!(ambiguous.diagnostics()[0].code, "ILI-DUPLICATE");
-    assert_eq!(ambiguous.diagnostics()[0].related.len(), 1);
+    let diagnostic = &ambiguous.diagnostics()[0];
+    assert_eq!(diagnostic.code, "ILI-IMPORT-AMBIGUOUS");
+    assert_eq!(diagnostic.related.len(), 2);
+    assert_eq!(
+        ambiguous
+            .sources()
+            .location(diagnostic.primary.as_ref().unwrap())
+            .unwrap()
+            .source,
+        "z-main"
+    );
 }
 
 #[test]
@@ -863,6 +872,98 @@ fn direct_names_are_checked_even_when_types_are_not_yet_supported() {
         Status::Incomplete,
         Some("ILI-UNSUPPORTED"),
     );
+}
+
+#[test]
+fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
+    let defs = "INTERLIS 2.3; MODEL Definitions AT \"x\" VERSION \"1\" = UNIT Meter[m] EXTENDS INTERLIS.LENGTH; TOPIC T=END T; END Definitions.";
+    for (body, status, code) in [
+        (
+            "IMPORTS UNQUALIFIED Definitions; DOMAIN D=0..2 [m];",
+            Status::Incomplete,
+            "ILI-UNSUPPORTED",
+        ),
+        (
+            "IMPORTS Definitions; DOMAIN D=0..2 [Definitions.m];",
+            Status::Incomplete,
+            "ILI-UNSUPPORTED",
+        ),
+        (
+            "IMPORTS Definitions; DOMAIN D=0..2 [Definitions.Meter];",
+            Status::Rejected,
+            "ILI-NAME-NOT-FOUND",
+        ),
+        (
+            "DOMAIN D=0..2 [Definitions.m];",
+            Status::Rejected,
+            "ILI-NAME-NOT-FOUND",
+        ),
+        (
+            "IMPORTS Definitions; REFSYSTEM BASKET B ~ Definitions.T;",
+            Status::Incomplete,
+            "ILI-UNSUPPORTED",
+        ),
+        (
+            "REFSYSTEM BASKET B ~ Definitions.T;",
+            Status::Rejected,
+            "ILI-NAME-NOT-FOUND",
+        ),
+    ] {
+        let text = format!("INTERLIS 2.4; MODEL Use AT \"x\" VERSION \"1\" = {body} END Use.");
+        let report = outcome(
+            request(vec![("definitions", defs.into()), ("use", text)]),
+            status,
+            Some(code),
+        );
+        assert!(report.graph().is_none());
+    }
+    // Both editions permit a class to extend a structure. The inherited type
+    // of another member is intentionally left to inheritance analysis.
+    outcome(
+        single(
+            "STRUCTURE Base=END Base; TOPIC Parent=DOMAIN D=TEXT*4; END Parent; TOPIC Child EXTENDS Parent=CLASS C EXTENDS Base=value:D; END C; END Child;",
+        ),
+        Status::Incomplete,
+        Some("ILI-UNSUPPORTED"),
+    );
+}
+
+#[test]
+fn translation_original_is_not_an_implicit_import() {
+    for (imports, status, code) in [
+        ("", Status::Rejected, "ILI-TYPE-NOT-FOUND"),
+        ("IMPORTS Base;", Status::Incomplete, "ILI-UNSUPPORTED"),
+    ] {
+        let input = request(vec![(
+            "one-document",
+            format!(
+                "INTERLIS 2.4; MODEL French AT \"x\" VERSION \"1\" TRANSLATION OF Base [\"1\"] = {imports} STRUCTURE S=value:Base.D; END S; END French. MODEL Base AT \"x\" VERSION \"1\" = DOMAIN D=TEXT*4; END Base."
+            ),
+        )]);
+        let report = analyze_roots(input, &["French".into()]).unwrap();
+        assert_eq!(report.status(), status);
+        assert_eq!(report.diagnostics()[0].code, code);
+    }
+}
+
+#[test]
+fn association_names_have_matching_opening_and_closing_presence() {
+    for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
+        let body = format!(
+            "TOPIC T=CLASS C=END C; ASSOCIATION{head}=left -- C; right -- C; END{end}; END T;"
+        );
+        let report = outcome(single(&body), Status::Rejected, Some("ILI-END-NAME"));
+        let diagnostic = &report.diagnostics()[0];
+        let location = report
+            .sources()
+            .location(diagnostic.primary.as_ref().unwrap())
+            .unwrap();
+        let source = report.sources().files()[0].text();
+        assert_eq!(
+            &source[location.start_byte as usize..location.end_byte as usize],
+            if end.is_empty() { "END" } else { end.trim() }
+        );
+    }
 }
 
 #[test]
