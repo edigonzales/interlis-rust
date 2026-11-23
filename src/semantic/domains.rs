@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     AxisRotation, CoordinateType, DecimalInfo, LanguageVersion, Limits, NumericBounds,
-    NumericRange,
+    NumericRange, OidType,
     limits::WorkBudget,
     syntax::{CoordinateSyntax, NumericSyntax},
 };
@@ -318,6 +318,13 @@ fn scalar_extension(
             text_fits(max_length.as_deref(), cap.as_deref(), work)?
         }
         (FixedText { format: a, .. }, FixedText { format: b, .. }) => a == b,
+        (Oid(OidType::Typed(carrier)), Oid(OidType::Any)) if !carrier.has_unbounded_range() => true,
+        (Oid(_), _) | (_, Oid(_)) => {
+            return Ok(Some((
+                "ILI-OID-EXTENSION",
+                "An OID domain extension must specialize an open OID with a concrete definition",
+            )));
+        }
         (Numeric(own), Numeric(base)) => {
             return numeric_extension(own, base, language, limits, work);
         }

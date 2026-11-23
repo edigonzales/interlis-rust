@@ -124,6 +124,7 @@ pub enum TypeInfo {
     },
     Numeric(NumericRange),
     Coordinate(CoordinateType),
+    Oid(OidType),
 }
 
 impl TypeInfo {
@@ -133,9 +134,19 @@ impl TypeInfo {
             Self::Coordinate(coordinate) => {
                 coordinate.axes.iter().any(|range| range.bounds.is_none())
             }
+            Self::Oid(OidType::Typed(carrier)) => carrier.has_unbounded_range(),
             _ => false,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum OidType {
+    Unstable,
+    Any,
+    Typed(Box<TypeInfo>),
+    Standard,
+    Uuid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -10,7 +10,7 @@ use crate::{
     diagnostic::Diagnostics,
     limits::WorkBudget,
     model::{
-        self, DeclarationKind as Kind, FixedTextFormat, ModelGraph, ModelInfo, TypeInfo,
+        self, DeclarationKind as Kind, FixedTextFormat, ModelGraph, ModelInfo, OidType, TypeInfo,
         TypeReference,
     },
     number::{DecimalLiteral, NumberError},
@@ -118,9 +118,12 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::EnumTree { .. } => true,
         TypeSyntax::Numeric(n) => n.reference_system.is_none(),
         TypeSyntax::Coordinate(c) => c.axes.iter().all(|axis| axis.reference_system.is_none()),
+        TypeSyntax::Oid { carrier, .. } => match carrier {
+            syntax::OidSyntax::Numeric(range) => range.reference_system.is_none(),
+            _ => true,
+        },
         TypeSyntax::Formatted { .. }
         | TypeSyntax::Geometry(_)
-        | TypeSyntax::Oid { .. }
         | TypeSyntax::ClassValue { .. }
         | TypeSyntax::AttributePathValue { .. }
         | TypeSyntax::Reference { .. }
@@ -135,9 +138,11 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
         TypeSyntax::Text(_)
             | TypeSyntax::Numeric(_)
             | TypeSyntax::Coordinate(_)
+            | TypeSyntax::Oid { .. }
             | TypeSyntax::Enumeration { .. }
     ) && supported_type(ty)
 }
+
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
 fn ensure_supported_semantics(
@@ -1189,6 +1194,30 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             "XMLDate" => TypeInfo::Temporal(syntax::TemporalKind::Date),
             "XMLTime" => TypeInfo::Temporal(syntax::TemporalKind::TimeOfDay),
             "XMLDateTime" => TypeInfo::Temporal(syntax::TemporalKind::DateTime),
+            "NOOID" => TypeInfo::Oid(OidType::Unstable),
+            "ANYOID" => TypeInfo::Oid(OidType::Any),
+            "STANDARDOID" => TypeInfo::Oid(OidType::Standard),
+            "UUIDOID" => TypeInfo::Oid(OidType::Uuid),
+            "I32OID" => {
+                let bound = |value: &str| model::DecimalInfo {
+                    original: value.into(),
+                    coefficient: value.into(),
+                    fractional_digits: 0,
+                    exponent: 0,
+                    scaled: false,
+                };
+                TypeInfo::Oid(OidType::Typed(Box::new(TypeInfo::Numeric(
+                    model::NumericRange {
+                        bounds: Some(model::NumericBounds {
+                            lower: bound("0"),
+                            upper: bound("2147483647"),
+                        }),
+                        unit: None,
+                        circular: false,
+                        direction: None,
+                    },
+                ))))
+            }
             "LineCoord" => {
                 let axis = || crate::NumericRange {
                     bounds: None,
@@ -1252,41 +1281,54 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
     }
+    fn text_type(&mut self, text: &syntax::TextSyntax) -> Option<TypeInfo> {
+        if !self.step(1, &text.span) {
+            return None;
+        }
+        let fixed = match text.kind {
+            syntax::TextKind::Name => Some((FixedTextFormat::Name, "255")),
+            syntax::TextKind::Uri => Some((FixedTextFormat::Uri, "1023")),
+            _ => None,
+        };
+        if let Some((format, length)) = fixed {
+            return Some(TypeInfo::FixedText {
+                format,
+                max_length: length.into(),
+            });
+        }
+        let max_length = if let Some(maximum) = &text.max_length {
+            let length = self.literal(maximum)?;
+            if !length.is_positive_integer() {
+                self.diagnostics.push(
+                    "ILI-TEXT-LENGTH",
+                    "Text length must be a positive integer",
+                    Some(maximum.span.clone()),
+                );
+                return None;
+            }
+            Some(length.info.original)
+        } else {
+            None
+        };
+        match (text.kind, max_length) {
+            (syntax::TextKind::MText, max_length) => Some(TypeInfo::MultilineText { max_length }),
+            (syntax::TextKind::Text, Some(max_length)) => Some(TypeInfo::Text { max_length }),
+            (syntax::TextKind::Text, None) => Some(TypeInfo::UnboundedText),
+            _ => unreachable!("NAME and URI have fixed text formats"),
+        }
+    }
     fn concrete_type(&mut self, owner: usize, syntax: &TypeSyntax) -> Option<Effective> {
         let ty = match syntax {
             TypeSyntax::Text(text) => {
-                if !self.step(1, &text.span) {
-                    return None;
-                }
-                match text.kind {
-                    syntax::TextKind::Name => {
-                        return self.primitive_reference(owner, "NAME", "NAME", &text.span);
-                    }
-                    syntax::TextKind::Uri => {
-                        return self.primitive_reference(owner, "URI", "URI", &text.span);
-                    }
-                    _ => {}
-                }
-                let max_length = if let Some(maximum) = &text.max_length {
-                    let length = self.literal(maximum)?;
-                    if !length.is_positive_integer() {
-                        self.diagnostics.push(
-                            "ILI-TEXT-LENGTH",
-                            "Text length must be a positive integer",
-                            Some(maximum.span.clone()),
-                        );
-                        return None;
-                    }
-                    Some(length.info.original)
-                } else {
-                    None
+                let predefined = match text.kind {
+                    syntax::TextKind::Name => Some("NAME"),
+                    syntax::TextKind::Uri => Some("URI"),
+                    _ => None,
                 };
-                match (text.kind, max_length) {
-                    (syntax::TextKind::MText, max_length) => TypeInfo::MultilineText { max_length },
-                    (syntax::TextKind::Text, Some(max_length)) => TypeInfo::Text { max_length },
-                    (syntax::TextKind::Text, None) => TypeInfo::UnboundedText,
-                    _ => unreachable!("NAME and URI are predefined"),
+                if let Some(name) = predefined {
+                    return self.primitive_reference(owner, name, name, &text.span);
                 }
+                self.text_type(text)?
             }
             TypeSyntax::Boolean { span } => {
                 if !self.step(1, span) {
@@ -1339,6 +1381,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Coordinate(coordinate) => {
                 TypeInfo::Coordinate(self.coordinate_type(owner, coordinate)?)
             }
+            TypeSyntax::Oid { carrier, .. } => TypeInfo::Oid(match carrier {
+                syntax::OidSyntax::Any(_) => OidType::Any,
+                syntax::OidSyntax::Numeric(range) => OidType::Typed(Box::new(TypeInfo::Numeric(
+                    self.numeric_range(owner, range)?,
+                ))),
+                syntax::OidSyntax::Text(text) => OidType::Typed(Box::new(self.text_type(text)?)),
+            }),
             TypeSyntax::Named(name) => {
                 return match self.bind_name(owner, name)? {
                     Target::Domain(id) => self.resolve_domain(id),
@@ -1355,7 +1404,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
             TypeSyntax::Formatted { .. }
             | TypeSyntax::Geometry(_)
-            | TypeSyntax::Oid { .. }
             | TypeSyntax::ClassValue { .. }
             | TypeSyntax::AttributePathValue { .. }
             | TypeSyntax::Reference { .. }
@@ -1485,10 +1533,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         );
                         break None;
                     }
-                    Some(Target::Predefined("LineCoord")) => {
+                    Some(Target::Predefined(
+                        name @ ("LineCoord" | "NOOID" | "ANYOID" | "I32OID" | "STANDARDOID"
+                        | "UUIDOID"),
+                    )) => {
                         let declaration = &mut self.symbols[current].declaration;
                         declaration.base_reference = declaration.reference.take();
-                        break self.predefined_type("LineCoord", &reference.span);
+                        break self.predefined_type(name, &reference.span);
                     }
                     Some(Target::Predefined(_)) => {
                         self.diagnostics.push(
@@ -1532,6 +1583,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 && let Some(ty) = self.symbols[id].syntax
             {
                 result = result.and_then(|value| self.specialize_scalar(id, value, ty));
+            } else if self.symbols[id].base.is_some()
+                && result.is_some_and(|value| matches!(self.types[value.ty], TypeInfo::Oid(_)))
+            {
+                self.diagnostics.push(
+                    "ILI-OID-EXTENSION",
+                    "An OID domain extension must specialize an open OID with a concrete definition",
+                    Some(self.symbols[id].name_span.clone()),
+                );
+                result = None;
             }
             if result.is_some_and(|value| self.types[value.ty].has_unbounded_range())
                 && !self.symbols[id].declaration.is_abstract()

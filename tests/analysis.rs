@@ -409,11 +409,6 @@ fn unknown_domains_unimported_models_and_builtin_boundaries() {
         Some(TypeInfo::Boolean)
     ));
     outcome(
-        single("STRUCTURE S=value:INTERLIS.UUIDOID; END S;"),
-        Status::Incomplete,
-        Some("ILI-UNSUPPORTED"),
-    );
-    outcome(
         single("STRUCTURE S=END S; STRUCTURE Holder=value:S; END Holder;"),
         Status::Incomplete,
         Some("ILI-UNSUPPORTED"),
@@ -1287,13 +1282,19 @@ fn predefined_domains_preserve_language_origin_and_visibility() {
         }
     }
     for (language, expected, code) in [
-        ("2.3", Status::Rejected, "ILI-TYPE-NOT-FOUND"),
-        ("2.4", Status::Incomplete, "ILI-UNSUPPORTED"),
+        ("2.3", Status::Rejected, Some("ILI-TYPE-NOT-FOUND")),
+        ("2.4", Status::CheckedSubset, None),
     ] {
         let text = format!(
             "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=value:INTERLIS.NOOID; END S; END M."
         );
-        outcome(request(vec![("a", text)]), expected, Some(code));
+        let report = outcome(request(vec![("a", text)]), expected, code);
+        if let Some(graph) = report.graph() {
+            assert!(matches!(
+                graph.effective_type("M.S.value"),
+                Some(TypeInfo::Oid(interlis::OidType::Unstable))
+            ));
+        }
     }
     let report = outcome(
         single(
@@ -1937,5 +1938,72 @@ fn measured_ranges_reject_illegal_units_and_dimensions() {
         ),
     ] {
         outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn oid_types_keep_their_carrier_and_predefined_identity() {
+    use interlis::OidType;
+    let report = outcome(
+        single(
+            "DOMAIN Custom EXTENDS INTERLIS.ANYOID=OID TEXT*40; Loose=OID ANY; STRUCTURE S=ascii:INTERLIS.STANDARDOID; uuid:INTERLIS.UUIDOID; number:INTERLIS.I32OID; name:OID NAME; arbitrary:INTERLIS.ANYOID; END S;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let oid = |name| graph.effective_type(name).unwrap();
+    assert!(
+        matches!(oid("M.Custom"), TypeInfo::Oid(OidType::Typed(carrier)) if matches!(carrier.as_ref(), TypeInfo::Text {max_length} if max_length == "40"))
+    );
+    assert!(matches!(oid("M.Loose"), TypeInfo::Oid(OidType::Any)));
+    assert!(matches!(oid("M.S.ascii"), TypeInfo::Oid(OidType::Standard)));
+    assert!(matches!(oid("M.S.uuid"), TypeInfo::Oid(OidType::Uuid)));
+    assert!(
+        matches!(oid("M.S.name"), TypeInfo::Oid(OidType::Typed(carrier)) if matches!(carrier.as_ref(), TypeInfo::FixedText {format: FixedTextFormat::Name, ..}))
+    );
+    assert!(matches!(oid("M.S.arbitrary"), TypeInfo::Oid(OidType::Any)));
+    let TypeInfo::Oid(OidType::Typed(carrier)) = oid("M.S.number") else {
+        panic!("expected an OID with a numeric carrier");
+    };
+    let TypeInfo::Numeric(range) = carrier.as_ref() else {
+        panic!("expected numeric carrier bounds");
+    };
+    let bounds = range.bounds.as_ref().unwrap();
+    assert_eq!(
+        (bounds.lower.coefficient(), bounds.upper.coefficient()),
+        ("0", "2147483647")
+    );
+    assert_eq!(
+        graph
+            .declaration("M.S.number")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .predefined_language(),
+        Some(LanguageVersion::V24)
+    );
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let custom = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decl| decl["qualifiedName"] == "M.Custom")
+        .unwrap();
+    assert_eq!(custom["effectiveType"]["oidKind"], "typed");
+    assert_eq!(custom["effectiveType"]["carrier"]["maxLength"], "40");
+}
+
+#[test]
+fn oid_domain_extensions_cannot_change_a_concrete_or_unstable_oid() {
+    for body in [
+        "DOMAIN Id EXTENDS INTERLIS.UUIDOID=OID TEXT*36;",
+        "DOMAIN Id EXTENDS INTERLIS.NOOID=OID TEXT*36;",
+        "DOMAIN Id EXTENDS INTERLIS.ANYOID=OID ANY;",
+        "DOMAIN A=OID TEXT*36; B EXTENDS A=MANDATORY;",
+        "DOMAIN A=TEXT*36; B EXTENDS A=OID TEXT*36;",
+        "DOMAIN A=OID TEXT*36; B EXTENDS A=TEXT*36;",
+    ] {
+        outcome(single(body), Status::Rejected, Some("ILI-OID-EXTENSION"));
     }
 }

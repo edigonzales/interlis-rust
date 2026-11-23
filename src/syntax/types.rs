@@ -2126,7 +2126,7 @@ mod tests {
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
             "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",
-            "OID ANY",
+            "OID 0..1 {Systems.R}",
             "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",
         ] {

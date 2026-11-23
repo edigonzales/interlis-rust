@@ -466,6 +466,13 @@ impl Serialize for TypeOutput<'_> {
                 rotation: Option<crate::AxisRotation>,
                 reference_system: Option<&'a str>,
             },
+            Oid {
+                oid_kind: &'static str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                max_length: Option<u8>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                carrier: Option<TypeOutput<'a>>,
+            },
         }
         match self.0 {
             TypeInfo::Text { max_length } => Type::Text {
@@ -515,6 +522,21 @@ impl Serialize for TypeOutput<'_> {
                 reference_system: coordinate.reference_system.as_deref(),
             }
             .serialize(serializer),
+            TypeInfo::Oid(oid) => {
+                let (oid_kind, max_length, carrier) = match oid {
+                    crate::OidType::Unstable => ("unstable", None, None),
+                    crate::OidType::Any => ("any", None, None),
+                    crate::OidType::Typed(carrier) => ("typed", None, Some(TypeOutput(carrier))),
+                    crate::OidType::Standard => ("standard", Some(16), None),
+                    crate::OidType::Uuid => ("uuid", Some(36), None),
+                };
+                Type::Oid {
+                    oid_kind,
+                    max_length,
+                    carrier,
+                }
+                .serialize(serializer)
+            }
         }
     }
 }
