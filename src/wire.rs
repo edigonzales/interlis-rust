@@ -281,6 +281,7 @@ impl Serialize for ModelsOutput<'_> {
             language_tag: Option<&'a str>,
             issuer: &'a str,
             version: &'a str,
+            contracted: bool,
             imports: &'a [String],
         }
         let mut seq = serializer.serialize_seq(Some(self.0.models().len()))?;
@@ -291,6 +292,7 @@ impl Serialize for ModelsOutput<'_> {
                 language_tag: model.language_tag(),
                 issuer: model.issuer(),
                 version: model.version(),
+                contracted: model.is_contracted(),
                 imports: model.imports(),
             })?;
         }
@@ -396,6 +398,24 @@ impl Serialize for TypeOutput<'_> {
             }
         }
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Range<'a> {
+            lower: Option<Decimal<'a>>,
+            upper: Option<Decimal<'a>>,
+            circular: bool,
+            direction: Option<crate::NumericDirection>,
+        }
+        impl<'a> From<&'a crate::NumericRange> for Range<'a> {
+            fn from(range: &'a crate::NumericRange) -> Self {
+                Self {
+                    lower: range.bounds.as_ref().map(|bounds| (&bounds.lower).into()),
+                    upper: range.bounds.as_ref().map(|bounds| (&bounds.upper).into()),
+                    circular: range.circular,
+                    direction: range.direction,
+                }
+            }
+        }
+        #[derive(Serialize)]
         #[serde(
             tag = "kind",
             rename_all = "snake_case",
@@ -430,10 +450,14 @@ impl Serialize for TypeOutput<'_> {
                 domain: &'a str,
             },
             Numeric {
-                lower: Option<Decimal<'a>>,
-                upper: Option<Decimal<'a>>,
-                circular: bool,
-                direction: Option<crate::NumericDirection>,
+                #[serde(flatten)]
+                range: Range<'a>,
+            },
+            Coordinate {
+                coordinate_kind: crate::CoordinateKind,
+                axes: Vec<Range<'a>>,
+                rotation: Option<crate::AxisRotation>,
+                reference_system: Option<&'a str>,
             },
         }
         match self.0 {
@@ -474,10 +498,14 @@ impl Serialize for TypeOutput<'_> {
             .serialize(serializer),
             TypeInfo::EnumTree { domain } => Type::EnumTree { domain }.serialize(serializer),
             TypeInfo::Numeric(range) => Type::Numeric {
-                lower: range.bounds.as_ref().map(|bounds| (&bounds.lower).into()),
-                upper: range.bounds.as_ref().map(|bounds| (&bounds.upper).into()),
-                circular: range.circular,
-                direction: range.direction,
+                range: range.into(),
+            }
+            .serialize(serializer),
+            TypeInfo::Coordinate(coordinate) => Type::Coordinate {
+                coordinate_kind: coordinate.kind,
+                axes: coordinate.axes.iter().map(Range::from).collect(),
+                rotation: coordinate.rotation,
+                reference_system: coordinate.reference_system.as_deref(),
             }
             .serialize(serializer),
         }

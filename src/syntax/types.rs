@@ -1,7 +1,9 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
 pub(crate) use crate::model::NumericDirection as Direction;
-pub(crate) use crate::model::{AlignmentKind, BlackboxKind, EnumerationOrder, TemporalKind};
+pub(crate) use crate::model::{
+    AlignmentKind, BlackboxKind, CoordinateKind, EnumerationOrder, TemporalKind,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -102,11 +104,6 @@ pub(crate) enum FormatBase {
 pub(crate) struct StringRange {
     pub lower: Located<String>,
     pub upper: Located<String>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CoordinateKind {
-    Single,
-    Multi,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2133,8 +2130,6 @@ mod tests {
             "0..1 [INTERLIS.m]",
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
-            "COORD NUMERIC,NUMERIC",
-            "MULTICOORD NUMERIC,NUMERIC",
             "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",
             "OID ANY",
             "CLASS RESTRICTION (INTERLIS.METAOBJECT)",

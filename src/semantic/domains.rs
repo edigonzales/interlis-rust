@@ -2,8 +2,10 @@ use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
 };
 use crate::{
-    DecimalInfo, LanguageVersion, Limits, NumericBounds, NumericRange, limits::WorkBudget,
-    syntax::NumericSyntax,
+    AxisRotation, CoordinateType, DecimalInfo, LanguageVersion, Limits, NumericBounds,
+    NumericRange,
+    limits::WorkBudget,
+    syntax::{CoordinateSyntax, NumericSyntax},
 };
 use std::cmp::Ordering;
 
@@ -60,6 +62,55 @@ impl Analyzer<'_, '_> {
         })
     }
 
+    pub(super) fn coordinate_type(&mut self, syntax: &CoordinateSyntax) -> Option<CoordinateType> {
+        let axes = syntax
+            .axes
+            .iter()
+            .map(|axis| self.numeric_range(axis))
+            .collect::<Option<Vec<_>>>()?;
+        let rotation = if let Some(rotation) = &syntax.rotation {
+            let axis = |spelling: &str| {
+                spelling
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&axis| axis > 0 && usize::from(axis) <= axes.len())
+            };
+            let zero_axis = axis(&rotation.zero.value);
+            let quarter_turn_axis = axis(&rotation.quarter_turn.value);
+            if let (Some(zero_axis), Some(quarter_turn_axis)) = (zero_axis, quarter_turn_axis)
+                && zero_axis != quarter_turn_axis
+            {
+                Some(AxisRotation {
+                    zero_axis,
+                    quarter_turn_axis,
+                })
+            } else {
+                self.diagnostics.push(
+                    "ILI-COORD-ROTATION",
+                    "Rotation requires two distinct existing axes",
+                    Some(rotation.span.clone()),
+                );
+                return None;
+            }
+        } else {
+            None
+        };
+        let reference_system = if let Some(crs) = &syntax.crs {
+            if !self.step(crs.value.len(), &crs.span) {
+                return None;
+            }
+            Some(crs.value.clone())
+        } else {
+            None
+        };
+        Some(CoordinateType {
+            kind: syntax.kind,
+            axes,
+            rotation,
+            reference_system,
+        })
+    }
+
     pub(super) fn specialize_scalar(
         &mut self,
         owner: usize,
@@ -76,12 +127,33 @@ impl Analyzer<'_, '_> {
         );
         match check {
             Ok(None) => {
-                if let TypeInfo::Numeric(range) = &self.types[base.ty] {
-                    let flags = (range.circular, range.direction);
-                    if let TypeInfo::Numeric(own_range) = &mut self.types[own.ty] {
-                        own_range.circular |= flags.0;
-                        own_range.direction = own_range.direction.or(flags.1);
+                let inherited_bytes = match (&self.types[own.ty], &self.types[base.ty]) {
+                    (TypeInfo::Coordinate(own), TypeInfo::Coordinate(base))
+                        if own.reference_system.is_none() =>
+                    {
+                        base.reference_system.as_ref().map_or(0, String::len)
                     }
+                    _ => 0,
+                };
+                if !self.step(inherited_bytes, syntax.span()) {
+                    return None;
+                }
+                let [own_type, base_type] = self
+                    .types
+                    .get_disjoint_mut([own.ty, base.ty])
+                    .expect("a specialization owns a new type");
+                match (own_type, base_type) {
+                    (TypeInfo::Numeric(own), TypeInfo::Numeric(base)) => inherit_range(own, base),
+                    (TypeInfo::Coordinate(own), TypeInfo::Coordinate(base)) => {
+                        for (own, base) in own.axes.iter_mut().zip(&base.axes) {
+                            inherit_range(own, base);
+                        }
+                        own.rotation = own.rotation.or(base.rotation);
+                        if own.reference_system.is_none() {
+                            own.reference_system.clone_from(&base.reference_system);
+                        }
+                    }
+                    _ => {}
                 }
                 own.mandatory |= base.mandatory;
                 Some(own)
@@ -129,41 +201,89 @@ fn scalar_extension(
         }
         (FixedText { format: a, .. }, FixedText { format: b, .. }) => a == b,
         (Numeric(own), Numeric(base)) => {
-            if let Some(base_direction) = base.direction
-                && own
-                    .direction
-                    .is_some_and(|direction| direction != base_direction)
-            {
+            return numeric_extension(own, base, language, limits, work);
+        }
+        (Coordinate(own), Coordinate(base)) => {
+            if own.kind != base.kind || own.axes.len() < base.axes.len() {
                 return Ok(Some((
-                    "ILI-DOMAIN-DIRECTION",
-                    "The direction of a numeric base domain cannot change",
+                    "ILI-COORD-EXTENSION",
+                    "A coordinate extension must preserve its kind and existing axes",
                 )));
             }
-            match (&own.bounds, &base.bounds) {
-                (_, None) => true,
-                (None, Some(_)) => false,
-                (Some(own), Some(base)) => {
-                    let (lower, upper) = (&own.lower, &own.upper);
-                    let (min, max) = (&base.lower, &base.upper);
-                    if language == LanguageVersion::V24
-                        && (lower.fractional_digits() != min.fractional_digits()
-                            || upper.fractional_digits() != max.fractional_digits())
-                    {
-                        return Ok(Some((
-                            "ILI-DOMAIN-PRECISION",
-                            "An INTERLIS 2.4 numeric extension must preserve the precision of its base",
-                        )));
-                    }
-                    compare(lower, min, language, limits, work)? != Ordering::Less
-                        && compare(upper, max, language, limits, work)? != Ordering::Greater
+            if own
+                .rotation
+                .zip(base.rotation)
+                .is_some_and(|(own, base)| own != base)
+                || own
+                    .reference_system
+                    .as_ref()
+                    .zip(base.reference_system.as_ref())
+                    .is_some_and(|(own, base)| own != base)
+            {
+                return Ok(Some((
+                    "ILI-COORD-EXTENSION",
+                    "A coordinate extension cannot change its base rotation or reference system",
+                )));
+            }
+            for (own, base) in own.axes.iter().zip(&base.axes) {
+                if let Some(reason) = numeric_extension(own, base, language, limits, work)? {
+                    return Ok(Some(reason));
                 }
             }
+            true
         }
         _ => false,
     };
     Ok((!narrower).then_some((
         "ILI-DOMAIN-EXTENSION",
         "The type does not specialize the values of its base domain",
+    )))
+}
+
+fn inherit_range(own: &mut NumericRange, base: &NumericRange) {
+    own.circular |= base.circular;
+    own.direction = own.direction.or(base.direction);
+}
+
+fn numeric_extension(
+    own: &NumericRange,
+    base: &NumericRange,
+    language: LanguageVersion,
+    limits: &Limits,
+    work: &mut WorkBudget,
+) -> Result<Option<(&'static str, &'static str)>, NumberError> {
+    if let Some(base_direction) = base.direction
+        && own
+            .direction
+            .is_some_and(|direction| direction != base_direction)
+    {
+        return Ok(Some((
+            "ILI-DOMAIN-DIRECTION",
+            "The direction of a numeric base domain cannot change",
+        )));
+    }
+    let narrower = match (&own.bounds, &base.bounds) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(own), Some(base)) => {
+            let (lower, upper) = (&own.lower, &own.upper);
+            let (min, max) = (&base.lower, &base.upper);
+            if language == LanguageVersion::V24
+                && (lower.fractional_digits() != min.fractional_digits()
+                    || upper.fractional_digits() != max.fractional_digits())
+            {
+                return Ok(Some((
+                    "ILI-DOMAIN-PRECISION",
+                    "An INTERLIS 2.4 numeric extension must preserve the precision of its base",
+                )));
+            }
+            compare(lower, min, language, limits, work)? != Ordering::Less
+                && compare(upper, max, language, limits, work)? != Ordering::Greater
+        }
+    };
+    Ok((!narrower).then_some((
+        "ILI-DOMAIN-EXTENSION",
+        "The numeric range widens its base domain",
     )))
 }
 

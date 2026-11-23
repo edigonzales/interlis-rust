@@ -1615,3 +1615,103 @@ fn numeric_ranges_preserve_abstractness_circularity_and_direction() {
         outcome(single(body), Status::Rejected, Some(code));
     }
 }
+
+#[test]
+fn runtime_parameters_follow_their_model_edition_contract() {
+    for (edition, marker, status) in [
+        ("2.3", "", Status::Rejected),
+        ("2.3", "CONTRACTED ", Status::CheckedSubset),
+        ("2.4", "", Status::CheckedSubset),
+    ] {
+        let text = format!(
+            "INTERLIS {edition}; {marker}MODEL M AT \"x\" VERSION \"1\" = PARAMETER R:NUMERIC; END M."
+        );
+        let report = outcome(
+            request(vec![("parameter", text)]),
+            status,
+            (status == Status::Rejected).then_some("ILI-PARAMETER-CONTRACTED"),
+        );
+        if let Some(graph) = report.graph() {
+            assert_eq!(graph.models()[0].is_contracted(), !marker.is_empty());
+            assert!(graph.runtime_parameter("M.R").is_some());
+        }
+    }
+}
+
+#[test]
+fn coordinate_types_preserve_axes_rotation_reference_system_and_kind() {
+    let report = outcome(
+        single(
+            "DOMAIN Height=COORD 0..10; Plane EXTENDS Height=COORD 1..9,0..20,ROTATION 2 -> 1 REFSYS \"EPSG:2056\"; Solid EXTENDS Plane=COORD 2..8,2..18,-3..3; Points=MULTICOORD 0..1,0..1; Concrete EXTENDS INTERLIS.LineCoord=COORD 0..1,0..1;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::Coordinate(solid)) = graph.effective_type("M.Solid") else {
+        panic!("expected 3D coordinate");
+    };
+    assert_eq!(solid.axes.len(), 3);
+    assert_eq!(solid.axes[0].bounds.as_ref().unwrap().lower.original(), "2");
+    assert_eq!(
+        solid.axes[2].bounds.as_ref().unwrap().lower.original(),
+        "-3"
+    );
+    assert_eq!(
+        solid.rotation,
+        Some(interlis::AxisRotation {
+            zero_axis: 2,
+            quarter_turn_axis: 1
+        })
+    );
+    assert_eq!(solid.reference_system.as_deref(), Some("EPSG:2056"));
+    assert!(
+        matches!(graph.effective_type("M.Points"), Some(TypeInfo::Coordinate(ty)) if ty.kind == interlis::CoordinateKind::Multi)
+    );
+    let concrete = graph
+        .declaration("M.Concrete")
+        .unwrap()
+        .base_reference()
+        .unwrap();
+    assert_eq!(concrete.target_name(), "INTERLIS.LineCoord");
+    assert_eq!(concrete.predefined_language(), Some(LanguageVersion::V24));
+
+    let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let solid = json["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "Solid")
+        .unwrap();
+    assert_eq!(solid["effectiveType"]["kind"], "coordinate");
+    assert_eq!(solid["effectiveType"]["axes"][2]["lower"]["original"], "-3");
+}
+
+#[test]
+fn coordinate_types_reject_missing_axes_changed_metadata_and_bad_rotation() {
+    for (body, code) in [
+        (
+            "DOMAIN P=COORD 0..1,0..1,ROTATION 1 -> 1;",
+            "ILI-COORD-ROTATION",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1,ROTATION 3 -> 1;",
+            "ILI-COORD-ROTATION",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1; Short EXTENDS P=COORD 0..1;",
+            "ILI-COORD-EXTENSION",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1,ROTATION 1 -> 2; Rotated EXTENDS P=COORD 0..1,0..1,ROTATION 2 -> 1;",
+            "ILI-COORD-EXTENSION",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1 REFSYS \"EPSG:2056\"; Wrong EXTENDS P=COORD 0..1,0..1 REFSYS \"EPSG:4326\";",
+            "ILI-COORD-EXTENSION",
+        ),
+        ("DOMAIN A=COORD NUMERIC,0..1;", "ILI-DOMAIN-ABSTRACT"),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}

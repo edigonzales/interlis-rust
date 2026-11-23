@@ -40,6 +40,7 @@ pub struct ModelInfo {
     pub(crate) language_tag: Option<String>,
     pub(crate) issuer: String,
     pub(crate) version: String,
+    pub(crate) contracted: bool,
     pub(crate) imports: Vec<String>,
 }
 impl ModelInfo {
@@ -57,6 +58,9 @@ impl ModelInfo {
     }
     pub fn version(&self) -> &str {
         &self.version
+    }
+    pub fn is_contracted(&self) -> bool {
+        self.contracted
     }
     /// Only names actually bound in the supported input/predefined namespace.
     pub fn imports(&self) -> &[String] {
@@ -119,6 +123,41 @@ pub enum TypeInfo {
         domain: String,
     },
     Numeric(NumericRange),
+    Coordinate(CoordinateType),
+}
+
+impl TypeInfo {
+    pub(crate) fn has_unbounded_range(&self) -> bool {
+        match self {
+            Self::Numeric(range) => range.bounds.is_none(),
+            Self::Coordinate(coordinate) => {
+                coordinate.axes.iter().any(|range| range.bounds.is_none())
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinateKind {
+    Single,
+    Multi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AxisRotation {
+    pub zero_axis: u8,
+    pub quarter_turn_axis: u8,
+}
+
+#[derive(Debug)]
+pub struct CoordinateType {
+    pub kind: CoordinateKind,
+    pub axes: Vec<NumericRange>,
+    pub rotation: Option<AxisRotation>,
+    pub reference_system: Option<String>,
 }
 
 #[derive(Debug)]

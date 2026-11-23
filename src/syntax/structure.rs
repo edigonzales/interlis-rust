@@ -1351,7 +1351,7 @@ mod tests {
             assert!(report.graph().is_none());
             assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         }
-        for header in ["REFSYSTEM MODEL", "SYMBOLOGY MODEL", "CONTRACTED MODEL"] {
+        for header in ["REFSYSTEM MODEL", "SYMBOLOGY MODEL"] {
             let text = format!("INTERLIS 2.4; {header} M AT \"x\" VERSION \"1\" = END M.");
             parse(&text);
             let report = analyze(CompileRequest {
@@ -1411,7 +1411,7 @@ mod review_regressions {
     use super::*;
     use crate::{AnalysisStatus, CompileRequest, SourceInput, analyze};
     fn model(body: &str, version: &str) -> String {
-        format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.")
+        format!("INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" = {body} END M.")
     }
     #[test]
     fn mandatory_only_is_a_real_type_use_in_every_attribute_and_parameter_position() {
@@ -1644,7 +1644,9 @@ mod reference_and_type_start_regressions {
         analyze(CompileRequest {
             sources: vec![SourceInput {
                 name: "x".into(),
-                text: format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M."),
+                text: format!(
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" = {body} END M."
+                ),
             }],
             limits: Limits::default(),
         })

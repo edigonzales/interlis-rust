@@ -116,8 +116,11 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Enumeration { .. }
         | TypeSyntax::EnumTree { .. } => true,
         TypeSyntax::Numeric(n) => n.unit.is_none() && n.reference_system.is_none(),
+        TypeSyntax::Coordinate(c) => c
+            .axes
+            .iter()
+            .all(|axis| axis.unit.is_none() && axis.reference_system.is_none()),
         TypeSyntax::Formatted { .. }
-        | TypeSyntax::Coordinate(_)
         | TypeSyntax::Geometry(_)
         | TypeSyntax::Oid { .. }
         | TypeSyntax::ClassValue { .. }
@@ -131,7 +134,10 @@ fn supported_type(ty: &TypeSyntax) -> bool {
 fn supported_specialization(ty: &TypeSyntax) -> bool {
     matches!(
         ty,
-        TypeSyntax::Text(_) | TypeSyntax::Numeric(_) | TypeSyntax::Enumeration { .. }
+        TypeSyntax::Text(_)
+            | TypeSyntax::Numeric(_)
+            | TypeSyntax::Coordinate(_)
+            | TypeSyntax::Enumeration { .. }
     ) && supported_type(ty)
 }
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
@@ -295,7 +301,6 @@ fn ensure_supported_semantics(
                     .iter()
                     .all(|d| matches!(d, SyntaxDecl::Domain { .. }));
         let header = !kind_supported
-            || model.contracted.is_some()
             || model.no_incremental_transfer.is_some()
             || model.explanation.is_some()
             || model.translation.is_some()
@@ -305,7 +310,6 @@ fn ensure_supported_semantics(
             model
                 .no_incremental_transfer
                 .as_ref()
-                .or(model.contracted.as_ref())
                 .or_else(|| model.explanation.as_ref().map(|e| &e.span))
                 .or(Some(&model.span))
         } else {
@@ -637,6 +641,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     language_tag: ast.language_tag.as_ref().map(|n| n.value.clone()),
                     issuer: ast.issuer.value.clone(),
                     version: ast.version.value.clone(),
+                    contracted: ast.contracted.is_some(),
                     imports: vec![],
                 });
                 self.bound_imports.push(BTreeMap::new());
@@ -865,6 +870,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     span,
                     type_use,
                 } => {
+                    if self.models[model].language == crate::LanguageVersion::V23
+                        && !self.models[model].is_contracted()
+                    {
+                        self.diagnostics.push(
+                            "ILI-PARAMETER-CONTRACTED",
+                            "INTERLIS 2.3 runtime parameters require a CONTRACTED model",
+                            Some(name.span.clone()),
+                        );
+                    }
                     if let Some(id) = self.add(
                         Kind::RuntimeParameter,
                         name,
@@ -1176,6 +1190,19 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             "XMLDate" => TypeInfo::Temporal(syntax::TemporalKind::Date),
             "XMLTime" => TypeInfo::Temporal(syntax::TemporalKind::TimeOfDay),
             "XMLDateTime" => TypeInfo::Temporal(syntax::TemporalKind::DateTime),
+            "LineCoord" => {
+                let axis = || crate::NumericRange {
+                    bounds: None,
+                    circular: false,
+                    direction: None,
+                };
+                TypeInfo::Coordinate(crate::CoordinateType {
+                    kind: crate::CoordinateKind::Single,
+                    axes: vec![axis(), axis()],
+                    rotation: None,
+                    reference_system: None,
+                })
+            }
             _ => {
                 self.diagnostics.push(
                     "ILI-UNSUPPORTED",
@@ -1309,6 +1336,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return self.enum_tree_type(owner, value, &domain.span);
             }
             TypeSyntax::Numeric(numeric) => TypeInfo::Numeric(self.numeric_range(numeric)?),
+            TypeSyntax::Coordinate(coordinate) => {
+                TypeInfo::Coordinate(self.coordinate_type(coordinate)?)
+            }
             TypeSyntax::Named(name) => {
                 return match self.bind_name(owner, name)? {
                     Target::Domain(id) => self.resolve_domain(id),
@@ -1324,7 +1354,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 };
             }
             TypeSyntax::Formatted { .. }
-            | TypeSyntax::Coordinate(_)
             | TypeSyntax::Geometry(_)
             | TypeSyntax::Oid { .. }
             | TypeSyntax::ClassValue { .. }
@@ -1456,6 +1485,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         );
                         break None;
                     }
+                    Some(Target::Predefined("LineCoord")) => {
+                        let declaration = &mut self.symbols[current].declaration;
+                        declaration.base_reference = declaration.reference.take();
+                        break self.predefined_type("LineCoord", &reference.span);
+                    }
                     Some(Target::Predefined(_)) => {
                         self.diagnostics.push(
                             "ILI-UNSUPPORTED",
@@ -1499,12 +1533,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             {
                 result = result.and_then(|value| self.specialize_scalar(id, value, ty));
             }
-            if result.is_some_and(|value| matches!(&self.types[value.ty], TypeInfo::Numeric(range) if range.bounds.is_none()))
+            if result.is_some_and(|value| self.types[value.ty].has_unbounded_range())
                 && !self.symbols[id].declaration.is_abstract()
             {
                 self.diagnostics.push(
                     "ILI-DOMAIN-ABSTRACT",
-                    "An unbounded numeric domain must be ABSTRACT",
+                    "A numeric or coordinate domain with unbounded axes must be ABSTRACT",
                     Some(self.symbols[id].name_span.clone()),
                 );
                 result = None;
@@ -1589,7 +1623,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             if let Some(value) = self.concrete_type(id, syntax) {
                 let symbol = &self.symbols[id];
                 if symbol.declaration.kind == Kind::Attribute
-                    && (matches!(&self.types[value.ty], TypeInfo::Numeric(range) if range.bounds.is_none())
+                    && (self.types[value.ty].has_unbounded_range()
                         || symbol
                             .declaration
                             .type_reference()
