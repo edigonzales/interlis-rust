@@ -1318,7 +1318,7 @@ fn predefined_domains_preserve_language_origin_and_visibility() {
 }
 #[test]
 fn semantic_error_ranges_keep_original_utf8_and_utf16_with_bom_and_crlf() {
-    let text = "\u{feff}INTERLIS 2.4;\r\nMODEL M AT \"https://example.invalid/😀\" VERSION \"1\" = STRUCTURE S=value:Missing; END S; END M.";
+    let text = "\u{feff}INTERLIS 2.4;\r\nMODEL M AT \"https://example.invalid\" VERSION \"1😀\" = STRUCTURE S=value:Missing; END S; END M.";
     let report = outcome(
         request(vec![("memory:///ä😀.ili", text.into())]),
         Status::Rejected,
@@ -3072,4 +3072,68 @@ fn generic_contexts_check_shape_availability_and_deferred_use() {
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }
+}
+
+#[test]
+fn model_header_preserves_declared_metadata_and_registered_charset() {
+    let report = outcome(
+        request(vec![("headers", r#"INTERLIS 2.4;
+            CONTRACTED TYPE MODEL Metadata (de) NOINCREMENTALTRANSFER AT "../issuer%20name" VERSION "v1" // version detail // =
+                CHARSET "csUTF8"; XMLNS "urn:namespace:metadata";
+                DOMAIN D=TEXT*5;
+            END Metadata."#.into())]),
+        Status::CheckedSubset,
+        None,
+    );
+    let model = &report.graph().unwrap().models()[0];
+    assert_eq!(model.kind(), interlis::ModelKind::Type);
+    assert!(model.no_incremental_transfer());
+    assert_eq!(model.issuer(), "../issuer%20name");
+    assert_eq!(model.declared_charset(), Some("csUTF8"));
+    assert_eq!(model.charset(), Some("UTF-8"));
+    assert_eq!(model.xml_namespace(), Some("urn:namespace:metadata"));
+    assert!(model.explanation().unwrap().contains("version detail"));
+}
+
+#[test]
+fn invalid_model_header_values_are_rejected_at_the_original_literal() {
+    for value in [
+        "https://example.org/a b",
+        "https://example.org/µ",
+        "http://[:::1]/",
+        "test%S0",
+        "9scheme:opaque",
+    ] {
+        let text = format!("INTERLIS 2.4; MODEL M AT \"{value}\" VERSION \"1\" = END M.");
+        let report = outcome(
+            request(vec![("issuer", text.clone())]),
+            Status::Rejected,
+            Some("ILI-MODEL-ISSUER"),
+        );
+        let location = report
+            .sources()
+            .location(report.diagnostics()[0].primary.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            &text[location.start_byte as usize..location.end_byte as usize],
+            format!("\"{value}\"")
+        );
+    }
+    for (options, code) in [
+        ("CHARSET \"utf8\";", "ILI-MODEL-CHARSET"),
+        ("XMLNS \"\";", "ILI-MODEL-XMLNS"),
+        (
+            "XMLNS \"http://www.w3.org/2000/xmlns/\";",
+            "ILI-MODEL-XMLNS",
+        ),
+    ] {
+        outcome(single(options), Status::Rejected, Some(code));
+    }
+    let text =
+        "INTERLIS 2.4; MODEL M AT \"https://[2001:db8::1]/issuer?q=t%20v\" VERSION \"1\" = END M.";
+    outcome(
+        request(vec![("ipv6-issuer", text.into())]),
+        Status::CheckedSubset,
+        None,
+    );
 }

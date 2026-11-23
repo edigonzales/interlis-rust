@@ -282,6 +282,16 @@ impl Serialize for ModelsOutput<'_> {
             issuer: &'a str,
             version: &'a str,
             contracted: bool,
+            kind: crate::ModelKind,
+            no_incremental_transfer: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            explanation: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            declared_charset: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            charset: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            xml_namespace: Option<&'a str>,
             imports: &'a [String],
         }
         let mut seq = serializer.serialize_seq(Some(self.0.models().len()))?;
@@ -293,6 +303,12 @@ impl Serialize for ModelsOutput<'_> {
                 issuer: model.issuer(),
                 version: model.version(),
                 contracted: model.is_contracted(),
+                kind: model.kind(),
+                no_incremental_transfer: model.no_incremental_transfer(),
+                explanation: model.explanation(),
+                declared_charset: model.declared_charset(),
+                charset: model.charset(),
+                xml_namespace: model.xml_namespace(),
                 imports: model.imports(),
             })?;
         }

@@ -33,7 +33,7 @@ export function verify(report, expected = 'checked_subset') {
 }
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
-const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
+const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
@@ -63,14 +63,12 @@ export const syntaxCases = [
   ['INTERLIS 0.23E1; MODEL M AT "x" VERSION "1" = END M. MODEL B AT "x" VERSION "1" = END B.', 'checked_subset', null],
   ['\uFEFF!!@ author="😀"\r\n/* outer /* inner */ tail */\r\nINTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=0.10E-2..0.99E+2; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.', 'checked_subset', null],
   ['INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN D=1E2..2E2; END A.', 'rejected', 'ILI-SYNTAX'],
-  ['INTERLIS 2.4; MODEL A AT "x" VERSION "1" // /* literal */ !! 😀 // = END A.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL '+ 'A'.repeat(256)+' AT "x" VERSION "1" = END A.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS ;', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.5;', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS +2.5;', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.5; ? 😀 \"open /*', 'incomplete', 'ILI-UNSUPPORTED'],
   [syntaxDocument, 'checked_subset', null],
-  ['INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT "https://example.invalid" VERSION "1" = END A.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL A AT "https://example.invalid" VERSION "1" END A.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = DOMAIN ; END A.', 'rejected', 'ILI-SYNTAX'],
   [syntaxDocument+' GARBAGE', 'rejected', 'ILI-SYNTAX'],
@@ -88,6 +86,8 @@ export function verifySyntax(report, text, status, code) {
     const angle = declaration('A.Angle').effectiveType;
     const oid = declaration('B.T.C').oidRules.object;
     if (!angle.circular || angle.unit.targetName !== 'INTERLIS.rad' || oid.domain.targetName !== 'INTERLIS.I32OID') throw new Error('Lost a bound unit or inherited OID rule');
+    const model = report.model.models[1];
+    if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8') throw new Error('Lost model options');
   }
   if(text.includes('X=;')) {
     const errors=report.diagnostics.filter(d=>d.code==='ILI-SYNTAX');
@@ -98,7 +98,7 @@ export function verifySyntax(report, text, status, code) {
 function pair(version) {
   return {sources:[
     {name:'memory:///a-ä😀.ili',text:`INTERLIS ${version}; MODEL Base (en) AT "https://example.invalid" VERSION "v1" = DOMAIN Label=TEXT*40; Count=9007199254740992..9007199254740993; Scaled=0.10e-2..0.99e+2; END Base.`},
-    {name:'memory:///z-model.ili',text:`\uFEFF!! 😀\r\nINTERLIS ${version};\r\nMODEL Data AT "https://example.invalid/😀" VERSION "v2" =\r\n IMPORTS Base; DOMAIN Required EXTENDS Base.Label=MANDATORY;\r\n TOPIC Items=CLASS Item=label:Required; count:Base.Count; END Item; END Items; END Data.`},
+    {name:'memory:///z-model.ili',text:`\uFEFF!! 😀\r\nINTERLIS ${version};\r\nMODEL Data AT "https://example.invalid" VERSION "v2😀" =\r\n IMPORTS Base; DOMAIN Required EXTENDS Base.Label=MANDATORY;\r\n TOPIC Items=CLASS Item=label:Required; count:Base.Count; END Item; END Items; END Data.`},
   ]};
 }
 const valid23=pair('2.3'),valid24=pair('2.4');

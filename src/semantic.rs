@@ -1,9 +1,11 @@
 mod associations;
+mod charset_names;
 mod collections;
 mod contexts;
 mod domains;
 mod enumeration;
 mod geometry;
+mod model_header;
 mod names;
 mod object_references;
 mod oid;
@@ -345,18 +347,8 @@ fn ensure_supported_semantics(
                     }
                     _ => false,
                 });
-        let header = !kind_supported
-            || model.no_incremental_transfer.is_some()
-            || model.explanation.is_some()
-            || model.translation.is_some()
-            || model.charset.is_some()
-            || model.xmlns.is_some();
-        let span = if header {
-            model
-                .no_incremental_transfer
-                .as_ref()
-                .or_else(|| model.explanation.as_ref().map(|e| &e.span))
-                .or(Some(&model.span))
+        let span = if !kind_supported || model.translation.is_some() {
+            Some(&model.span)
         } else {
             declarations(&model.declarations, work, diagnostics)
         };
@@ -691,15 +683,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 } else {
                     self.model_names.insert(ast.name.value.clone(), model);
                 }
-                self.models.push(ModelInfo {
-                    name: ast.name.value.clone(),
-                    language,
-                    language_tag: ast.language_tag.as_ref().map(|n| n.value.clone()),
-                    issuer: ast.issuer.value.clone(),
-                    version: ast.version.value.clone(),
-                    contracted: ast.contracted.is_some(),
-                    imports: vec![],
-                });
+                let Some(info) = self.model_info(language, ast) else {
+                    return;
+                };
+                self.models.push(info);
                 self.bound_imports.push(BTreeMap::new());
                 self.selected_models.push(ast);
                 if self.diagnostics.limited {

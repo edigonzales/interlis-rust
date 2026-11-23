@@ -1226,13 +1226,8 @@ mod continuation_regressions {
         }
         let valid = "INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT \"https://example.invalid\" VERSION \"1\" = END A.";
         let report = run(valid.into());
-        assert_eq!(report.status(), AnalysisStatus::Incomplete);
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == "ILI-UNSUPPORTED")
-        );
+        assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+        assert!(report.graph().unwrap().models()[0].no_incremental_transfer());
         assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         for invalid in [
             valid.replace("2.4", "2.3"),
@@ -1665,8 +1660,11 @@ mod lexical_recovery_regressions {
         assert_eq!(report.diagnostics()[0].message, "Unfinished explanation");
         let report =
             analyze_text("INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" // closed // = END M.");
-        assert_eq!(report.status(), AnalysisStatus::Incomplete);
-        assert_eq!(report.diagnostics()[0].code, "ILI-UNSUPPORTED");
+        assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+        assert_eq!(
+            report.graph().unwrap().models()[0].explanation(),
+            Some(" closed ")
+        );
     }
     #[test]
     fn missing_semicolons_do_not_consume_next_declarations_or_their_errors() {

@@ -10,6 +10,15 @@ pub enum LanguageVersion {
     #[serde(rename = "2.4")]
     V24,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    Data,
+    Type,
+    RefSystem,
+    Symbology,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclarationKind {
@@ -41,6 +50,11 @@ pub struct ModelInfo {
     pub(crate) issuer: String,
     pub(crate) version: String,
     pub(crate) contracted: bool,
+    pub(crate) kind: ModelKind,
+    pub(crate) no_incremental_transfer: bool,
+    pub(crate) explanation: Option<String>,
+    pub(crate) charset: Option<(String, &'static str)>,
+    pub(crate) xml_namespace: Option<String>,
     pub(crate) imports: Vec<String>,
 }
 impl ModelInfo {
@@ -61,6 +75,24 @@ impl ModelInfo {
     }
     pub fn is_contracted(&self) -> bool {
         self.contracted
+    }
+    pub fn kind(&self) -> ModelKind {
+        self.kind
+    }
+    pub fn no_incremental_transfer(&self) -> bool {
+        self.no_incremental_transfer
+    }
+    pub fn explanation(&self) -> Option<&str> {
+        self.explanation.as_deref()
+    }
+    pub fn declared_charset(&self) -> Option<&str> {
+        self.charset.as_ref().map(|charset| charset.0.as_str())
+    }
+    pub fn charset(&self) -> Option<&str> {
+        self.charset.as_ref().map(|charset| charset.1)
+    }
+    pub fn xml_namespace(&self) -> Option<&str> {
+        self.xml_namespace.as_deref()
     }
     /// Only names actually bound in the supported input/predefined namespace.
     pub fn imports(&self) -> &[String] {
