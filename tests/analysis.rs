@@ -2108,3 +2108,17 @@ fn oid_rules_require_an_oid_domain_and_open_rules_require_abstract_owners() {
         outcome(single(body), Status::Rejected, Some(code));
     }
 }
+
+#[test]
+fn a_concrete_topic_cannot_leave_an_abstract_class_unspecialized() {
+    outcome(
+        single("TOPIC T=CLASS C (ABSTRACT)=END C; END T;"),
+        Status::Rejected,
+        Some("ILI-TOPIC-ABSTRACT"),
+    );
+    outcome(
+        single("TOPIC T (ABSTRACT)=CLASS C (ABSTRACT)=END C; END T;"),
+        Status::CheckedSubset,
+        None,
+    );
+}

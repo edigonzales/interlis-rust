@@ -1709,6 +1709,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     Some(symbol.name_span.clone()),
                 );
             }
+            if symbol.declaration.kind == Kind::Class
+                && symbol.declaration.is_abstract()
+                && let Some(topic) = symbol.declaration.parent.map(|id| &self.symbols[id])
+                && topic.declaration.kind == Kind::Topic
+                && !topic.declaration.is_abstract()
+            {
+                self.diagnostics.push(
+                    "ILI-TOPIC-ABSTRACT",
+                    "An abstract class requires an abstract topic or a concrete specialization",
+                    Some(symbol.name_span.clone()),
+                );
+            }
         }
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind == Kind::Domain {
