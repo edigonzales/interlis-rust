@@ -116,6 +116,12 @@ pub(crate) struct RenamedViewable {
     pub target: QualifiedName,
     pub span: Span,
 }
+pub(super) struct AttributeHead {
+    pub(super) start: usize,
+    pub(super) subdivision: Option<Subdivision>,
+    pub(super) name: Name,
+    pub(super) properties: Vec<Located<Property>>,
+}
 #[derive(Debug)]
 #[allow(dead_code)] // Preserve complete syntax while its semantics remain unimplemented.
 pub(crate) struct AssociationDecl {
@@ -543,7 +549,6 @@ impl Parser<'_> {
             let before = self.at;
             match self.attribute() {
                 Ok(value) => out.push(value),
-                Err(issue) if matches!(issue.kind, IssueKind::Unsupported) => return Err(issue),
                 Err(issue) => {
                     self.report(issue);
                     self.recover(Context::Container, false);
@@ -557,6 +562,10 @@ impl Parser<'_> {
         Ok(out)
     }
     pub(super) fn attribute(&mut self) -> Parsed<Declaration> {
+        let head = self.attribute_head()?;
+        self.typed_attribute(head)
+    }
+    pub(super) fn attribute_head(&mut self) -> Parsed<AttributeHead> {
         self.step()?;
         let start = self.start();
         let continuous = self.marker("CONTINUOUS");
@@ -573,18 +582,26 @@ impl Parser<'_> {
         };
         let name = self.name(false)?;
         let properties = self.properties(ATTRIBUTES)?;
+        Ok(AttributeHead {
+            start,
+            subdivision,
+            name,
+            properties,
+        })
+    }
+    pub(super) fn typed_attribute(&mut self, head: AttributeHead) -> Parsed<Declaration> {
         self.expect(":")?;
         let type_use = self.type_use()?;
         let derivations = self.derivations()?;
         self.expect(";")?;
         self.node()?;
         Ok(Declaration::Attribute {
-            name,
-            properties,
-            subdivision,
+            name: head.name,
+            properties: head.properties,
+            subdivision: head.subdivision,
             type_use,
             derivations,
-            span: self.span(start, self.end()),
+            span: self.span(head.start, self.end()),
         })
     }
     fn parameter(&mut self) -> Parsed<ParameterDecl> {
@@ -796,19 +813,12 @@ impl Parser<'_> {
                 if properties.iter().any(|p| !ATTRIBUTES.contains(&p.value)) {
                     return Err(Self::expected("Role property on attribute"));
                 }
-                self.expect(":")?;
-                let type_use = self.type_use()?;
-                let derivations = self.derivations()?;
-                self.expect(";")?;
-                self.node()?;
-                attributes.push(Declaration::Attribute {
+                attributes.push(self.typed_attribute(AttributeHead {
+                    start,
                     name,
                     properties,
                     subdivision: None,
-                    type_use,
-                    derivations,
-                    span: self.span(start, self.end()),
-                });
+                })?);
                 break;
             }
         }

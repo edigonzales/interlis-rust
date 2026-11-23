@@ -205,6 +205,9 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
                 SyntaxDecl::Association(association) => Some(&association.span),
                 SyntaxDecl::Context(context) => Some(&context.span),
+                SyntaxDecl::View(view) => Some(&view.span),
+                SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
+                SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
                 SyntaxDecl::RuntimeParameter { span, .. } => Some(span),
             };
             if unsupported.is_some() {
@@ -536,6 +539,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 | SyntaxDecl::Constraints(_)
                 | SyntaxDecl::Association(_)
                 | SyntaxDecl::Context(_)
+                | SyntaxDecl::View(_)
+                | SyntaxDecl::Graphic(_)
+                | SyntaxDecl::MetadataBasket(_)
                 | SyntaxDecl::RuntimeParameter { .. } => {
                     unreachable!("unsupported semantics are checked before indexing")
                 }

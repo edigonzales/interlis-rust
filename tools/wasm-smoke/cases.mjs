@@ -14,6 +14,8 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
 export const syntaxCases = [
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = FUNCTION f(x:BOOLEAN):BOOLEAN; CLASS C=a:BOOLEAN := Missing(THIS); MANDATORY CONSTRAINT a OR b AND c == d; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = FUNCTION f():BOOLEAN; CLASS C=MANDATORY CONSTRAINT named: a == b AND c OR d + e * f => g; UNIQUE(BASKET) key: WHERE a: parts[FIRST]->name; SET CONSTRAINT(BASKET) all: WHERE a: Missing(ALL(ANYCLASS)); END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT f(); END C; END M.', 'rejected', 'ILI-SYNTAX'],

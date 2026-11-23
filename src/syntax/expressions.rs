@@ -86,13 +86,16 @@ pub(crate) struct InspectionExpression {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum InspectionSource {
-    Inline {
-        area: Option<Span>,
-        base: RenamedViewable,
-        attributes: Vec<Name>,
-        span: Span,
-    },
+    Inline(InlineInspection),
     View(QualifiedName),
+}
+#[derive(Debug)]
+#[allow(dead_code)] // Preserved for expression and view binding.
+pub(crate) struct InlineInspection {
+    pub area: Option<Span>,
+    pub base: RenamedViewable,
+    pub attributes: Vec<Name>,
+    pub span: Span,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -334,8 +337,33 @@ impl Parser<'_> {
     pub(super) fn factor(&mut self) -> Parsed<ExprId> {
         self.step()?;
         let start = self.start();
-        let kind = if self.take("UNDEFINED") {
-            ExpressionKind::Literal(LiteralSyntax::Undefined)
+        let kind = if let Some(literal) = self.literal()? {
+            ExpressionKind::Literal(literal)
+        } else if self.take("PARAMETER") {
+            ExpressionKind::RuntimeParameter(self.qualified_name_in(ReferenceContext::Ordinary, 2)?)
+        } else if self.is("INSPECTION") || self.is("AREA") {
+            ExpressionKind::Inspection(self.inspection_expression()?)
+        } else if self.call_ahead()? {
+            return self.call();
+        } else {
+            ExpressionKind::Path(self.object_path()?)
+        };
+        self.push_expression(kind, self.span(start, self.end()))
+    }
+    pub(super) fn constant(&mut self) -> Parsed<ExprId> {
+        self.step()?;
+        let start = self.start();
+        let literal = self
+            .literal()?
+            .ok_or_else(|| Self::expected("Expected a constant"))?;
+        self.push_expression(
+            ExpressionKind::Literal(literal),
+            self.span(start, self.end()),
+        )
+    }
+    fn literal(&mut self) -> Parsed<Option<LiteralSyntax>> {
+        let literal = if self.take("UNDEFINED") {
+            LiteralSyntax::Undefined
         } else if self.is("PI")
             || self.is("LNBASE")
             || self.is("+")
@@ -353,13 +381,13 @@ impl Parser<'_> {
             } else {
                 None
             };
-            ExpressionKind::Literal(LiteralSyntax::Numeric { value, unit })
+            LiteralSyntax::Numeric { value, unit }
         } else if self
             .tokens
             .get(self.at)
             .is_some_and(|t| matches!(t.kind, Kind::String(_)))
         {
-            ExpressionKind::Literal(LiteralSyntax::String(self.quoted()?))
+            LiteralSyntax::String(self.quoted()?)
         } else if self.take("#") {
             let mut path = vec![];
             let mut others = self.marker("OTHERS");
@@ -373,7 +401,7 @@ impl Parser<'_> {
                     path.push(self.name(false)?);
                 }
             }
-            ExpressionKind::Literal(LiteralSyntax::Enumeration { path, others })
+            LiteralSyntax::Enumeration { path, others }
         } else if self.take(">>") {
             let first = self.class_reference()?;
             let (viewable, attribute) = if self.take("->") {
@@ -391,22 +419,16 @@ impl Parser<'_> {
                     first.segments.into_iter().next().expect("nonempty name"),
                 )
             };
-            ExpressionKind::Literal(LiteralSyntax::AttributePath {
+            LiteralSyntax::AttributePath {
                 viewable,
                 attribute,
-            })
+            }
         } else if self.take(">") {
-            ExpressionKind::Literal(LiteralSyntax::Class(self.class_reference()?))
-        } else if self.take("PARAMETER") {
-            ExpressionKind::RuntimeParameter(self.qualified_name_in(ReferenceContext::Ordinary, 2)?)
-        } else if self.is("INSPECTION") || self.is("AREA") {
-            ExpressionKind::Inspection(self.inspection_expression()?)
-        } else if self.call_ahead()? {
-            return self.call();
+            LiteralSyntax::Class(self.class_reference()?)
         } else {
-            ExpressionKind::Path(self.object_path()?)
+            return Ok(None);
         };
-        self.push_expression(kind, self.span(start, self.end()))
+        Ok(Some(literal))
     }
     fn call_ahead(&mut self) -> Parsed<bool> {
         // Only bounded lookahead to disambiguate Name from qualified FunctionCall.
@@ -422,7 +444,18 @@ impl Parser<'_> {
                 .get(at)
                 .map_or("", |t| &self.source()[t.range.clone()]);
             if next == "(" {
-                return Ok(true);
+                // A graphic WHERE condition can end in a bare name before
+                // the drawing parameters `(Name := ...)`. `:=` cannot follow
+                // a name in a call argument.
+                let assignment = self
+                    .tokens
+                    .get(at + 1)
+                    .is_some_and(|t| t.kind == Kind::Word)
+                    && self
+                        .tokens
+                        .get(at + 2)
+                        .is_some_and(|t| &self.source()[t.range.clone()] == ":=");
+                return Ok(!assignment);
             }
             if next != "." {
                 return Ok(false);
@@ -485,19 +518,7 @@ impl Parser<'_> {
         let area = self.marker("AREA");
         self.expect("INSPECTION")?;
         let inspection = if self.take("OF") {
-            let base = self.renamed_viewable()?;
-            self.expect("->")?;
-            let mut attributes = vec![self.name(false)?];
-            while self.take("->") {
-                attributes.push(self.name(false)?);
-            }
-            self.node()?;
-            InspectionSource::Inline {
-                area,
-                base,
-                attributes,
-                span: self.span(start, self.end()),
-            }
+            InspectionSource::Inline(self.inspection_path(start, area)?)
         } else {
             if area.is_some() {
                 return Err(Self::expected("AREA INSPECTION requires OF"));
@@ -512,15 +533,37 @@ impl Parser<'_> {
         self.node()?;
         Ok(InspectionExpression { inspection, of })
     }
+    pub(super) fn inspection_path(
+        &mut self,
+        start: usize,
+        area: Option<Span>,
+    ) -> Parsed<InlineInspection> {
+        let base = self.renamed_viewable()?;
+        self.expect("->")?;
+        let mut attributes = vec![self.name(false)?];
+        while self.take("->") {
+            attributes.push(self.name(false)?);
+        }
+        self.node()?;
+        Ok(InlineInspection {
+            area,
+            base,
+            attributes,
+            span: self.span(start, self.end()),
+        })
+    }
+    pub(super) fn derived_attribute_value(&mut self) -> Parsed<ExprId> {
+        if self.language == Language::V23 {
+            self.factor()
+        } else {
+            self.expression()
+        }
+    }
     pub(super) fn derivations(&mut self) -> Parsed<Vec<ExprId>> {
         let mut out = vec![];
         if self.take(":=") {
             loop {
-                out.push(if self.language == Language::V23 {
-                    self.factor()?
-                } else {
-                    self.expression()?
-                });
+                out.push(self.derived_attribute_value()?);
                 if !self.take(",") {
                     break;
                 }
@@ -1062,12 +1105,12 @@ mod tests {
             let ExpressionKind::Inspection(i) = &expr(&d, arguments[17]).kind else {
                 panic!()
             };
-            let InspectionSource::Inline {
+            let InspectionSource::Inline(InlineInspection {
                 area: Some(area),
                 base,
                 attributes,
                 ..
-            } = &i.inspection
+            }) = &i.inspection
             else {
                 panic!()
             };

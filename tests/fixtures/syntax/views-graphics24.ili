@@ -1,0 +1,51 @@
+INTERLIS 2.4;
+
+MODEL Drawings AT "https://example.invalid" VERSION "1" =
+  SIGN BASKET Palette (FINAL) EXTENDS Symbols.Base.Palette ~ Symbols.Signs
+    OBJECTS OF LineSign: Thin, Thick
+    OBJECTS OF PointSign: Dot;
+
+  VIEW TOPIC Layers =
+    REFSYSTEM BASKET Frames ~ Coordinates.Frames;
+
+    VIEW Projected (TRANSIENT) PROJECTION OF p ~ Data.Features.Feature;
+      BASE p EXTENDED BY s ~ Special, Other
+      WHERE p->visible;
+      WHERE s != UNDEFINED;
+      =
+      ATTRIBUTE
+        ALL OF p;
+        visible : BOOLEAN := p->visible, #false;
+        derived (FINAL) := p->visible AND s->visible;
+      MANDATORY CONSTRAINT keep: derived;
+    END Projected;
+
+    VIEW Joined JOIN OF a ~ Projected, b ~ Second (OR NULL), Third;
+      =
+    END Joined;
+
+    VIEW JoinedExtra EXTENDS Joined = END JoinedExtra;
+    VIEW Extending (EXTENDED) = END Extending;
+    VIEW JoinedUnion UNION OF First, p ~ Projected; = END JoinedUnion;
+    VIEW Groups AGGREGATION OF Projected EQUAL (a->value, b); = END Groups;
+    VIEW AllGroups AGGREGATION OF Projected ALL; = END AllGroups;
+    VIEW Inspect INSPECTION OF Projected -> feature -> segments; = END Inspect;
+    VIEW Areas AREA INSPECTION OF Projected -> feature;
+      = ALL OF Projected;
+    END Areas;
+
+    GRAPHIC Features (FINAL) EXTENDS Drawing.Common BASED ON Drawings.Layers.Projected =
+      WHERE visible;
+      Line (EXTENDED) OF Symbols.Signs.LineSign:
+        WHERE visible (
+          Shape := {Symbols.Signs.Palette.Thin};
+          Priority := ACCORDING style->grade (
+            100[m] WHEN IN #n.low .. #n.high,
+            {Palette.Thick} WHEN IN #default
+          );
+          Geometry := p->line
+        ), (Priority := PARAMETER Other.scale);
+      Fallback: (Priority := Pick(#normal));
+    END Features;
+  END Layers;
+END Drawings.

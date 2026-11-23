@@ -548,7 +548,6 @@ impl Parser<'_> {
             })();
             match parsed {
                 Ok(item) => out.push(item),
-                Err(issue) if matches!(issue.kind, IssueKind::Unsupported) => return Err(issue),
                 Err(issue) => {
                     self.report(issue);
                     self.recover(context, true);

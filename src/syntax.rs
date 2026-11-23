@@ -10,10 +10,12 @@ use crate::{
 mod expressions;
 mod structure;
 mod types;
+mod views;
 pub(crate) use crate::model::LanguageVersion as Language;
 pub(crate) use expressions::*;
 pub(crate) use structure::*;
 pub(crate) use types::*;
+pub(crate) use views::*;
 fn language_version(text: &str) -> Option<Language> {
     // Version-Dec is a number, not a model-version string. Recognize its exact
     // value without floats, bigint work, allocation or altering source spelling.
@@ -152,6 +154,9 @@ pub(crate) enum Declaration {
     Constraints(ConstraintsDecl),
     Association(AssociationDecl),
     Context(ContextDecl),
+    View(ViewDecl),
+    Graphic(GraphicDecl),
+    MetadataBasket(MetadataBasketDecl),
     #[allow(dead_code)] // Preserved syntax; runtime values are outside the analyzer.
     RuntimeParameter {
         name: Name,
@@ -181,6 +186,9 @@ impl Declaration {
             Self::Constraints(value) => &value.span,
             Self::Association(value) => &value.span,
             Self::Context(value) => &value.span,
+            Self::View(value) => &value.span,
+            Self::Graphic(value) => &value.span,
+            Self::MetadataBasket(value) => &value.span,
         }
     }
 }
@@ -207,11 +215,12 @@ enum Context {
     Model,
     Topic,
     Container,
+    View,
+    Graphic,
 }
 #[derive(Clone, Copy)]
 enum IssueKind {
     Syntax,
-    Unsupported,
     UnsupportedVersion,
     Limit,
     Lexical,
@@ -321,13 +330,6 @@ impl Parser<'_> {
             message,
         }
     }
-    fn unsupported(message: &'static str) -> Issue {
-        Issue {
-            primary: None,
-            kind: IssueKind::Unsupported,
-            message,
-        }
-    }
     fn expect(&mut self, text: &str) -> Parsed<()> {
         if self.diagnostics.limited {
             return Err(Self::limited());
@@ -345,9 +347,6 @@ impl Parser<'_> {
         let span = Some(issue.primary.unwrap_or_else(|| self.current_span()));
         match issue.kind {
             IssueKind::Syntax => self.diagnostics.syntax_error(issue.message, span),
-            IssueKind::Unsupported => self
-                .diagnostics
-                .push("ILI-UNSUPPORTED", issue.message, span),
             IssueKind::UnsupportedVersion => {
                 self.diagnostics.unsupported_version(issue.message, span)
             }
@@ -528,25 +527,34 @@ impl Parser<'_> {
             if domain_section && matches!(next, "=" | "EXTENDS" | "(") {
                 return true;
             }
-            if context == Context::Container && matches!(next, ":" | "(") {
+            if matches!(
+                context,
+                Context::Container | Context::View | Context::Graphic
+            ) && matches!(next, ":" | "(")
+                || context == Context::View && next == ":="
+                || context == Context::Graphic && next == "OF"
+            {
                 return true;
             }
         }
         match context {
-            Context::Model => matches!(
-                self.text(),
-                "DOMAIN"
-                    | "UNIT"
-                    | "FUNCTION"
-                    | "LINE"
-                    | "PARAMETER"
-                    | "CONTEXT"
-                    | "CLASS"
-                    | "STRUCTURE"
-                    | "TOPIC"
-                    | "SIGN"
-                    | "REFSYSTEM"
-            ),
+            Context::Model => {
+                self.is("VIEW") && self.next_is("TOPIC")
+                    || matches!(
+                        self.text(),
+                        "DOMAIN"
+                            | "UNIT"
+                            | "FUNCTION"
+                            | "LINE"
+                            | "PARAMETER"
+                            | "CONTEXT"
+                            | "CLASS"
+                            | "STRUCTURE"
+                            | "TOPIC"
+                            | "SIGN"
+                            | "REFSYSTEM"
+                    )
+            }
             Context::Topic => matches!(
                 self.text(),
                 "DOMAIN"
@@ -574,6 +582,11 @@ impl Parser<'_> {
                     | "UNIQUE"
                     | "SET"
             ),
+            Context::View => {
+                matches!(self.text(), "ALL" | "CONTINUOUS" | "SUBDIVISION")
+                    || self.constraint_start()
+            }
+            Context::Graphic => false,
         }
     }
     fn recover(&mut self, context: Context, domain_section: bool) {
@@ -605,7 +618,6 @@ impl Parser<'_> {
             let before = self.at;
             match self.declaration(context) {
                 Ok(mut items) => declarations.append(&mut items),
-                Err(issue) if matches!(issue.kind, IssueKind::Unsupported) => return Err(issue),
                 Err(issue) => {
                     self.report(issue);
                     self.recover(context, false);
@@ -701,15 +713,19 @@ impl Parser<'_> {
         if self.is("CLASS") || self.is("STRUCTURE") {
             return Ok(vec![self.container()?]);
         }
+        if matches!(self.text(), "SIGN" | "REFSYSTEM") {
+            return Ok(vec![Declaration::MetadataBasket(self.metadata_basket()?)]);
+        }
+        if context == Context::Topic {
+            if self.is("VIEW") {
+                return Ok(vec![Declaration::View(self.view()?)]);
+            }
+            if self.is("GRAPHIC") {
+                return Ok(vec![Declaration::Graphic(self.graphic()?)]);
+            }
+        }
         if self.unreserved_name() {
             return Err(Self::expected("Expected a declaration keyword"));
-        }
-        if matches!(self.text(), "SIGN" | "REFSYSTEM")
-            || context == Context::Topic && matches!(self.text(), "VIEW" | "GRAPHIC")
-        {
-            return Err(Self::unsupported(
-                "Declaration construction is outside the supported subset",
-            ));
         }
         Err(Self::expected(
             "Declaration is not permitted at this position",
@@ -1007,23 +1023,13 @@ mod tests {
         assert!(d.rejected);
     }
     #[test]
-    fn narrow_derivation_and_unsupported_constructs_never_disappear() {
+    fn direct_domain_alias_is_invalid_syntax() {
         let (_, _, d) = parse_text(
             &format!("{HEADER}DOMAIN Alias=Base; END A."),
             Limits::default(),
         );
         assert!(d.rejected);
         assert!(!d.incomplete);
-        {
-            let body = "TOPIC T = VIEW V PROJECTION OF B; = ALL OF B; END V; END T;";
-            let (_, _, d) = parse_text(&format!("{HEADER}{body} END A."), Limits::default());
-            assert!(d.incomplete, "{body}");
-            assert!(
-                d.entries
-                    .iter()
-                    .any(|e| e.code == "ILI-UNSUPPORTED" && e.primary.is_some())
-            );
-        }
     }
     #[test]
     fn actual_version_controls_complete_reserved_tables() {
