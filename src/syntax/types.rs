@@ -1,6 +1,6 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
-pub(crate) use crate::model::{AlignmentKind, BlackboxKind, TemporalKind};
+pub(crate) use crate::model::{AlignmentKind, BlackboxKind, EnumerationOrder, TemporalKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -48,11 +48,6 @@ pub(crate) struct NumericSyntax {
     pub direction: Option<Located<Direction>>,
     pub reference_system: Option<ReferenceSystemSyntax>,
     pub span: Span,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EnumerationOrder {
-    Ordered,
-    Circular,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2139,8 +2134,6 @@ mod tests {
     #[test]
     fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
         for ty in [
-            "(red,green)",
-            "ALL OF INTERLIS.BOOLEAN",
             "NUMERIC",
             "0..360 CIRCULAR",
             "0..1 [INTERLIS.m]",

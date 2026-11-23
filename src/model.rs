@@ -106,6 +106,14 @@ pub enum TypeInfo {
     Alignment(AlignmentKind),
     Temporal(TemporalKind),
     Blackbox(BlackboxKind),
+    Enumeration {
+        values: Enumeration,
+        order: Option<EnumerationOrder>,
+        declared_order: Option<EnumerationOrder>,
+    },
+    EnumTree {
+        domain: String,
+    },
     Numeric {
         lower: DecimalInfo,
         upper: DecimalInfo,
@@ -132,6 +140,52 @@ pub enum TemporalKind {
 pub enum BlackboxKind {
     Xml,
     Binary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnumerationOrder {
+    Ordered,
+    Circular,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Enumeration {
+    pub(crate) elements: Vec<EnumerationElement>,
+    pub(crate) final_subtree: bool,
+}
+
+impl Enumeration {
+    pub fn elements(&self) -> &[EnumerationElement] {
+        &self.elements
+    }
+
+    pub fn is_final(&self) -> bool {
+        self.final_subtree
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EnumerationElement {
+    pub(crate) name: String,
+    #[serde(skip)]
+    pub(crate) span: Span,
+    pub(crate) children: Option<Enumeration>,
+}
+
+impl EnumerationElement {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+
+    pub fn children(&self) -> Option<&Enumeration> {
+        self.children.as_ref()
+    }
 }
 /// Retains declared name segments, exact bound target identity and original reference range.
 #[derive(Debug)]

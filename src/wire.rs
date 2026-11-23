@@ -400,6 +400,14 @@ impl Serialize for TypeOutput<'_> {
             Blackbox {
                 encoding: crate::BlackboxKind,
             },
+            Enumeration {
+                values: &'a crate::Enumeration,
+                order: Option<crate::EnumerationOrder>,
+                declared_order: Option<crate::EnumerationOrder>,
+            },
+            EnumTree {
+                domain: &'a str,
+            },
             Numeric {
                 lower: Decimal<'a>,
                 upper: Decimal<'a>,
@@ -422,6 +430,17 @@ impl Serialize for TypeOutput<'_> {
                 encoding: *encoding,
             }
             .serialize(serializer),
+            TypeInfo::Enumeration {
+                values,
+                order,
+                declared_order,
+            } => Type::Enumeration {
+                values,
+                order: *order,
+                declared_order: *declared_order,
+            }
+            .serialize(serializer),
+            TypeInfo::EnumTree { domain } => Type::EnumTree { domain }.serialize(serializer),
             TypeInfo::Numeric { lower, upper } => Type::Numeric {
                 lower: lower.into(),
                 upper: upper.into(),

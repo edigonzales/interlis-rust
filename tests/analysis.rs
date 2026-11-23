@@ -1,7 +1,7 @@
 use interlis::{
     AlignmentKind, AnalysisReport, AnalysisStatus as Status, BlackboxKind, CompileRequest,
-    DeclarationKind, LanguageVersion, Limits, SourceInput, TemporalKind, TypeInfo, analyze,
-    analyze_roots,
+    DeclarationKind, EnumerationOrder, LanguageVersion, Limits, SourceInput, TemporalKind,
+    TypeInfo, analyze, analyze_roots,
 };
 const BASE: &str = r#"INTERLIS 2.3;
 MODEL ProbeBase (en) AT "https://example.invalid" VERSION "2026-11-10" =
@@ -110,6 +110,76 @@ fn scalar_types_keep_bounds_families_and_predefined_origins() {
         Status::Rejected,
         Some("ILI-TEXT-LENGTH"),
     );
+}
+
+#[test]
+fn enumerations_preserve_sibling_order_final_subtrees_and_tree_domains() {
+    let body = "DOMAIN Colour=(warm(red,blue:FINAL), cool(blue), neutral) CIRCULAR; AllColours=ALL OF Colour; AllBoolean=ALL OF INTERLIS.BOOLEAN; STRUCTURE S=value:ALL OF Colour; END S;";
+    for version in ["2.3", "2.4"] {
+        let text = format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        let report = outcome(request(vec![("enum", text)]), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Enumeration {
+            order,
+            declared_order,
+            values,
+        }) = graph.effective_type("M.Colour")
+        else {
+            panic!("expected Colour")
+        };
+        assert_eq!(
+            (*order, *declared_order),
+            (
+                Some(EnumerationOrder::Circular),
+                Some(EnumerationOrder::Circular)
+            )
+        );
+        assert_eq!(
+            values
+                .elements()
+                .iter()
+                .map(|e| e.name())
+                .collect::<Vec<_>>(),
+            ["warm", "cool", "neutral"]
+        );
+        let warm = values.elements()[0].children().unwrap();
+        assert!(warm.is_final());
+        assert_eq!(warm.elements()[1].name(), "blue");
+        assert!(values.elements()[2].children().is_none());
+        let blue = report
+            .sources()
+            .location(warm.elements()[1].source_span())
+            .unwrap();
+        assert_eq!(
+            &report.sources().files()[0].text()[blue.start_byte as usize..blue.end_byte as usize],
+            "blue"
+        );
+        for root in ["M.AllColours", "M.S.value"] {
+            assert!(
+                matches!(graph.effective_type(root), Some(TypeInfo::EnumTree { domain }) if domain == "M.Colour")
+            );
+        }
+        assert!(
+            matches!(graph.effective_type("M.AllBoolean"), Some(TypeInfo::EnumTree { domain }) if domain == "INTERLIS.BOOLEAN")
+        );
+    }
+}
+
+#[test]
+fn enumeration_definitions_and_tree_domains_reject_illegal_targets() {
+    for (body, code) in [
+        ("DOMAIN Colour=(red,red);", "ILI-ENUM-DUPLICATE"),
+        ("DOMAIN Colour=(a.b,c);", "ILI-ENUM-PATH"),
+        ("DOMAIN Colour=(FINAL);", "ILI-ENUM-EMPTY"),
+        ("DOMAIN X=TEXT; Tree=ALL OF X;", "ILI-ENUM-TARGET"),
+        (
+            "DOMAIN X=(a,b); Tree=ALL OF X; Other=ALL OF Tree;",
+            "ILI-ENUM-TARGET",
+        ),
+        ("DOMAIN A=ALL OF B; B=ALL OF A;", "ILI-DOMAIN-CYCLE"),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
 }
 fn pair(version: &str) -> CompileRequest {
     request(vec![

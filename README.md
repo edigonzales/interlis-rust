@@ -15,8 +15,9 @@ language version in its own header. Name and import binding belong to model anal
 
 The current subset includes simple data-model headers, ordinary explicit imports,
 topics, classes within topics, structures, scalar text, Boolean, alignment,
-date/time, blackbox and bounded numeric types, and ordered attributes. It checks
-model identities, missing imports, duplicate
+date/time, blackbox and bounded numeric types, enumeration definitions and
+`ALL OF` enumeration references, and ordered attributes. It checks model
+identities, missing imports, duplicate
 names in supported scopes, closing names, supported domain binding/cycles,
 mandatory flags, positive text lengths and exact numeric bounds/written precision.
 Domain dependencies use `Alias EXTENDS Base = MANDATORY;`; direct domain

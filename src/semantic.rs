@@ -1,3 +1,4 @@
+mod enumeration;
 mod names;
 mod references;
 
@@ -32,7 +33,14 @@ struct Symbol<'a> {
     base: Option<&'a QualifiedName>,
     ast: Option<&'a SyntaxDecl>,
 }
-impl Symbol<'_> {
+impl<'a> Symbol<'a> {
+    fn domain_dependency(&self) -> Option<&'a QualifiedName> {
+        self.base.or(match self.syntax {
+            Some(TypeSyntax::EnumTree { domain, .. }) => Some(domain),
+            _ => None,
+        })
+    }
+
     fn inherits_names(&self) -> bool {
         let extended = |properties: &[syntax::Located<syntax::Property>]| {
             properties
@@ -100,7 +108,9 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Named(_)
         | TypeSyntax::Alignment { .. }
         | TypeSyntax::Temporal { .. }
-        | TypeSyntax::Blackbox { .. } => true,
+        | TypeSyntax::Blackbox { .. }
+        | TypeSyntax::Enumeration { .. }
+        | TypeSyntax::EnumTree { .. } => true,
         TypeSyntax::Numeric(n) => {
             n.bounds.is_some()
                 && n.circular.is_none()
@@ -108,9 +118,7 @@ fn supported_type(ty: &TypeSyntax) -> bool {
                 && n.direction.is_none()
                 && n.reference_system.is_none()
         }
-        TypeSyntax::Enumeration { .. }
-        | TypeSyntax::EnumTree { .. }
-        | TypeSyntax::Formatted { .. }
+        TypeSyntax::Formatted { .. }
         | TypeSyntax::Coordinate(_)
         | TypeSyntax::Geometry(_)
         | TypeSyntax::Oid { .. }
@@ -1233,6 +1241,31 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return self.primitive_reference(owner, declared, predefined, span);
             }
             TypeSyntax::Blackbox { kind, .. } => TypeInfo::Blackbox(*kind),
+            TypeSyntax::Enumeration {
+                enumeration, order, ..
+            } => {
+                let order = order.as_ref().map(|order| order.value);
+                TypeInfo::Enumeration {
+                    values: self.new_enumeration(enumeration)?,
+                    order,
+                    declared_order: order,
+                }
+            }
+            TypeSyntax::EnumTree { domain, .. } => {
+                let value = match self.bind_name(owner, domain)? {
+                    Target::Domain(id) => self.resolve_domain(id)?,
+                    Target::Predefined(name) => self.predefined_type(name, &domain.span)?,
+                    Target::Structure => {
+                        self.diagnostics.push(
+                            "ILI-ENUM-TARGET",
+                            "ALL OF requires an enumeration domain",
+                            Some(domain.span.clone()),
+                        );
+                        return None;
+                    }
+                };
+                return self.enum_tree_type(owner, value, &domain.span);
+            }
             TypeSyntax::Numeric(numeric) => {
                 let span = &numeric.span;
                 let syntax::NumericBounds { lower, upper } = numeric
@@ -1294,9 +1327,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     }
                 };
             }
-            TypeSyntax::Enumeration { .. }
-            | TypeSyntax::EnumTree { .. }
-            | TypeSyntax::Formatted { .. }
+            TypeSyntax::Formatted { .. }
             | TypeSyntax::Coordinate(_)
             | TypeSyntax::Geometry(_)
             | TypeSyntax::Oid { .. }
@@ -1343,7 +1374,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         );
         let primary = path
             .last()
-            .and_then(|&id| self.symbols[id].base)
+            .and_then(|&id| self.symbols[id].domain_dependency())
             .map_or(&self.symbols[current].name_span, |q| &q.span)
             .clone();
         let related = cycle
@@ -1381,7 +1412,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
             self.states[current] = State::Resolving;
             path.push(current);
-            if let Some(reference) = self.symbols[current].base {
+            if let Some(reference) = self.symbols[current].domain_dependency() {
                 match self.bind_name(current, reference) {
                     Some(Target::Domain(next)) => {
                         if forward.is_none()
@@ -1391,6 +1422,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         }
                         current = next;
                         continue;
+                    }
+                    Some(Target::Predefined(name))
+                        if matches!(
+                            self.symbols[current].syntax,
+                            Some(TypeSyntax::EnumTree { .. })
+                        ) =>
+                    {
+                        break self.predefined_type(name, &reference.span);
                     }
                     Some(Target::Predefined(
                         "BOOLEAN" | "URI" | "NAME" | "INTERLIS_1_DATE" | "HALIGNMENT"
@@ -1427,28 +1466,26 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             };
             break self.concrete_type(current, syntax);
         };
-        let result = result.filter(|_| {
+        let mut result = result.filter(|_| {
             forward.is_none_or(|(owner, target, span)| self.check_domain_order(owner, target, span))
         });
-        if let Some(mut value) = result {
-            for &id in path.iter().rev() {
+        for id in path.into_iter().rev() {
+            if let Some(TypeSyntax::EnumTree { domain, .. }) = self.symbols[id].syntax {
+                result = result.and_then(|value| self.enum_tree_type(id, value, &domain.span));
+            }
+            if let Some(mut value) = result {
                 value.mandatory |= self.symbols[id]
                     .declaration
                     .declared_mandatory
                     .unwrap_or(false);
                 self.symbols[id].declaration.type_id = Some(value.ty);
                 self.states[id] = State::Resolved(value);
-            }
-            match self.states[start] {
-                State::Resolved(value) => Some(value),
-                _ => Some(value),
-            }
-        } else {
-            for id in path {
+                result = Some(value);
+            } else {
                 self.states[id] = State::Failed;
             }
-            None
         }
+        result
     }
     fn run(mut self, requested: Option<&[String]>) -> Option<ModelGraph> {
         self.collect_models(requested);
