@@ -443,8 +443,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         let mut selected = vec![requested.is_none(); candidates.len()];
+        let mut pending = Vec::new();
         if let Some(requested) = requested {
-            let mut pending = Vec::new();
             for name in requested {
                 if let Some(indices) = by_name.get(name.as_str()) {
                     for &index in indices {
@@ -462,8 +462,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     }
                 }
             }
-            while let Some(index) = pending.pop() {
-                for import in &candidates[index].1.imports {
+        } else {
+            pending.extend((0..candidates.len()).rev());
+        }
+        while let Some(index) = pending.pop() {
+            let ast = candidates[index].1;
+            if requested.is_some() {
+                for import in &ast.imports {
                     let targets = by_name
                         .get(import.name.value.as_str())
                         .map_or(&[][..], Vec::as_slice);
@@ -485,6 +490,66 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     }
                 }
             }
+            let Some(translation) = &ast.translation else {
+                continue;
+            };
+            let mut matching = None;
+            let mut ambiguous = false;
+            if let Some(indices) = by_name.get(translation.original.value.as_str()) {
+                for &target in indices {
+                    let original = candidates[target].1;
+                    if !self.step(
+                        original.version.value.len().saturating_add(1),
+                        &translation.span,
+                    ) {
+                        return;
+                    }
+                    if original.version.value != translation.version.value {
+                        continue;
+                    }
+                    if let Some(previous) = matching {
+                        let conflicting: [usize; 2] = [previous, target];
+                        self.diagnostics.push_related(
+                            "ILI-TRANSLATION-ORIGINAL-AMBIGUOUS",
+                            "Multiple sources declare this translation original and version",
+                            Some(translation.original.span.clone()),
+                            conflicting
+                                .into_iter()
+                                .map(|candidate| RelatedLocation {
+                                    span: candidates[candidate].1.name.span.clone(),
+                                    message: "Candidate original model".into(),
+                                })
+                                .collect(),
+                        );
+                        ambiguous = true;
+                        break;
+                    }
+                    matching = Some(target);
+                }
+            }
+            if !ambiguous {
+                if let Some(target) = matching {
+                    if !std::mem::replace(&mut selected[target], true) {
+                        pending.push(target);
+                    }
+                } else {
+                    self.diagnostics.push_related(
+                        "ILI-TRANSLATION-ORIGINAL-NOT-FOUND",
+                        "No supplied original model has this name and version",
+                        Some(translation.original.span.clone()),
+                        vec![RelatedLocation {
+                            span: translation.version.span.clone(),
+                            message: "Requested original version".into(),
+                        }],
+                    );
+                }
+            }
+            if self.diagnostics.limited {
+                return;
+            }
+        }
+        if self.diagnostics.rejected {
+            return;
         }
         for ((language, ast), present) in candidates.into_iter().zip(selected) {
             if present {
@@ -587,6 +652,38 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         }
                     }
                 }
+            }
+        }
+    }
+    fn check_translation_cycles(&mut self) {
+        let mut visited_by = vec![None; self.selected_models.len()];
+        for start in 0..self.selected_models.len() {
+            let mut current = start;
+            while visited_by[current].is_none() {
+                visited_by[current] = Some(start);
+                let Some(translation) = &self.selected_models[current].translation else {
+                    break;
+                };
+                if !self.step(1, &translation.span) {
+                    return;
+                }
+                let target = self.model_names[&translation.original.value];
+                if visited_by[target] == Some(start) {
+                    self.diagnostics.push_related(
+                        "ILI-TRANSLATION-CYCLE",
+                        "Translation original closes a dependency cycle",
+                        Some(translation.original.span.clone()),
+                        vec![RelatedLocation {
+                            span: self.selected_models[target].name.span.clone(),
+                            message: "Model already on the translation path".into(),
+                        }],
+                    );
+                    break;
+                }
+                current = target;
+            }
+            if self.diagnostics.limited {
+                return;
             }
         }
     }
@@ -1194,6 +1291,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_imports();
         if !self.diagnostics.rejected && !self.diagnostics.limited {
             self.check_import_cycles();
+            self.check_translation_cycles();
         }
         if self.diagnostics.limited || self.diagnostics.rejected {
             return None;

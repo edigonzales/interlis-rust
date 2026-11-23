@@ -647,6 +647,116 @@ fn import_cycles_require_a_path_back_to_an_active_model() {
 }
 
 #[test]
+fn model_imports_can_refer_to_later_declarations_in_the_same_source() {
+    // INTERLIS 2.3 §2.5.1 and 2.4 §3.5.1 specify availability by import.
+    // interlis-java resolves the complete source. ili2c rejects this order.
+    for version in ["2.3", "2.4"] {
+        let text = format!(
+            "INTERLIS {version}; MODEL UseFirst AT \"x\" VERSION \"1\" = IMPORTS Later; STRUCTURE S=value:Later.D; END S; END UseFirst. MODEL Later AT \"x\" VERSION \"1\" = DOMAIN D=TEXT*4; END Later."
+        );
+        let report =
+            analyze_roots(request(vec![("model-order", text)]), &["UseFirst".into()]).unwrap();
+        assert_eq!(report.status(), Status::CheckedSubset);
+        let graph = report.graph().unwrap();
+        assert!(
+            matches!(graph.effective_type("UseFirst.S.value"), Some(TypeInfo::Text { max_length }) if max_length == "4")
+        );
+    }
+}
+
+#[test]
+fn selected_translation_depends_on_exact_original_and_its_imports() {
+    let input = |version: &str, imports: &str| {
+        request(vec![
+            ("a-translation", format!("INTERLIS 2.4; MODEL French AT \"x\" VERSION \"2\" TRANSLATION OF Original [\"{version}\"] = END French.")),
+            ("b-original", format!("INTERLIS 2.4; MODEL Original AT \"x\" VERSION \"1\" = {imports} END Original.")),
+            ("c-other-version", "INTERLIS 2.4; MODEL Original AT \"x\" VERSION \"3\" = IMPORTS Unused; END Original.".into()),
+        ])
+    };
+    for (version, imports, expected_status, code, source) in [
+        (
+            "1",
+            "",
+            Status::Incomplete,
+            "ILI-UNSUPPORTED",
+            "a-translation",
+        ),
+        (
+            "1",
+            "IMPORTS Missing;",
+            Status::Rejected,
+            "ILI-IMPORT-NOT-FOUND",
+            "b-original",
+        ),
+        (
+            "3",
+            "",
+            Status::Rejected,
+            "ILI-IMPORT-NOT-FOUND",
+            "c-other-version",
+        ),
+        (
+            "01",
+            "",
+            Status::Rejected,
+            "ILI-TRANSLATION-ORIGINAL-NOT-FOUND",
+            "a-translation",
+        ),
+    ] {
+        let report = analyze_roots(input(version, imports), &["French".into()]).unwrap();
+        assert_eq!(
+            report.status(),
+            expected_status,
+            "{:?}",
+            report.diagnostics()
+        );
+        assert!(report.graph().is_none());
+        let [diagnostic] = report.diagnostics() else {
+            panic!("{:?}", report.diagnostics());
+        };
+        assert_eq!(diagnostic.code, code);
+        assert_eq!(
+            report
+                .sources()
+                .location(diagnostic.primary.as_ref().unwrap())
+                .unwrap()
+                .source,
+            source
+        );
+    }
+
+    let mut ambiguous = input("1", "");
+    ambiguous.sources[2].text = ambiguous.sources[1].text.clone();
+    let report = analyze_roots(ambiguous, &["French".into()]).unwrap();
+    assert_eq!(report.status(), Status::Rejected);
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.code, "ILI-TRANSLATION-ORIGINAL-AMBIGUOUS");
+    assert_eq!(diagnostic.related.len(), 2);
+}
+
+#[test]
+fn translation_cycles_are_rejected_at_the_original_reference() {
+    let text = "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" TRANSLATION OF B [\"2\"] = END A. MODEL B AT \"x\" VERSION \"2\" TRANSLATION OF A [\"1\"] = END B.";
+    let report = outcome(
+        request(vec![("cycle", text.into())]),
+        Status::Rejected,
+        Some("ILI-TRANSLATION-CYCLE"),
+    );
+    let [diagnostic] = report.diagnostics() else {
+        panic!("{:?}", report.diagnostics());
+    };
+    assert_eq!(diagnostic.related.len(), 1);
+    let location = report
+        .sources()
+        .location(diagnostic.primary.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(
+        &text[location.start_byte as usize..location.end_byte as usize],
+        "A"
+    );
+}
+
+#[test]
 fn unqualified_imports_detect_ambiguity_without_leaking_transitive_visibility() {
     let source = |imports: &str, name: &str| {
         request(vec![

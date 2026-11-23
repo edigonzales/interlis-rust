@@ -28,7 +28,6 @@ pub(crate) struct ImportSyntax {
     pub span: Span,
 }
 #[derive(Debug)]
-#[allow(dead_code)] // Preserve complete syntax while its semantics remain unimplemented.
 pub(crate) struct TranslationSyntax {
     pub original: Name,
     pub version: Located<String>,
