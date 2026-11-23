@@ -1,6 +1,7 @@
 mod domains;
 mod enumeration;
 mod names;
+mod oid;
 mod references;
 mod units;
 
@@ -175,10 +176,7 @@ fn ensure_supported_semantics(
                     ..
                 } => {
                     if options.view.is_some()
-                        || !options.properties.is_empty()
                         || options.base.is_some()
-                        || options.basket_oid.is_some()
-                        || options.oid.is_some()
                         || !options.dependencies.is_empty()
                         || !options.deferred_generics.is_empty()
                     {
@@ -190,7 +188,6 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Container {
                     properties,
                     base,
-                    oid,
                     parameters,
                     constraints,
                     attributes,
@@ -198,9 +195,12 @@ fn ensure_supported_semantics(
                     span,
                     ..
                 } => {
-                    if !properties.is_empty()
-                        || base.is_some()
-                        || !matches!(oid, syntax::OidRule::Unspecified)
+                    if properties.iter().any(|p| {
+                        !matches!(
+                            p.value,
+                            syntax::Property::Abstract | syntax::Property::Final
+                        )
+                    }) || base.is_some()
                         || parameter_section.is_some()
                         || !parameters.is_empty()
                         || !constraints.is_empty()
@@ -455,6 +455,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 reference: None,
                 base_reference: None,
                 unit: None,
+                oids: None,
             },
             name_span: name.span.clone(),
             model,
@@ -775,6 +776,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             match ast {
                 SyntaxDecl::Topic {
                     name,
+                    options,
                     declarations,
                     end_name,
                     span,
@@ -782,6 +784,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 } => {
                     self.end_name(name, end_name);
                     if let Some(id) = self.add(Kind::Topic, name, span, Some(parent), model, None) {
+                        self.index_abstract_final(id, &options.properties);
                         self.index_declarations(id, model, declarations);
                     }
                 }
@@ -789,6 +792,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     kind,
                     name,
                     attributes,
+                    properties,
                     parameters,
                     end_name,
                     span,
@@ -800,6 +804,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         syntax::ContainerKind::Structure => Kind::Structure,
                     };
                     if let Some(id) = self.add(kind, name, span, Some(parent), model, None) {
+                        self.index_abstract_final(id, properties);
                         self.index_declarations(id, model, attributes);
                         for parameter in parameters {
                             self.add(
@@ -832,24 +837,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     ) {
                         self.symbols[id].syntax = ty.as_ref();
                         self.symbols[id].base = base.as_ref();
-                        let mut finals = properties
-                            .iter()
-                            .filter(|p| p.value == syntax::Property::Final);
-                        if let Some(final_property) = finals.next() {
-                            self.symbols[id].declaration.final_declaration = true;
-                            if let Some(repeated) = finals.next() {
-                                self.duplicate(&repeated.span, &final_property.span);
-                            }
-                        }
-                        let mut abstracts = properties
-                            .iter()
-                            .filter(|p| p.value == syntax::Property::Abstract);
-                        if let Some(abstract_property) = abstracts.next() {
-                            self.symbols[id].declaration.abstract_declaration = true;
-                            if let Some(repeated) = abstracts.next() {
-                                self.duplicate(&repeated.span, &abstract_property.span);
-                            }
-                        }
+                        self.index_abstract_final(id, properties);
                     }
                 }
                 SyntaxDecl::Attribute {
@@ -1057,6 +1045,64 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 symbol.ast = Some(ast);
             }
         }
+    }
+    fn index_abstract_final(
+        &mut self,
+        id: usize,
+        properties: &[syntax::Located<syntax::Property>],
+    ) {
+        use syntax::Property::{Abstract, Final};
+        for property in [Abstract, Final] {
+            let mut appearances = properties.iter().filter(|p| p.value == property);
+            if let Some(first) = appearances.next() {
+                if property == Abstract {
+                    self.symbols[id].declaration.abstract_declaration = true;
+                } else {
+                    self.symbols[id].declaration.final_declaration = true;
+                }
+                if let Some(repeated) = appearances.next() {
+                    self.duplicate(&repeated.span, &first.span);
+                }
+            }
+        }
+        if self.symbols[id].declaration.is_abstract() && self.symbols[id].declaration.is_final() {
+            self.diagnostics.push(
+                "ILI-PROPERTY-CONFLICT",
+                "A declaration cannot be both ABSTRACT and FINAL",
+                Some(self.symbols[id].name_span.clone()),
+            );
+        }
+    }
+    fn bound_reference(
+        &mut self,
+        owner: usize,
+        name: &QualifiedName,
+        target: BoundName,
+    ) -> Option<TypeReference> {
+        let (target, predefined_language) = match target {
+            BoundName::Declared(id) => {
+                let bytes = self.symbols[id].declaration.qualified.len();
+                if !self.step(bytes, &name.span) {
+                    return None;
+                }
+                (self.symbols[id].declaration.qualified.clone(), None)
+            }
+            BoundName::Predefined(name, _) => (
+                format!("INTERLIS.{name}"),
+                Some(self.models[self.symbols[owner].model].language),
+            ),
+        };
+        Some(TypeReference {
+            declared: name
+                .segments
+                .iter()
+                .map(|part| part.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            target,
+            predefined_language,
+            span: name.span.clone(),
+        })
     }
     fn bind_name(&mut self, owner: usize, name: &QualifiedName) -> Option<Target> {
         let kinds = if self.symbols[owner].declaration.kind == Kind::Domain {
@@ -1651,6 +1697,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_units()?;
         for symbol in &self.symbols {
             if symbol.declaration.kind == Kind::Class
+                && !symbol.declaration.is_abstract()
                 && symbol
                     .declaration
                     .parent
@@ -1671,6 +1718,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
+        self.bind_oid_rules()?;
         for id in 0..self.symbols.len() {
             if !matches!(
                 self.symbols[id].declaration.kind,

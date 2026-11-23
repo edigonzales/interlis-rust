@@ -344,6 +344,8 @@ impl Serialize for DeclarationsOutput<'_> {
             effective_type: Option<TypeOutput<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             unit: Option<&'a crate::UnitInfo>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            oid_rules: Option<&'a crate::OidRules>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -369,6 +371,7 @@ impl Serialize for DeclarationsOutput<'_> {
                     .and_then(|id| self.graph.types.get(id))
                     .map(TypeOutput),
                 unit: declaration.unit(),
+                oid_rules: declaration.oid_rules(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

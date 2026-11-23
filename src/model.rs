@@ -149,6 +149,34 @@ pub enum OidType {
     Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OidKind {
+    Unstable,
+    Any,
+    Concrete,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OidRule {
+    pub kind: OidKind,
+    pub domain: Option<TypeReference>,
+    #[serde(skip)]
+    pub(crate) span: Span,
+}
+
+impl OidRule {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct OidRules {
+    pub basket: Option<OidRule>,
+    pub object: Option<OidRule>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinateKind {
@@ -367,6 +395,7 @@ pub struct Declaration {
     pub(crate) reference: Option<TypeReference>,
     pub(crate) base_reference: Option<TypeReference>,
     pub(crate) unit: Option<Box<UnitInfo>>,
+    pub(crate) oids: Option<Box<OidRules>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -403,6 +432,9 @@ impl Declaration {
     }
     pub fn unit(&self) -> Option<&UnitInfo> {
         self.unit.as_deref()
+    }
+    pub fn oid_rules(&self) -> Option<&OidRules> {
+        self.oids.as_deref()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

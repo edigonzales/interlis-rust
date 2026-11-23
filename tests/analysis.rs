@@ -1205,7 +1205,18 @@ fn topic_oid_can_name_a_later_domain_in_the_topic_header() {
     // 2.3 §2.5.2 and 2.4 §3.5.2 specify OID-DomainRef in the topic
     // header. The order rule for attribute type references does not apply.
     let body = "TOPIC T=OID AS M.T.LocalId; DOMAIN LocalId=OID 0..2147483647; END T;";
-    outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
+    let report = outcome(single(body), Status::CheckedSubset, None);
+    let rule = report
+        .graph()
+        .unwrap()
+        .declaration("M.T")
+        .unwrap()
+        .oid_rules()
+        .unwrap()
+        .object
+        .as_ref()
+        .unwrap();
+    assert_eq!(rule.domain.as_ref().unwrap().target_name(), "M.T.LocalId");
     outcome(
         single(&body.replace("M.T.LocalId", "M.T.Missing")),
         Status::Rejected,
@@ -2005,5 +2016,95 @@ fn oid_domain_extensions_cannot_change_a_concrete_or_unstable_oid() {
         "DOMAIN A=OID TEXT*36; B EXTENDS A=TEXT*36;",
     ] {
         outcome(single(body), Status::Rejected, Some("ILI-OID-EXTENSION"));
+    }
+}
+
+#[test]
+fn topic_and_class_oid_rules_preserve_defaults_overrides_and_origin() {
+    use interlis::OidKind;
+    for edition in ["2.3", "2.4"] {
+        let text = format!(
+            r#"INTERLIS {edition}; MODEL M AT "x" VERSION "1" =
+            TOPIC T =
+                BASKET OID AS INTERLIS.STANDARDOID;
+                OID AS INTERLIS.I32OID;
+                CLASS Default = END Default;
+                CLASS Override = OID AS INTERLIS.UUIDOID; END Override;
+                CLASS Unstable = NO OID; END Unstable;
+            END T;
+            TOPIC A (ABSTRACT) = OID AS INTERLIS.ANYOID;
+                CLASS Root (ABSTRACT) = END Root;
+                CLASS Concrete = OID AS INTERLIS.I32OID; END Concrete;
+            END A;
+        END M."#
+        );
+        let report = outcome(
+            request(vec![("oids", text.clone())]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let rules = |name| graph.declaration(name).unwrap().oid_rules().unwrap();
+        let topic = rules("M.T");
+        let object = |name| rules(name).object.as_ref().unwrap();
+        assert_eq!(
+            topic
+                .basket
+                .as_ref()
+                .unwrap()
+                .domain
+                .as_ref()
+                .unwrap()
+                .target_name(),
+            "INTERLIS.STANDARDOID"
+        );
+        let oid = object("M.T.Default");
+        assert_eq!(oid.kind, OidKind::Concrete);
+        assert_eq!(
+            oid.domain.as_ref().unwrap().target_name(),
+            "INTERLIS.I32OID"
+        );
+        let span = report.sources().location(oid.source_span()).unwrap();
+        assert_eq!(
+            &text[span.start_byte as usize..span.end_byte as usize],
+            "INTERLIS.I32OID"
+        );
+        assert_eq!(
+            object("M.T.Override")
+                .domain
+                .as_ref()
+                .unwrap()
+                .target_name(),
+            "INTERLIS.UUIDOID"
+        );
+        assert_eq!(object("M.T.Unstable").kind, OidKind::Unstable);
+        assert!(object("M.T.Unstable").domain.is_none());
+        assert_eq!(object("M.A.Root").kind, OidKind::Any);
+        assert!(rules("M.T.Default").basket.is_none());
+    }
+}
+
+#[test]
+fn oid_rules_require_an_oid_domain_and_open_rules_require_abstract_owners() {
+    for (body, code) in [
+        (
+            "DOMAIN D=TEXT*16; TOPIC T=OID AS D; END T;",
+            "ILI-OID-DOMAIN",
+        ),
+        (
+            "TOPIC T=BASKET OID AS INTERLIS.BOOLEAN; END T;",
+            "ILI-OID-DOMAIN",
+        ),
+        ("TOPIC T=OID AS INTERLIS.ANYOID; END T;", "ILI-OID-ABSTRACT"),
+        (
+            "TOPIC T=CLASS C=OID AS INTERLIS.ANYOID; END C; END T;",
+            "ILI-OID-ABSTRACT",
+        ),
+        (
+            "TOPIC T (ABSTRACT)=OID AS INTERLIS.ANYOID; CLASS C=END C; END T;",
+            "ILI-OID-ABSTRACT",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
     }
 }

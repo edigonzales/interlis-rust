@@ -1,4 +1,4 @@
-use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, Symbol, SyntaxDecl};
+use super::{Analyzer, Kind, LookupError, QualifiedName, Symbol, SyntaxDecl};
 use crate::{
     TypeReference, UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale,
     UnitTerm, limits::WorkBudget, number::NumberError, syntax,
@@ -176,40 +176,18 @@ impl Analyzer<'_, '_> {
         owner: usize,
         name: &QualifiedName,
     ) -> Option<TypeReference> {
-        let (target, predefined_language) =
-            match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Unit]) {
-                Ok(BoundName::Declared(id)) => {
-                    let bytes = self.symbols[id].declaration.qualified.len();
-                    if !self.step(bytes, &name.span) {
-                        return None;
-                    }
-                    (self.symbols[id].declaration.qualified.clone(), None)
-                }
-                Ok(BoundName::Predefined(name, _)) => (
-                    format!("INTERLIS.{name}"),
-                    Some(self.models[self.symbols[owner].model].language),
-                ),
-                Err(LookupError::Limit) => return None,
-                Err(_) => {
-                    self.diagnostics.push(
-                        "ILI-NAME-NOT-FOUND",
-                        "Unit reference cannot be resolved",
-                        Some(name.span.clone()),
-                    );
-                    return None;
-                }
-            };
-        Some(TypeReference {
-            declared: name
-                .segments
-                .iter()
-                .map(|part| part.value.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-            target,
-            predefined_language,
-            span: name.span.clone(),
-        })
+        match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Unit]) {
+            Ok(target) => self.bound_reference(owner, name, target),
+            Err(LookupError::Limit) => None,
+            Err(_) => {
+                self.diagnostics.push(
+                    "ILI-NAME-NOT-FOUND",
+                    "Unit reference cannot be resolved",
+                    Some(name.span.clone()),
+                );
+                None
+            }
+        }
     }
 
     fn unit_constant(&mut self, constant: &syntax::DecimalConstant) -> Option<UnitConstant> {

@@ -1,6 +1,7 @@
 use super::{Analyzer, Kind, Name, Namespace, namespace};
 use crate::{LanguageVersion, Span};
 
+#[derive(Clone, Copy)]
 pub(super) enum BoundName {
     Declared(usize),
     Predefined(&'static str, Kind),
