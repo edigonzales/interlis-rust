@@ -5,6 +5,7 @@ mod oid;
 mod references;
 mod topics;
 mod units;
+mod viewables;
 
 use self::names::{BoundName, LookupError};
 use crate::{
@@ -58,7 +59,7 @@ impl<'a> Symbol<'a> {
         match self.ast {
             Some(SyntaxDecl::Container {
                 base, properties, ..
-            }) => base.is_some() || extended(properties),
+            }) => self.base_scope.is_none() && (base.is_some() || extended(properties)),
             Some(SyntaxDecl::Association(a)) => {
                 a.base.is_some() || a.derived_from.is_some() || extended(&a.properties)
             }
@@ -184,7 +185,6 @@ fn ensure_supported_semantics(
                 }
                 SyntaxDecl::Container {
                     properties,
-                    base,
                     parameters,
                     constraints,
                     attributes,
@@ -195,10 +195,11 @@ fn ensure_supported_semantics(
                     if properties.iter().any(|p| {
                         !matches!(
                             p.value,
-                            syntax::Property::Abstract | syntax::Property::Final
+                            syntax::Property::Abstract
+                                | syntax::Property::Final
+                                | syntax::Property::Extended
                         )
-                    }) || base.is_some()
-                        || parameter_section.is_some()
+                    }) || parameter_section.is_some()
                         || !parameters.is_empty()
                         || !constraints.is_empty()
                     {
@@ -296,10 +297,18 @@ fn ensure_supported_semantics(
         }
         let kind_supported = model.kind == syntax::ModelKind::Data
             || model.kind == syntax::ModelKind::Type
-                && model
-                    .declarations
-                    .iter()
-                    .all(|d| matches!(d, SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_)));
+                && model.declarations.iter().all(|d| match d {
+                    SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_) => true,
+                    SyntaxDecl::Container {
+                        kind, properties, ..
+                    } => {
+                        *kind == syntax::ContainerKind::Structure
+                            || properties
+                                .iter()
+                                .any(|property| property.value == syntax::Property::Abstract)
+                    }
+                    _ => false,
+                });
         let header = !kind_supported
             || model.no_incremental_transfer.is_some()
             || model.explanation.is_some()
@@ -454,6 +463,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 unit: None,
                 oids: None,
                 topic_dependencies: None,
+                effective_attributes: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1694,6 +1704,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         {
             return None;
         }
+        let viewables = self.bind_viewable_bases()?;
         self.check_topic_members()?;
         self.check_abstract_topics(&topics)?;
         self.bind_units()?;
@@ -1720,7 +1731,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
-        self.bind_oid_rules(&topics)?;
+        self.bind_oid_rules(&topics, &viewables)?;
+        self.bind_effective_attributes(&viewables)?;
         for id in 0..self.symbols.len() {
             if !matches!(
                 self.symbols[id].declaration.kind,

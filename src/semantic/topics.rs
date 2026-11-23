@@ -26,38 +26,7 @@ impl Analyzer<'_, '_> {
                 self.symbols[id].declaration.base_reference = Some(reference);
             }
         }
-        let mut ordered = Vec::with_capacity(topics.len());
-        let mut visited_by = vec![None; self.symbols.len()];
-        let mut path = Vec::new();
-        for start in topics {
-            let mut current = start;
-            while visited_by[current].is_none() {
-                visited_by[current] = Some(start);
-                path.push(current);
-                let Some(base) = self.symbols[current].base_scope else {
-                    break;
-                };
-                let location = self.symbols[current]
-                    .declaration
-                    .base_reference()
-                    .expect("bound topic base has a source reference")
-                    .span
-                    .clone();
-                if !self.step(1, &location) {
-                    return None;
-                }
-                if visited_by[base] == Some(start) {
-                    self.diagnostics.push(
-                        "ILI-TOPIC-CYCLE",
-                        "Topic extension closes an inheritance cycle",
-                        Some(location),
-                    );
-                    return None;
-                }
-                current = base;
-            }
-            ordered.extend(path.drain(..).rev());
-        }
+        let ordered = self.inheritance_order(topics, "ILI-TOPIC-CYCLE")?;
         for &id in &ordered {
             let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[id].ast else {
                 unreachable!("only topics have topic dependencies");
@@ -189,7 +158,13 @@ impl Analyzer<'_, '_> {
             let name = declaration.name.clone();
             let location = self.symbols[id].name_span.clone();
             let inherited = self.visible_name(base, &name, None, &location).ok()?;
-            if let Some(inherited) = inherited {
+            if let Some(inherited) = inherited
+                && !(self.symbols[id].base_scope == Some(inherited)
+                    && matches!(
+                        self.symbols[id].ast,
+                        Some(SyntaxDecl::Container { base: None, .. })
+                    ))
+            {
                 self.diagnostics.push_related(
                     "ILI-TOPIC-INHERITED-NAME",
                     "A declaration cannot redeclare an inherited topic member",
@@ -206,27 +181,61 @@ impl Analyzer<'_, '_> {
     }
 
     pub(super) fn check_abstract_topics(&mut self, topics: &[usize]) -> Option<()> {
-        let mut abstract_classes = vec![None; self.symbols.len()];
+        if !self.symbols.iter().any(|symbol| {
+            symbol.declaration.kind == Kind::Class && symbol.declaration.is_abstract()
+        }) {
+            return Some(());
+        }
+        let mut direct = vec![Vec::new(); self.symbols.len()];
         for (id, symbol) in self.symbols.iter().enumerate() {
             if symbol.declaration.kind == Kind::Class
-                && symbol.declaration.is_abstract()
                 && let Some(parent) = symbol.declaration.parent
                 && self.symbols[parent].declaration.kind == Kind::Topic
             {
-                abstract_classes[parent].get_or_insert(id);
+                direct[parent].push(id);
             }
         }
         for &topic in topics {
+            let span = self.symbols[topic].name_span.clone();
             if let Some(base) = self.symbols[topic].base_scope {
-                abstract_classes[topic] = abstract_classes[topic].or(abstract_classes[base]);
+                if !self.step(direct[base].len(), &span) {
+                    return None;
+                }
+                let [classes, inherited] = direct
+                    .get_disjoint_mut([topic, base])
+                    .expect("topics are acyclic");
+                classes.extend_from_slice(inherited);
             }
-            if let Some(class) = abstract_classes[topic]
-                && !self.symbols[topic].declaration.is_abstract()
-            {
+            if self.symbols[topic].declaration.is_abstract() {
+                continue;
+            }
+            let mut concrete_bases = BTreeSet::new();
+            let classes = &direct[topic];
+            for &class in classes {
+                if !self.step(1, &span) {
+                    return None;
+                }
+                if self.symbols[class].declaration.is_abstract() {
+                    continue;
+                }
+                let mut base = self.symbols[class].base_scope;
+                while let Some(id) = base {
+                    if !self.step(1, &span) {
+                        return None;
+                    }
+                    if !concrete_bases.insert(id) {
+                        break;
+                    }
+                    base = self.symbols[id].base_scope;
+                }
+            }
+            if let Some(&class) = classes.iter().find(|&&class| {
+                self.symbols[class].declaration.is_abstract() && !concrete_bases.contains(&class)
+            }) {
                 self.diagnostics.push_related(
                     "ILI-TOPIC-ABSTRACT",
                     "A concrete topic requires a concrete specialization for each abstract class",
-                    Some(self.symbols[topic].name_span.clone()),
+                    Some(span),
                     vec![RelatedLocation {
                         span: self.symbols[class].name_span.clone(),
                         message: "Abstract class without concrete specialization".into(),

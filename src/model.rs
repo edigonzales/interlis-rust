@@ -397,6 +397,7 @@ pub struct Declaration {
     pub(crate) unit: Option<Box<UnitInfo>>,
     pub(crate) oids: Option<Box<OidRules>>,
     pub(crate) topic_dependencies: Option<Box<[TypeReference]>>,
+    pub(crate) effective_attributes: Option<Box<[usize]>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -487,6 +488,25 @@ impl ModelGraph {
         self.declaration(name)?
             .type_id
             .and_then(|id| self.types.get(id))
+    }
+
+    /// Effective attributes in transfer order, including inherited declarations.
+    pub fn effective_attributes(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        let declaration = self.declaration(name)?;
+        if !matches!(
+            declaration.kind,
+            DeclarationKind::Class | DeclarationKind::Structure
+        ) {
+            return None;
+        }
+        Some(
+            declaration
+                .effective_attributes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|&id| &self.declarations[id]),
+        )
     }
 
     /// Looks up a runtime parameter by its qualified name in the member namespace.

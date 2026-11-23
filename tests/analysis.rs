@@ -743,7 +743,6 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     for body in [
         "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
         "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
-        "STRUCTURE Base=END Base; STRUCTURE S EXTENDS Base=END S;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
@@ -1137,14 +1136,23 @@ fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
             assert_eq!(range.unit.as_ref().unwrap().target_name(), "Definitions.m");
         }
     }
-    // Both editions permit a class to extend a structure. The inherited type
-    // of another member is intentionally left to inheritance analysis.
-    outcome(
+    let report = outcome(
         single(
             "STRUCTURE Base=END Base; TOPIC Parent=DOMAIN D=TEXT*4; END Parent; TOPIC Child EXTENDS Parent=CLASS C EXTENDS Base=value:D; END C; END Child;",
         ),
-        Status::Incomplete,
-        Some("ILI-UNSUPPORTED"),
+        Status::CheckedSubset,
+        None,
+    );
+    assert_eq!(
+        report
+            .graph()
+            .unwrap()
+            .declaration("M.Child.C.value")
+            .unwrap()
+            .type_reference()
+            .unwrap()
+            .target_name(),
+        "M.Parent.D"
     );
 }
 
@@ -2240,4 +2248,120 @@ fn topic_inheritance_and_dependencies_reject_cycles_and_illegal_redefinitions() 
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }
+}
+
+#[test]
+fn classes_and_structures_expose_effective_attributes_in_declaration_order() {
+    let report = outcome(
+        single(
+            "STRUCTURE Base=z:BOOLEAN; a:TEXT*12; END Base;
+             STRUCTURE Child EXTENDS Base=child:BOOLEAN; END Child;
+             TOPIC T (ABSTRACT)=CLASS Root (ABSTRACT) EXTENDS Child=root:BOOLEAN; END Root; END T;
+             TOPIC Sub EXTENDS T=CLASS Root (EXTENDED)=tail:BOOLEAN; END Root;
+                CLASS Special EXTENDS Root=extra:BOOLEAN; END Special; END Sub;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert_eq!(
+        graph
+            .declaration("M.Sub.Root")
+            .unwrap()
+            .base_reference()
+            .unwrap()
+            .target_name(),
+        "M.T.Root"
+    );
+    assert_eq!(
+        graph
+            .effective_attributes("M.Sub.Special")
+            .unwrap()
+            .map(|d| d.qualified_name())
+            .collect::<Vec<_>>(),
+        [
+            "M.Base.z",
+            "M.Base.a",
+            "M.Child.child",
+            "M.T.Root.root",
+            "M.Sub.Root.tail",
+            "M.Sub.Special.extra"
+        ]
+    );
+    assert_eq!(graph.members("M.Sub.Special").unwrap()[0].name(), "extra");
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let special = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decl| decl["qualifiedName"] == "M.Sub.Special")
+        .unwrap();
+    assert_eq!(special["effectiveAttributes"][0], "M.Base.z");
+    assert_eq!(special["effectiveAttributes"][5], "M.Sub.Special.extra");
+}
+
+#[test]
+fn viewable_inheritance_rejects_incompatible_bases_and_attribute_shadowing() {
+    for (body, code) in [
+        (
+            "STRUCTURE A EXTENDS B=END A; STRUCTURE B EXTENDS A=END B;",
+            "ILI-CLASS-CYCLE",
+        ),
+        (
+            "STRUCTURE A (FINAL)=END A; STRUCTURE B EXTENDS A=END B;",
+            "ILI-CLASS-FINAL",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; STRUCTURE B EXTENDS A=END B; END T;",
+            "ILI-NAME-NOT-FOUND",
+        ),
+        ("STRUCTURE A (EXTENDED)=END A;", "ILI-CLASS-EXTENDED"),
+        (
+            "STRUCTURE A=z:BOOLEAN; END A; STRUCTURE B EXTENDS A=z:BOOLEAN; END B;",
+            "ILI-ATTRIBUTE-OVERRIDE",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; CLASS B EXTENDS A=END B; END T; TOPIC S EXTENDS T=CLASS A (EXTENDED)=END A; END S;",
+            "ILI-CLASS-EXTENDED-CONFLICT",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; END T; TOPIC S EXTENDS T=CLASS A EXTENDS M.T.A=END A; END S;",
+            "ILI-TOPIC-INHERITED-NAME",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn class_oid_specialization_uses_the_declaring_language_version() {
+    let body = "TOPIC T=CLASS A=END A; CLASS B EXTENDS A=OID AS INTERLIS.UUIDOID; END B; END T;";
+    for (edition, status, code) in [
+        ("2.3", Status::CheckedSubset, None),
+        ("2.4", Status::Rejected, Some("ILI-OID-OVERRIDE")),
+    ] {
+        let text = format!("INTERLIS {edition}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        outcome(request(vec![("oid-overrides", text)]), status, code);
+    }
+    let report = outcome(
+        single(
+            "TOPIC T=CLASS A (ABSTRACT)=NO OID; END A; CLASS B (ABSTRACT) EXTENDS A=OID AS INTERLIS.ANYOID; END B; CLASS C EXTENDS B=OID AS INTERLIS.UUIDOID; END C; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    assert_eq!(
+        report
+            .graph()
+            .unwrap()
+            .declaration("M.T.C")
+            .unwrap()
+            .oid_rules()
+            .unwrap()
+            .object
+            .as_ref()
+            .unwrap()
+            .kind,
+        interlis::OidKind::Concrete
+    );
 }

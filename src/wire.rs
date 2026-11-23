@@ -348,6 +348,8 @@ impl Serialize for DeclarationsOutput<'_> {
             oid_rules: Option<&'a crate::OidRules>,
             #[serde(skip_serializing_if = "<[crate::TypeReference]>::is_empty")]
             topic_dependencies: &'a [crate::TypeReference],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            effective_attributes: Option<Vec<&'a str>>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -375,6 +377,12 @@ impl Serialize for DeclarationsOutput<'_> {
                 unit: declaration.unit(),
                 oid_rules: declaration.oid_rules(),
                 topic_dependencies: declaration.topic_dependencies(),
+                effective_attributes: declaration.effective_attributes.as_ref().map(|attributes| {
+                    attributes
+                        .iter()
+                        .map(|&id| self.graph.declarations()[id].qualified_name())
+                        .collect()
+                }),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

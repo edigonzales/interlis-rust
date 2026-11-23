@@ -1,8 +1,10 @@
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl};
-use crate::{OidKind, OidRule, OidRules, OidType, TypeInfo, syntax};
+use crate::{
+    LanguageVersion, OidKind, OidRule, OidRules, OidType, RelatedLocation, TypeInfo, syntax,
+};
 
 impl Analyzer<'_, '_> {
-    pub(super) fn bind_oid_rules(&mut self, topics: &[usize]) -> Option<()> {
+    pub(super) fn bind_oid_rules(&mut self, topics: &[usize], viewables: &[usize]) -> Option<()> {
         for &id in topics {
             let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[id].ast else {
                 unreachable!("topic ordering only contains topics");
@@ -12,7 +14,7 @@ impl Analyzer<'_, '_> {
             let object = self.topic_rule(id, base, options.oid.as_ref(), false)?;
             self.store_oid_rules(id, OidRules { basket, object })?;
         }
-        for id in 0..self.symbols.len() {
+        for &id in viewables {
             let Some(SyntaxDecl::Container {
                 kind: syntax::ContainerKind::Class,
                 oid,
@@ -21,6 +23,9 @@ impl Analyzer<'_, '_> {
             else {
                 continue;
             };
+            let class_base = self.symbols[id]
+                .base_scope
+                .filter(|&base| self.symbols[base].declaration.kind == Kind::Class);
             let object = match oid {
                 syntax::OidRule::None(span) => Some(OidRule {
                     kind: OidKind::Unstable,
@@ -28,10 +33,32 @@ impl Analyzer<'_, '_> {
                     span: span.clone(),
                 }),
                 syntax::OidRule::Domain(name) => Some(self.bind_oid_domain(id, name)?),
+                syntax::OidRule::Unspecified if self.existing_oid(class_base, false).is_some() => {
+                    self.inherit_oid(class_base, false)?
+                }
                 syntax::OidRule::Unspecified => {
                     self.inherit_oid(self.symbols[id].declaration.parent, false)?
                 }
             };
+            if let (Some(base), Some(own)) = (class_base, &object) {
+                let previous = self.existing_oid(Some(base), false);
+                let language = self.models[self.symbols[id].model].language;
+                if !class_oid_specializes(previous, own, language) {
+                    self.diagnostics.push_related(
+                        "ILI-OID-OVERRIDE",
+                        "This OID rule cannot specialize the base class OID",
+                        Some(own.span.clone()),
+                        vec![RelatedLocation {
+                            span: previous.map_or_else(
+                                || self.symbols[base].name_span.clone(),
+                                |rule| rule.span.clone(),
+                            ),
+                            message: "Inherited OID rule".into(),
+                        }],
+                    );
+                    return None;
+                }
+            }
             self.store_oid_rules(
                 id,
                 OidRules {
@@ -77,10 +104,14 @@ impl Analyzer<'_, '_> {
                 .chain(rules.basket.iter())
                 .find(|rule| rule.kind == OidKind::Any)
         {
-            self.diagnostics.push(
+            self.diagnostics.push_related(
                 "ILI-OID-ABSTRACT",
                 "An open OID rule requires an abstract declaration",
-                Some(rule.span.clone()),
+                Some(self.symbols[id].name_span.clone()),
+                vec![RelatedLocation {
+                    span: rule.span.clone(),
+                    message: "Open OID rule".into(),
+                }],
             );
             return None;
         }
@@ -154,4 +185,25 @@ impl Analyzer<'_, '_> {
         }
         Some(self.existing_oid(owner, basket).cloned())
     }
+}
+
+fn class_oid_specializes(
+    previous: Option<&OidRule>,
+    own: &OidRule,
+    language: LanguageVersion,
+) -> bool {
+    let Some(previous) = previous else {
+        return language == LanguageVersion::V23 || own.kind != OidKind::Concrete;
+    };
+    if previous.domain.as_ref().map(|domain| domain.target_name())
+        == own.domain.as_ref().map(|domain| domain.target_name())
+    {
+        return true;
+    }
+    matches!(
+        (previous.kind, own.kind),
+        (OidKind::Any, OidKind::Concrete) | (OidKind::Unstable, OidKind::Unstable)
+    ) || language == LanguageVersion::V24
+        && previous.kind == OidKind::Unstable
+        && own.kind == OidKind::Any
 }
