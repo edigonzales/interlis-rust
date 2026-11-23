@@ -1,10 +1,10 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
-use crate::UnitOperator;
 pub(crate) use crate::model::NumericDirection as Direction;
 pub(crate) use crate::model::{
     AlignmentKind, BlackboxKind, CoordinateKind, EnumerationOrder, TemporalKind,
 };
+use crate::{CollectionKind, UnitOperator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -208,11 +208,6 @@ pub(crate) struct ObjectPath {
 pub(crate) enum AttributePathOf {
     Path(ObjectPath),
     Argument(Name),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CollectionKind {
-    Bag,
-    List,
 }
 #[derive(Debug)]
 #[allow(dead_code)]

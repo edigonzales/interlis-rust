@@ -375,7 +375,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 effective_type: declaration
                     .type_id
                     .and_then(|id| self.graph.types.get(id))
-                    .map(TypeOutput),
+                    .map(|ty| TypeOutput(ty, self.graph)),
                 unit: declaration.unit(),
                 oid_rules: declaration.oid_rules(),
                 topic_dependencies: declaration
@@ -423,7 +423,7 @@ impl Serialize for DecimalInfo {
         .serialize(serializer)
     }
 }
-struct TypeOutput<'a>(&'a TypeInfo);
+struct TypeOutput<'a>(&'a TypeInfo, &'a ModelGraph);
 impl Serialize for TypeOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -498,6 +498,15 @@ impl Serialize for TypeOutput<'_> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 carrier: Option<TypeOutput<'a>>,
             },
+            Structure {
+                target: Option<&'a crate::TypeReference>,
+                restrictions: &'a [crate::TypeReference],
+            },
+            Collection {
+                collection_kind: crate::CollectionKind,
+                cardinality: &'a crate::Cardinality,
+                element: TypeOutput<'a>,
+            },
         }
         match self.0 {
             TypeInfo::Text { max_length } => Type::Text {
@@ -551,7 +560,9 @@ impl Serialize for TypeOutput<'_> {
                 let (oid_kind, max_length, carrier) = match oid {
                     crate::OidType::Unstable => ("unstable", None, None),
                     crate::OidType::Any => ("any", None, None),
-                    crate::OidType::Typed(carrier) => ("typed", None, Some(TypeOutput(carrier))),
+                    crate::OidType::Typed(carrier) => {
+                        ("typed", None, Some(TypeOutput(carrier, self.1)))
+                    }
                     crate::OidType::Standard => ("standard", Some(16), None),
                     crate::OidType::Uuid => ("uuid", Some(36), None),
                 };
@@ -562,6 +573,17 @@ impl Serialize for TypeOutput<'_> {
                 }
                 .serialize(serializer)
             }
+            TypeInfo::Structure(structure) => Type::Structure {
+                target: structure.target.as_ref(),
+                restrictions: &structure.restrictions,
+            }
+            .serialize(serializer),
+            TypeInfo::Collection(collection) => Type::Collection {
+                collection_kind: collection.kind,
+                cardinality: &collection.cardinality,
+                element: TypeOutput(&self.1.types[collection.element], self.1),
+            }
+            .serialize(serializer),
         }
     }
 }

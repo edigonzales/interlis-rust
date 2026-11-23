@@ -1,10 +1,10 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
-    units::unit_extends,
+    collections::compare_count, units::unit_extends,
 };
 use crate::{
-    AxisRotation, CoordinateType, DecimalInfo, LanguageVersion, Limits, NumericBounds,
-    NumericRange, OidType,
+    AxisRotation, CollectionKind, CoordinateType, DecimalInfo, LanguageVersion, Limits,
+    NumericBounds, NumericRange, OidType,
     limits::WorkBudget,
     syntax::{CoordinateSyntax, NumericSyntax},
 };
@@ -164,27 +164,79 @@ impl Analyzer<'_, '_> {
         syntax: &TypeSyntax,
     ) -> Option<Effective> {
         let mut own = self.concrete_type(owner, syntax)?;
-        own.mandatory |= base.mandatory;
-        if own.ty == base.ty {
-            return Some(own);
-        }
-        let inline = !matches!(syntax, TypeSyntax::Named(_));
-        if !inline
-            && matches!(self.types[own.ty], TypeInfo::Enumeration { .. })
-            && matches!(self.types[base.ty], TypeInfo::Enumeration { .. })
-            && self.named_enumeration_refines(owner, base.ty, syntax.span())?
+        if self.symbols[owner].declaration.kind == super::Kind::Attribute
+            && !self.attribute_preserves_mandatory(owner, base, own.mandatory, syntax.span())
         {
+            return None;
+        }
+        own.mandatory |= base.mandatory;
+        let (own_id, base_id, leaf) = match (&self.types[own.ty], &self.types[base.ty]) {
+            (TypeInfo::Collection(actual), TypeInfo::Collection(expected)) => {
+                let in_range =
+                    compare_count(&actual.cardinality.lower, &expected.cardinality.lower)
+                        != Ordering::Less
+                        && expected.cardinality.upper.as_ref().is_none_or(|bound| {
+                            actual.cardinality.upper.as_ref().is_some_and(|value| {
+                                compare_count(value, bound) != Ordering::Greater
+                            })
+                        });
+                if !in_range
+                    || expected.kind == CollectionKind::List && actual.kind == CollectionKind::Bag
+                {
+                    self.report_type_override(
+                        owner,
+                        "ILI-ATTRIBUTE-CARDINALITY",
+                        "A collection extension must narrow its cardinality and preserve ordering",
+                        syntax.span(),
+                    );
+                    return None;
+                }
+                (actual.element, expected.element, collection_leaf(syntax))
+            }
+            (TypeInfo::Collection(_), _) | (_, TypeInfo::Collection(_)) => {
+                self.report_type_override(
+                    owner,
+                    "ILI-DOMAIN-EXTENSION",
+                    "A collection extension must preserve the collection type",
+                    syntax.span(),
+                );
+                return None;
+            }
+            _ => (own.ty, base.ty, syntax),
+        };
+        if matches!(self.types[own_id], TypeInfo::Structure(_))
+            || matches!(self.types[base_id], TypeInfo::Structure(_))
+        {
+            if self.structure_specializes(own_id, base_id, leaf.span())? {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-STRUCTURE-RESTRICTION",
+                "The override must specialize the inherited structure targets",
+                leaf.span(),
+            );
+            return None;
+        }
+        let inline = !matches!(leaf, TypeSyntax::Named(_));
+        if !inline {
+            let nominal = self.check_nominal_domain(owner, leaf.span())?;
+            if nominal && matches!(self.types[own_id], TypeInfo::Enumeration { .. }) {
+                return Some(own);
+            }
+        }
+        if own_id == base_id {
             return Some(own);
         }
         let check = self
-            .check_unit_specialization(own.ty, base.ty, inline)
+            .check_unit_specialization(own_id, base_id, inline)
             .and_then(|unit_check| {
                 if unit_check.is_some() {
                     return Ok(unit_check);
                 }
                 scalar_extension(
-                    &self.types[own.ty],
-                    &self.types[base.ty],
+                    &self.types[own_id],
+                    &self.types[base_id],
                     self.models[self.symbols[owner].model].language,
                     self.limits,
                     &mut self.work,
@@ -194,8 +246,8 @@ impl Analyzer<'_, '_> {
         match check {
             Ok(None) if !inline => Some(own),
             Ok(None) => {
-                let own_type = &self.types[own.ty];
-                let base_type = &self.types[base.ty];
+                let own_type = &self.types[own_id];
+                let base_type = &self.types[base_id];
                 let unit_bytes = numeric_pairs(own_type, base_type)
                     .filter_map(|(own, base)| {
                         own.unit.is_none().then_some(base.unit.as_ref()).flatten()
@@ -215,7 +267,7 @@ impl Analyzer<'_, '_> {
                 }
                 let [own_type, base_type] = self
                     .types
-                    .get_disjoint_mut([own.ty, base.ty])
+                    .get_disjoint_mut([own_id, base_id])
                     .expect("a specialization owns a new type");
                 match (own_type, base_type) {
                     (TypeInfo::Numeric(own), TypeInfo::Numeric(base)) => inherit_range(own, base),
@@ -233,20 +285,7 @@ impl Analyzer<'_, '_> {
                 Some(own)
             }
             Ok(Some((code, message))) => {
-                let base = self.symbols[owner]
-                    .declaration
-                    .base_reference
-                    .as_ref()
-                    .expect("a value type extension has a bound base");
-                self.diagnostics.push_related(
-                    code,
-                    message,
-                    Some(syntax.span().clone()),
-                    vec![RelatedLocation {
-                        span: base.span.clone(),
-                        message: "Base type reference".into(),
-                    }],
-                );
+                self.report_type_override(owner, code, message, leaf.span());
                 None
             }
             Err(error) => {
@@ -256,32 +295,84 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn named_enumeration_refines(
-        &mut self,
-        owner: usize,
-        base_type: usize,
-        span: &crate::Span,
-    ) -> Option<bool> {
-        let declaration = &self.symbols[owner].declaration;
-        let mut target = declaration
-            .reference
-            .as_ref()
-            .and_then(|link| self.names.get(link.target_name()))
-            .copied();
-        while let Some(id) = target {
+    fn check_nominal_domain(&mut self, owner: usize, span: &crate::Span) -> Option<bool> {
+        let mut base = self.symbols[owner].base_scope;
+        let mut inherited = None;
+        while let Some(id) = base {
             if !self.step(1, span) {
                 return None;
             }
-            let declaration = &self.symbols[id].declaration;
-            if declaration.type_id == Some(base_type) {
+            let symbol = &self.symbols[id];
+            if let Some(syntax) = symbol.syntax {
+                if matches!(collection_leaf(syntax), TypeSyntax::Named(_)) {
+                    inherited = Some(id);
+                }
+                break;
+            }
+            base = symbol.base_scope;
+        }
+        let Some(inherited) = inherited else {
+            return Some(false);
+        };
+        let expected = self.symbols[inherited]
+            .declaration
+            .reference
+            .as_ref()
+            .expect("named base type");
+        let mut current = self.symbols[owner].declaration.reference.as_ref();
+        while let Some(reference) = current {
+            if self.work.charge(1).is_err() {
+                self.number_error(NumberError::Work, span);
+                return None;
+            }
+            if reference.target_name() == expected.target_name()
+                && reference.predefined_language() == expected.predefined_language()
+            {
                 return Some(true);
             }
-            target = declaration
-                .base_reference()
-                .and_then(|reference| self.names.get(reference.target_name()))
-                .copied();
+            current = self
+                .names
+                .get(reference.target_name())
+                .and_then(|&id| self.symbols[id].declaration.base_reference());
         }
-        Some(false)
+        self.report_type_override(
+            owner,
+            "ILI-DOMAIN-EXTENSION",
+            "A named override must use the inherited domain or one of its extensions",
+            span,
+        );
+        None
+    }
+
+    fn report_type_override(
+        &mut self,
+        owner: usize,
+        code: &str,
+        message: &str,
+        span: &crate::Span,
+    ) {
+        let symbol = &self.symbols[owner];
+        let base = symbol.base_scope.map_or_else(
+            || {
+                symbol
+                    .declaration
+                    .base_reference
+                    .as_ref()
+                    .expect("extension has a bound base")
+                    .span
+                    .clone()
+            },
+            |id| self.symbols[id].name_span.clone(),
+        );
+        self.diagnostics.push_related(
+            code,
+            message,
+            Some(span.clone()),
+            vec![RelatedLocation {
+                span: base,
+                message: "Inherited type".into(),
+            }],
+        );
     }
 
     fn check_unit_specialization(
@@ -330,6 +421,13 @@ impl Analyzer<'_, '_> {
             }
         }
         Ok(None)
+    }
+}
+
+fn collection_leaf(syntax: &TypeSyntax) -> &TypeSyntax {
+    match syntax {
+        TypeSyntax::Collection { element, .. } => element,
+        _ => syntax,
     }
 }
 

@@ -286,10 +286,15 @@ impl Analyzer<'_, '_> {
         let effective = match (syntax, inherited) {
             (
                 Some(TypeSyntax::Enumeration {
-                    enumeration, order, ..
+                    enumeration,
+                    order,
+                    span,
                 }),
                 Some(base),
             ) => {
+                if !self.attribute_preserves_mandatory(id, base, false, span) {
+                    return None;
+                }
                 self.extend_enumeration(base, enumeration, order.as_ref().map(|order| order.value))?
             }
             (Some(ty), Some(base)) => self.specialize_scalar(id, base, ty)?,
@@ -306,9 +311,15 @@ impl Analyzer<'_, '_> {
         };
         let declaration = &self.symbols[id].declaration;
         let location = declaration.span.clone();
+        let mandatory = effective.mandatory || declaration.declared_mandatory.unwrap_or(false);
+        let value_type = match &self.types[effective.ty] {
+            crate::TypeInfo::Collection(collection) => collection.element,
+            _ => effective.ty,
+        };
         if !declaration.is_abstract()
-            && (self.types[effective.ty].has_unbounded_range()
-                || self.attribute_uses_abstract_domain(id, syntax.is_none(), &location)?)
+            && (self.types[value_type].has_unbounded_range()
+                || self.attribute_uses_abstract_domain(id, syntax.is_none(), &location)?
+                || mandatory && !self.structure_can_be_required(id, effective.ty, &location)?)
         {
             self.diagnostics.push(
                 "ILI-ATTRIBUTE-ABSTRACT",
@@ -319,9 +330,29 @@ impl Analyzer<'_, '_> {
         }
         let declaration = &mut self.symbols[id].declaration;
         declaration.type_id = Some(effective.ty);
-        declaration.effective_mandatory =
-            Some(effective.mandatory || declaration.declared_mandatory.unwrap_or(false));
+        declaration.effective_mandatory = Some(mandatory);
         Some(())
+    }
+
+    pub(super) fn attribute_preserves_mandatory(
+        &mut self,
+        owner: usize,
+        base: Effective,
+        type_requires_value: bool,
+        span: &crate::Span,
+    ) -> bool {
+        if base.mandatory
+            && !type_requires_value
+            && self.symbols[owner].declaration.declared_mandatory() != Some(true)
+        {
+            self.diagnostics.push(
+                "ILI-ATTRIBUTE-CARDINALITY",
+                "An override cannot make a mandatory attribute optional",
+                Some(span.clone()),
+            );
+            return false;
+        }
+        true
     }
 
     fn attribute_uses_abstract_domain(
@@ -347,7 +378,10 @@ impl Analyzer<'_, '_> {
                 .reference
                 .as_ref()
                 .and_then(|reference| self.names.get(reference.target_name()))
-                .is_some_and(|&target| self.symbols[target].declaration.is_abstract()),
+                .is_some_and(|&target| {
+                    self.symbols[target].declaration.kind == Kind::Domain
+                        && self.symbols[target].declaration.is_abstract()
+                }),
         )
     }
 }

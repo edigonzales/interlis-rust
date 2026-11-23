@@ -1,3 +1,4 @@
+mod collections;
 mod domains;
 mod enumeration;
 mod names;
@@ -125,13 +126,13 @@ fn supported_type(ty: &TypeSyntax) -> bool {
             syntax::OidSyntax::Numeric(range) => range.reference_system.is_none(),
             _ => true,
         },
+        TypeSyntax::Collection { element, .. } => supported_type(element),
+        TypeSyntax::RestrictedStructure { .. } => true,
         TypeSyntax::Formatted { .. }
         | TypeSyntax::Geometry(_)
         | TypeSyntax::ClassValue { .. }
         | TypeSyntax::AttributePathValue { .. }
-        | TypeSyntax::Reference { .. }
-        | TypeSyntax::Collection { .. }
-        | TypeSyntax::RestrictedStructure { .. } => false,
+        | TypeSyntax::Reference { .. } => false,
     }
 }
 
@@ -1465,36 +1466,75 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 ))),
                 syntax::OidSyntax::Text(text) => OidType::Typed(Box::new(self.text_type(text)?)),
             }),
-            TypeSyntax::Named(name) => {
-                return match self.bind_name(owner, name)? {
-                    Target::Domain(id) => self.resolve_domain(id),
-                    Target::Predefined(domain) => self.predefined_type(domain, &name.span),
-                    Target::Structure => {
+            TypeSyntax::Named(name) => match self.bind_name(owner, name)? {
+                Target::Domain(id) => return self.resolve_domain(id),
+                Target::Predefined(domain) => return self.predefined_type(domain, &name.span),
+                Target::Structure => {
+                    let link = self.symbols[owner]
+                        .declaration
+                        .reference
+                        .as_ref()
+                        .expect("bound structure reference");
+                    if link.predefined_language().is_some() {
                         self.diagnostics.push(
                             "ILI-UNSUPPORTED",
-                            "Structure-valued attributes are outside the supported subset",
+                            "This predefined structure value requires its full declaration",
                             Some(name.span.clone()),
                         );
-                        None
+                        return None;
                     }
+                    let bytes = link.declared.len() + link.target.len();
+                    if !self.step(bytes, &name.span) {
+                        return None;
+                    }
+                    TypeInfo::Structure(crate::StructureType {
+                        target: self.symbols[owner].declaration.reference.clone(),
+                        restrictions: Vec::new(),
+                    })
+                }
+            },
+            TypeSyntax::RestrictedStructure {
+                target,
+                restrictions,
+                ..
+            } => TypeInfo::Structure(self.restricted_structure(owner, target, restrictions)?),
+            TypeSyntax::Collection {
+                kind,
+                cardinality,
+                element,
+                ..
+            } => {
+                let cardinality = if cardinality.is_none() {
+                    self.collection_default(owner, syntax.span())?
+                } else {
+                    self.effective_cardinality(
+                        cardinality.as_ref(),
+                        crate::Cardinality {
+                            lower: "0".into(),
+                            upper: None,
+                        },
+                    )?
                 };
+                let element = self.concrete_type(owner, element)?.ty;
+                TypeInfo::Collection(crate::CollectionType {
+                    kind: *kind,
+                    cardinality,
+                    element,
+                })
             }
             TypeSyntax::Formatted { .. }
             | TypeSyntax::Geometry(_)
             | TypeSyntax::ClassValue { .. }
             | TypeSyntax::AttributePathValue { .. }
-            | TypeSyntax::Reference { .. }
-            | TypeSyntax::Collection { .. }
-            | TypeSyntax::RestrictedStructure { .. } => {
+            | TypeSyntax::Reference { .. } => {
                 unreachable!("unsupported type semantics checked before indexing")
             }
         };
+        let mandatory =
+            matches!(&ty, TypeInfo::Collection(collection) if collection.cardinality.lower != "0");
         let id = self.types.len();
         self.types.push(ty);
-        Some(Effective {
-            ty: id,
-            mandatory: false,
-        })
+        Some(Effective { ty: id, mandatory })
     }
     fn cycle(&mut self, path: &[usize], current: usize) {
         let first = path.iter().position(|&id| id == current).unwrap_or(0);

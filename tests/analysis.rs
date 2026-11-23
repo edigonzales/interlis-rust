@@ -409,11 +409,6 @@ fn unknown_domains_unimported_models_and_builtin_boundaries() {
         Some(TypeInfo::Boolean)
     ));
     outcome(
-        single("STRUCTURE S=END S; STRUCTURE Holder=value:S; END Holder;"),
-        Status::Incomplete,
-        Some("ILI-UNSUPPORTED"),
-    );
-    outcome(
         single("DOMAIN B EXTENDS INTERLIS.BOOLEAN=MANDATORY;"),
         Status::Rejected,
         Some("ILI-DERIVATION"),
@@ -2394,7 +2389,7 @@ fn attribute_specialization_replaces_its_inherited_slot_and_keeps_mandatory() {
                 z (ABSTRACT):TEXT*30; count:MANDATORY 0..100 [INTERLIS.m]; kind:Options; active:BOOLEAN;
              END Parent;
              STRUCTURE Child EXTENDS Parent=
-                active (EXTENDED):BOOLEAN; z (EXTENDED):TEXT*12; count (EXTENDED):5..8; kind (EXTENDED):More; extra:BOOLEAN;
+                active (EXTENDED):BOOLEAN; z (EXTENDED):TEXT*12; count (EXTENDED):MANDATORY 5..8; kind (EXTENDED):More; extra:BOOLEAN;
              END Child;",
         ),
         Status::CheckedSubset,
@@ -2417,7 +2412,7 @@ fn attribute_specialization_replaces_its_inherited_slot_and_keeps_mandatory() {
         "M.Parent.count"
     );
     assert_eq!(attributes[1].mandatory(), Some(true));
-    assert_eq!(attributes[1].declared_mandatory(), Some(false));
+    assert_eq!(attributes[1].declared_mandatory(), Some(true));
     let Some(TypeInfo::Numeric(range)) = graph.effective_type("M.Child.count") else {
         panic!("expected specialized numeric range");
     };
@@ -2431,6 +2426,10 @@ fn attribute_specialization_replaces_its_inherited_slot_and_keeps_mandatory() {
 #[test]
 fn attributes_reject_illegal_overrides_and_incomplete_concretization() {
     for (body, code) in [
+        (
+            "STRUCTURE P=value:MANDATORY TEXT*4; END P; STRUCTURE S EXTENDS P=value (EXTENDED):TEXT*4; END S;",
+            "ILI-ATTRIBUTE-CARDINALITY",
+        ),
         ("STRUCTURE S=value:MANDATORY; END S;", "ILI-ATTRIBUTE-TYPE"),
         (
             "STRUCTURE S=value (EXTENDED):BOOLEAN; END S;",
@@ -2491,5 +2490,106 @@ fn inherited_predefined_oid_keeps_its_edition_in_a_mixed_closure() {
             assert_eq!(domain.target_name(), "INTERLIS.I32OID");
             assert_eq!(domain.predefined_language(), Some(LanguageVersion::V23));
         }
+    }
+}
+
+#[test]
+fn collection_values_keep_exact_cardinality_and_restricted_structure_order() {
+    use interlis::CollectionKind;
+    let report = outcome(
+        single(
+            "STRUCTURE Part (ABSTRACT)=END Part;
+             STRUCTURE Small EXTENDS Part=END Small; STRUCTURE Large EXTENDS Part=END Large;
+             STRUCTURE Base=one:MANDATORY Part; many:BAG {1..*} OF Part; END Base;
+             STRUCTURE Child EXTENDS Base=many (EXTENDED):LIST {2..9007199254740993} OF Part RESTRICTION (Large; Small); END Child;
+             STRUCTURE Narrower EXTENDS Child=many (EXTENDED):LIST OF Small; END Narrower;
+             STRUCTURE Scalars=names:LIST OF TEXT*12; END Scalars;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::Collection(collection)) = graph.effective_type("M.Child.many") else {
+        panic!("expected collection");
+    };
+    assert_eq!(collection.kind, CollectionKind::List);
+    assert_eq!(collection.cardinality.lower, "2");
+    assert_eq!(
+        collection.cardinality.upper.as_deref(),
+        Some("9007199254740993")
+    );
+    let Some(TypeInfo::Collection(omitted)) = graph.effective_type("M.Narrower.many") else {
+        panic!("expected collection");
+    };
+    assert_eq!(omitted.cardinality, collection.cardinality);
+    assert_eq!(
+        graph.declaration("M.Child.many").unwrap().mandatory(),
+        Some(true)
+    );
+    let Some(TypeInfo::Structure(parts)) = graph.collection_element_type("M.Child.many") else {
+        panic!("expected restricted structure");
+    };
+    assert_eq!(parts.target.as_ref().unwrap().target_name(), "M.Part");
+    assert_eq!(
+        parts
+            .restrictions
+            .iter()
+            .map(|link| link.target_name())
+            .collect::<Vec<_>>(),
+        ["M.Large", "M.Small"]
+    );
+    assert!(
+        matches!(graph.collection_element_type("M.Scalars.names"), Some(TypeInfo::Text {max_length}) if max_length == "12")
+    );
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let many = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decl| decl["qualifiedName"] == "M.Child.many")
+        .unwrap();
+    assert_eq!(
+        many["effectiveType"]["cardinality"]["upper"],
+        "9007199254740993"
+    );
+    assert_eq!(
+        many["effectiveType"]["element"]["restrictions"][0]["targetName"],
+        "M.Large"
+    );
+}
+
+#[test]
+fn collection_extensions_check_order_cardinality_and_structure_targets() {
+    for (body, code) in [
+        (
+            "STRUCTURE S=values:BAG {5..2} OF TEXT; END S;",
+            "ILI-CARDINALITY-RANGE",
+        ),
+        (
+            "STRUCTURE P=values:LIST {1..5} OF TEXT; END P; STRUCTURE C EXTENDS P=values (EXTENDED):BAG {1..5} OF TEXT; END C;",
+            "ILI-ATTRIBUTE-CARDINALITY",
+        ),
+        (
+            "STRUCTURE P=values:BAG {2..5} OF TEXT; END P; STRUCTURE C EXTENDS P=values (EXTENDED):BAG {1..9} OF TEXT; END C;",
+            "ILI-ATTRIBUTE-CARDINALITY",
+        ),
+        (
+            "STRUCTURE A=END A; STRUCTURE B=END B; STRUCTURE C=value:A RESTRICTION (B); END C;",
+            "ILI-STRUCTURE-RESTRICTION",
+        ),
+        (
+            "STRUCTURE C=value:MANDATORY ANYSTRUCTURE; END C;",
+            "ILI-ATTRIBUTE-ABSTRACT",
+        ),
+        (
+            "DOMAIN Broad=0..10; Small=1..2; STRUCTURE P=value:Broad; END P; STRUCTURE C EXTENDS P=value (EXTENDED):Small; END C;",
+            "ILI-DOMAIN-EXTENSION",
+        ),
+        (
+            "DOMAIN Shared=TEXT; One EXTENDS Shared=MANDATORY; Two EXTENDS Shared=MANDATORY; STRUCTURE P=value:One; END P; STRUCTURE C EXTENDS P=value (EXTENDED):Two; END C;",
+            "ILI-DOMAIN-EXTENSION",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
     }
 }

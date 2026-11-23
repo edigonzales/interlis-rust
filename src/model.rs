@@ -125,6 +125,8 @@ pub enum TypeInfo {
     Numeric(NumericRange),
     Coordinate(CoordinateType),
     Oid(OidType),
+    Structure(StructureType),
+    Collection(CollectionType),
 }
 
 impl TypeInfo {
@@ -147,6 +149,32 @@ pub enum OidType {
     Typed(Box<TypeInfo>),
     Standard,
     Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionKind {
+    Bag,
+    List,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Cardinality {
+    pub lower: String,
+    pub upper: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct CollectionType {
+    pub kind: CollectionKind,
+    pub cardinality: Cardinality,
+    pub(crate) element: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StructureType {
+    pub target: Option<TypeReference>,
+    pub restrictions: Vec<TypeReference>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -501,6 +529,12 @@ impl ModelGraph {
         self.declaration(name)?
             .type_id
             .and_then(|id| self.types.get(id))
+    }
+    pub fn collection_element_type(&self, name: &str) -> Option<&TypeInfo> {
+        let TypeInfo::Collection(collection) = self.effective_type(name)? else {
+            return None;
+        };
+        self.types.get(collection.element)
     }
 
     /// Effective attributes in transfer order, including inherited declarations.
