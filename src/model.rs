@@ -98,11 +98,40 @@ pub enum TypeInfo {
     Text {
         max_length: String,
     },
+    UnboundedText,
+    MultilineText {
+        max_length: Option<String>,
+    },
     Boolean,
+    Alignment(AlignmentKind),
+    Temporal(TemporalKind),
+    Blackbox(BlackboxKind),
     Numeric {
         lower: DecimalInfo,
         upper: DecimalInfo,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignmentKind {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalKind {
+    Date,
+    TimeOfDay,
+    DateTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlackboxKind {
+    Xml,
+    Binary,
 }
 /// Retains declared name segments, exact bound target identity and original reference range.
 #[derive(Debug)]

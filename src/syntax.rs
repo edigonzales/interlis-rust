@@ -1738,7 +1738,7 @@ mod lexical_recovery_regressions {
     #[test]
     fn definite_version_errors_and_future_type_families_remain_distinct() {
         let text = model("DOMAIN D=DATE;");
-        assert_eq!(analyze_text(&text).status(), AnalysisStatus::Incomplete);
+        assert_eq!(analyze_text(&text).status(), AnalysisStatus::CheckedSubset);
         let report = analyze_text(&text.replace("2.4", "2.3"));
         assert_eq!(report.status(), AnalysisStatus::Rejected);
         assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");

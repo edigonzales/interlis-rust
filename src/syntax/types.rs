@@ -1,5 +1,6 @@
 //! Concrete type, path, unit and line-form syntax. No reference is resolved here.
 use super::*;
+pub(crate) use crate::model::{AlignmentKind, BlackboxKind, TemporalKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -9,22 +10,10 @@ pub(crate) enum TextKind {
     Uri,
 }
 #[derive(Debug)]
-#[allow(dead_code)] // Complete preserved syntax; only bounded TEXT has I-0 semantics.
 pub(crate) struct TextSyntax {
     pub kind: TextKind,
     pub max_length: Option<Located<String>>,
     pub span: Span,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AlignmentKind {
-    Horizontal,
-    Vertical,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TemporalKind {
-    Date,
-    TimeOfDay,
-    DateTime,
 }
 #[derive(Debug)]
 pub(crate) struct NumericBounds {
@@ -183,11 +172,6 @@ pub(crate) enum OidSyntax {
     Any(Span),
     Numeric(Box<NumericSyntax>),
     Text(TextSyntax),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BlackboxKind {
-    Xml,
-    Binary,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClassValueKind {
@@ -2155,12 +2139,6 @@ mod tests {
     #[test]
     fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
         for ty in [
-            "TEXT",
-            "MTEXT*4",
-            "NAME",
-            "URI",
-            "HALIGNMENT",
-            "DATE",
             "(red,green)",
             "ALL OF INTERLIS.BOOLEAN",
             "NUMERIC",
@@ -2173,7 +2151,6 @@ mod tests {
             "MULTICOORD NUMERIC,NUMERIC",
             "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",
             "OID ANY",
-            "BLACKBOX XML",
             "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",
         ] {

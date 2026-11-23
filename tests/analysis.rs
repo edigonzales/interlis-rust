@@ -1,6 +1,7 @@
 use interlis::{
-    AnalysisReport, AnalysisStatus as Status, CompileRequest, DeclarationKind, LanguageVersion,
-    Limits, SourceInput, TypeInfo, analyze, analyze_roots,
+    AlignmentKind, AnalysisReport, AnalysisStatus as Status, BlackboxKind, CompileRequest,
+    DeclarationKind, LanguageVersion, Limits, SourceInput, TemporalKind, TypeInfo, analyze,
+    analyze_roots,
 };
 const BASE: &str = r#"INTERLIS 2.3;
 MODEL ProbeBase (en) AT "https://example.invalid" VERSION "2026-11-10" =
@@ -25,6 +26,90 @@ fn request(sources: Vec<(&str, String)>) -> CompileRequest {
             .collect(),
         limits: Limits::default(),
     }
+}
+
+#[test]
+fn scalar_types_keep_bounds_families_and_predefined_origins() {
+    let body = "DOMAIN Unbounded=TEXT; Long=MTEXT; Bounded=MTEXT*9007199254740993; Identifier=NAME; Link=URI; Horizontal=HALIGNMENT; Vertical=VALIGNMENT; Xml=BLACKBOX XML; Binary=BLACKBOX BINARY; STRUCTURE S=day:INTERLIS.XMLDate; END S;";
+    for (version, language) in [("2.3", LanguageVersion::V23), ("2.4", LanguageVersion::V24)] {
+        let text = format!("INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        let report = outcome(request(vec![("scalar", text)]), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let ty = |name: &str| graph.effective_type(name).unwrap();
+        assert!(matches!(ty("M.Unbounded"), TypeInfo::UnboundedText));
+        assert!(matches!(
+            ty("M.Long"),
+            TypeInfo::MultilineText { max_length: None }
+        ));
+        assert!(
+            matches!(ty("M.Bounded"), TypeInfo::MultilineText { max_length: Some(length) } if length == "9007199254740993")
+        );
+        assert!(matches!(ty("M.Identifier"), TypeInfo::Text { max_length } if max_length == "255"));
+        assert!(matches!(ty("M.Link"), TypeInfo::Text { max_length } if max_length == "1023"));
+        assert!(matches!(
+            ty("M.Horizontal"),
+            TypeInfo::Alignment(AlignmentKind::Horizontal)
+        ));
+        assert!(matches!(
+            ty("M.Vertical"),
+            TypeInfo::Alignment(AlignmentKind::Vertical)
+        ));
+        assert!(matches!(ty("M.Xml"), TypeInfo::Blackbox(BlackboxKind::Xml)));
+        assert!(matches!(
+            ty("M.Binary"),
+            TypeInfo::Blackbox(BlackboxKind::Binary)
+        ));
+        assert!(matches!(
+            ty("M.S.day"),
+            TypeInfo::Temporal(TemporalKind::Date)
+        ));
+        for (name, builtin) in [
+            ("M.Identifier", "INTERLIS.NAME"),
+            ("M.Link", "INTERLIS.URI"),
+            ("M.S.day", "INTERLIS.XMLDate"),
+        ] {
+            let reference = graph.declaration(name).unwrap().type_reference().unwrap();
+            assert_eq!(reference.target_name(), builtin);
+            assert_eq!(reference.predefined_language(), Some(language));
+        }
+        let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        let bounded = wire["model"]["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "Bounded")
+            .unwrap();
+        assert_eq!(bounded["effectiveType"]["maxLength"], "9007199254740993");
+    }
+
+    let report = outcome(
+        single("DOMAIN Day=DATE; Clock=TIMEOFDAY; Stamp=DATETIME;"),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(matches!(
+        graph.effective_type("M.Clock"),
+        Some(TypeInfo::Temporal(TemporalKind::TimeOfDay))
+    ));
+    assert!(matches!(
+        graph.effective_type("M.Stamp"),
+        Some(TypeInfo::Temporal(TemporalKind::DateTime))
+    ));
+    let day = graph
+        .declaration("M.Day")
+        .unwrap()
+        .type_reference()
+        .unwrap();
+    assert_eq!(
+        (day.declared_name(), day.target_name()),
+        ("DATE", "INTERLIS.XMLDate")
+    );
+    outcome(
+        single("DOMAIN Invalid=MTEXT*0;"),
+        Status::Rejected,
+        Some("ILI-TEXT-LENGTH"),
+    );
 }
 fn pair(version: &str) -> CompileRequest {
     request(vec![
@@ -978,6 +1063,19 @@ fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
             Some("ILI-UNSUPPORTED"),
         );
     }
+}
+
+#[test]
+fn topic_oid_can_name_a_later_domain_in_the_topic_header() {
+    // 2.3 §2.5.2 and 2.4 §3.5.2 specify OID-DomainRef in the topic
+    // header. The order rule for attribute type references does not apply.
+    let body = "TOPIC T=OID AS M.T.LocalId; DOMAIN LocalId=OID 0..2147483647; END T;";
+    outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
+    outcome(
+        single(&body.replace("M.T.LocalId", "M.T.Missing")),
+        Status::Rejected,
+        Some("ILI-TYPE-NOT-FOUND"),
+    );
 }
 
 #[test]

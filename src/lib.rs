@@ -16,8 +16,8 @@ mod wire;
 
 pub use limits::Limits;
 pub use model::{
-    DecimalInfo, Declaration, DeclarationKind, LanguageVersion, ModelGraph, ModelInfo, TypeInfo,
-    TypeReference,
+    AlignmentKind, BlackboxKind, DecimalInfo, Declaration, DeclarationKind, LanguageVersion,
+    ModelGraph, ModelInfo, TemporalKind, TypeInfo, TypeReference,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

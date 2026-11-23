@@ -95,8 +95,12 @@ struct Analyzer<'a, 'd> {
 }
 fn supported_type(ty: &TypeSyntax) -> bool {
     match ty {
-        TypeSyntax::Text(t) => t.kind == syntax::TextKind::Text && t.max_length.is_some(),
-        TypeSyntax::Boolean { .. } | TypeSyntax::Named(_) => true,
+        TypeSyntax::Text(_)
+        | TypeSyntax::Boolean { .. }
+        | TypeSyntax::Named(_)
+        | TypeSyntax::Alignment { .. }
+        | TypeSyntax::Temporal { .. }
+        | TypeSyntax::Blackbox { .. } => true,
         TypeSyntax::Numeric(n) => {
             n.bounds.is_some()
                 && n.circular.is_none()
@@ -104,15 +108,12 @@ fn supported_type(ty: &TypeSyntax) -> bool {
                 && n.direction.is_none()
                 && n.reference_system.is_none()
         }
-        TypeSyntax::Alignment { .. }
-        | TypeSyntax::Temporal { .. }
-        | TypeSyntax::Enumeration { .. }
+        TypeSyntax::Enumeration { .. }
         | TypeSyntax::EnumTree { .. }
         | TypeSyntax::Formatted { .. }
         | TypeSyntax::Coordinate(_)
         | TypeSyntax::Geometry(_)
         | TypeSyntax::Oid { .. }
-        | TypeSyntax::Blackbox { .. }
         | TypeSyntax::ClassValue { .. }
         | TypeSyntax::AttributePathValue { .. }
         | TypeSyntax::Reference { .. }
@@ -1109,18 +1110,22 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         );
     }
     fn predefined_type(&mut self, name: &str, span: &Span) -> Option<Effective> {
-        let max_length = match name {
-            "URI" => "1023",
-            "NAME" => "255",
-            "INTERLIS_1_DATE" => "8",
-            "BOOLEAN" => {
-                let id = self.types.len();
-                self.types.push(TypeInfo::Boolean);
-                return Some(Effective {
-                    ty: id,
-                    mandatory: false,
-                });
-            }
+        let ty = match name {
+            "URI" => TypeInfo::Text {
+                max_length: "1023".into(),
+            },
+            "NAME" => TypeInfo::Text {
+                max_length: "255".into(),
+            },
+            "INTERLIS_1_DATE" => TypeInfo::Text {
+                max_length: "8".into(),
+            },
+            "BOOLEAN" => TypeInfo::Boolean,
+            "HALIGNMENT" => TypeInfo::Alignment(syntax::AlignmentKind::Horizontal),
+            "VALIGNMENT" => TypeInfo::Alignment(syntax::AlignmentKind::Vertical),
+            "XMLDate" => TypeInfo::Temporal(syntax::TemporalKind::Date),
+            "XMLTime" => TypeInfo::Temporal(syntax::TemporalKind::TimeOfDay),
+            "XMLDateTime" => TypeInfo::Temporal(syntax::TemporalKind::DateTime),
             _ => {
                 self.diagnostics.push(
                     "ILI-UNSUPPORTED",
@@ -1131,13 +1136,27 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         };
         let id = self.types.len();
-        self.types.push(TypeInfo::Text {
-            max_length: max_length.into(),
-        });
+        self.types.push(ty);
         Some(Effective {
             ty: id,
             mandatory: false,
         })
+    }
+
+    fn primitive_reference(
+        &mut self,
+        owner: usize,
+        declared: &str,
+        predefined: &str,
+        span: &Span,
+    ) -> Option<Effective> {
+        self.symbols[owner].declaration.reference = Some(TypeReference {
+            declared: declared.into(),
+            target: format!("INTERLIS.{predefined}"),
+            span: span.clone(),
+            predefined_language: Some(self.models[self.symbols[owner].model].language),
+        });
+        self.predefined_type(predefined, span)
     }
     fn number_error(&mut self, error: NumberError, span: &Span) {
         let (code, message) = match error {
@@ -1159,33 +1178,61 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     fn concrete_type(&mut self, owner: usize, syntax: &TypeSyntax) -> Option<Effective> {
         let ty = match syntax {
             TypeSyntax::Text(text) => {
-                let span = &text.span;
-                let max_length = text
-                    .max_length
-                    .as_ref()
-                    .expect("bounded text checked before indexing");
-                if !self.step(1, span) {
+                if !self.step(1, &text.span) {
                     return None;
                 }
-                let length = self.literal(max_length)?;
-                if !length.is_positive_integer() {
-                    self.diagnostics.push(
-                        "ILI-TEXT-LENGTH",
-                        "TEXT length must be a positive integer",
-                        Some(max_length.span.clone()),
-                    );
-                    return None;
+                match text.kind {
+                    syntax::TextKind::Name => {
+                        return self.primitive_reference(owner, "NAME", "NAME", &text.span);
+                    }
+                    syntax::TextKind::Uri => {
+                        return self.primitive_reference(owner, "URI", "URI", &text.span);
+                    }
+                    _ => {}
                 }
-                TypeInfo::Text {
-                    max_length: length.info.original,
+                let max_length = if let Some(maximum) = &text.max_length {
+                    let length = self.literal(maximum)?;
+                    if !length.is_positive_integer() {
+                        self.diagnostics.push(
+                            "ILI-TEXT-LENGTH",
+                            "Text length must be a positive integer",
+                            Some(maximum.span.clone()),
+                        );
+                        return None;
+                    }
+                    Some(length.info.original)
+                } else {
+                    None
+                };
+                match (text.kind, max_length) {
+                    (syntax::TextKind::MText, max_length) => TypeInfo::MultilineText { max_length },
+                    (syntax::TextKind::Text, Some(max_length)) => TypeInfo::Text { max_length },
+                    (syntax::TextKind::Text, None) => TypeInfo::UnboundedText,
+                    _ => unreachable!("NAME and URI are predefined"),
                 }
             }
             TypeSyntax::Boolean { span } => {
                 if !self.step(1, span) {
                     return None;
                 }
-                TypeInfo::Boolean
+                return self.primitive_reference(owner, "BOOLEAN", "BOOLEAN", span);
             }
+            TypeSyntax::Alignment { kind, span } => {
+                let name = match kind {
+                    syntax::AlignmentKind::Horizontal => "HALIGNMENT",
+                    syntax::AlignmentKind::Vertical => "VALIGNMENT",
+                };
+                return self.primitive_reference(owner, name, name, span);
+            }
+            TypeSyntax::Temporal { kind, span } => {
+                let (declared, predefined) = match kind {
+                    syntax::TemporalKind::Date => ("DATE", "XMLDate"),
+                    syntax::TemporalKind::TimeOfDay => ("TIMEOFDAY", "XMLTime"),
+                    syntax::TemporalKind::DateTime => ("DATETIME", "XMLDateTime"),
+                };
+                return self.primitive_reference(owner, declared, predefined, span);
+            }
+            TypeSyntax::Blackbox { kind, .. } => TypeInfo::Blackbox(*kind),
             TypeSyntax::Numeric(numeric) => {
                 let span = &numeric.span;
                 let syntax::NumericBounds { lower, upper } = numeric
@@ -1247,15 +1294,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     }
                 };
             }
-            TypeSyntax::Alignment { .. }
-            | TypeSyntax::Temporal { .. }
-            | TypeSyntax::Enumeration { .. }
+            TypeSyntax::Enumeration { .. }
             | TypeSyntax::EnumTree { .. }
             | TypeSyntax::Formatted { .. }
             | TypeSyntax::Coordinate(_)
             | TypeSyntax::Geometry(_)
             | TypeSyntax::Oid { .. }
-            | TypeSyntax::Blackbox { .. }
             | TypeSyntax::ClassValue { .. }
             | TypeSyntax::AttributePathValue { .. }
             | TypeSyntax::Reference { .. }

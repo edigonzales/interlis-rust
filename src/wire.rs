@@ -386,7 +386,20 @@ impl Serialize for TypeOutput<'_> {
             Text {
                 max_length: &'a str,
             },
+            UnboundedText,
+            MultilineText {
+                max_length: Option<&'a str>,
+            },
             Boolean,
+            Alignment {
+                orientation: crate::AlignmentKind,
+            },
+            Temporal {
+                format: crate::TemporalKind,
+            },
+            Blackbox {
+                encoding: crate::BlackboxKind,
+            },
             Numeric {
                 lower: Decimal<'a>,
                 upper: Decimal<'a>,
@@ -394,7 +407,21 @@ impl Serialize for TypeOutput<'_> {
         }
         match self.0 {
             TypeInfo::Text { max_length } => Type::Text { max_length }.serialize(serializer),
+            TypeInfo::UnboundedText => Type::UnboundedText.serialize(serializer),
+            TypeInfo::MultilineText { max_length } => Type::MultilineText {
+                max_length: max_length.as_deref(),
+            }
+            .serialize(serializer),
             TypeInfo::Boolean => Type::Boolean.serialize(serializer),
+            TypeInfo::Alignment(orientation) => Type::Alignment {
+                orientation: *orientation,
+            }
+            .serialize(serializer),
+            TypeInfo::Temporal(format) => Type::Temporal { format: *format }.serialize(serializer),
+            TypeInfo::Blackbox(encoding) => Type::Blackbox {
+                encoding: *encoding,
+            }
+            .serialize(serializer),
             TypeInfo::Numeric { lower, upper } => Type::Numeric {
                 lower: lower.into(),
                 upper: upper.into(),
