@@ -233,6 +233,8 @@ pub struct GeometryType {
     pub(crate) span: Span,
     #[serde(skip)]
     pub(crate) base_vertex: Option<TypeReference>,
+    #[serde(skip)]
+    pub(crate) explicit_tolerance: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -320,8 +322,15 @@ pub struct CoordinateType {
 pub struct NumericRange {
     pub bounds: Option<NumericBounds>,
     pub unit: Option<TypeReference>,
+    pub reference_system: Option<DomainReferenceSystem>,
     pub circular: bool,
     pub direction: Option<NumericDirection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DomainReferenceSystem {
+    pub domain: TypeReference,
+    pub axis: Option<u8>,
 }
 
 #[derive(Debug)]

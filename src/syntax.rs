@@ -1099,7 +1099,7 @@ mod unsupported_regressions {
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
             for body in [
-                "DOMAIN Position=COORD 0..100; STRUCTURE S=value:0..100 <Position[1]>; END S;",
+                "STRUCTURE S=value:0..100 {Systems.Position}; END S;",
                 r#"DOMAIN Code=TEXT*4 CONSTRAINTS OnlyX: THIS == "X";"#,
             ] {
                 if language == "2.3" && body.contains("CONSTRAINTS") {

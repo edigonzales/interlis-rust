@@ -6,6 +6,7 @@ mod geometry;
 mod names;
 mod object_references;
 mod oid;
+mod reference_systems;
 mod references;
 mod topics;
 mod units;
@@ -114,6 +115,13 @@ struct Analyzer<'a, 'd> {
     states: Vec<State>,
     types: Vec<TypeInfo>,
 }
+fn supported_numeric(ty: &syntax::NumericSyntax) -> bool {
+    !matches!(
+        ty.reference_system,
+        Some(syntax::ReferenceSystemSyntax::Metaobject { .. })
+    )
+}
+
 fn supported_type(ty: &TypeSyntax) -> bool {
     match ty {
         TypeSyntax::Text(_)
@@ -124,10 +132,10 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Blackbox { .. }
         | TypeSyntax::Enumeration { .. }
         | TypeSyntax::EnumTree { .. } => true,
-        TypeSyntax::Numeric(n) => n.reference_system.is_none(),
-        TypeSyntax::Coordinate(c) => c.axes.iter().all(|axis| axis.reference_system.is_none()),
+        TypeSyntax::Numeric(n) => supported_numeric(n),
+        TypeSyntax::Coordinate(c) => c.axes.iter().all(supported_numeric),
         TypeSyntax::Oid { carrier, .. } => match carrier {
-            syntax::OidSyntax::Numeric(range) => range.reference_system.is_none(),
+            syntax::OidSyntax::Numeric(range) => supported_numeric(range),
             _ => true,
         },
         TypeSyntax::Collection { element, .. } => supported_type(element),
@@ -1319,6 +1327,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                             upper: bound("2147483647"),
                         }),
                         unit: None,
+                        reference_system: None,
                         circular: false,
                         direction: None,
                     },
@@ -1328,6 +1337,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 let axis = || crate::NumericRange {
                     bounds: None,
                     unit: None,
+                    reference_system: None,
                     circular: false,
                     direction: None,
                 };
@@ -1854,6 +1864,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
+        self.validate_domain_reference_systems()?;
         self.validate_geometries()?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;

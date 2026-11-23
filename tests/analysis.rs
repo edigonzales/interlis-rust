@@ -1620,6 +1620,7 @@ fn numeric_ranges_preserve_abstractness_circularity_and_direction() {
         Some(TypeInfo::Numeric(NumericRange {
             bounds: None,
             unit: None,
+            reference_system: None,
             circular: true,
             direction: Some(NumericDirection::Clockwise)
         }))
@@ -2890,4 +2891,106 @@ fn geometry_vertex_and_tolerance_checks_follow_the_model_edition() {
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }
+}
+
+#[test]
+fn numeric_reference_systems_bind_axes_and_exact_convertible_units() {
+    for edition in ["2.3", "2.4"] {
+        let body = "UNIT Foot [ft]=0.3048 [INTERLIS.m]; Centimeter [cm]=1/100 [INTERLIS.m];
+            MeterPerSecond [ms]=(INTERLIS.m/INTERLIS.s); FeetPerHour [fph]=(ft/INTERLIS.h);
+            DOMAIN Pos=COORD 0..100 [INTERLIS.m],0..100 [INTERLIS.m],ROTATION 1 -> 2;
+                Scale=0..100 [cm]; Height=0..10 [ft] <Scale>;
+                East=0..10 [cm] <Pos[1]>; Restricted EXTENDS East=1..9;
+                Velocity=0..100 [ms]; Rate=0..10 [fph] <Velocity>;
+                Bearing=0..360 [INTERLIS.rad] <Pos>;";
+        let text = format!("INTERLIS {edition}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        let report = outcome(
+            request(vec![("reference-systems", text)]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let system = |name| {
+            let Some(TypeInfo::Numeric(range)) = graph.effective_type(name) else {
+                panic!("expected numeric type");
+            };
+            range.reference_system.as_ref().unwrap()
+        };
+        assert_eq!(system("M.Height").domain.target_name(), "M.Scale");
+        assert_eq!(system("M.Restricted").domain.target_name(), "M.Pos");
+        assert_eq!(system("M.Restricted").axis, Some(1));
+        assert_eq!(system("M.Bearing").axis, None);
+        assert_eq!(system("M.Rate").domain.target_name(), "M.Velocity");
+    }
+}
+
+#[test]
+fn numeric_reference_systems_reject_invalid_axes_units_and_cycles() {
+    for (body, code) in [
+        (
+            "DOMAIN P=COORD 0..1,0..1; N=0..1 <P[0]>;",
+            "ILI-REFSYSTEM-AXIS",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1; N=0..1 <P[3]>;",
+            "ILI-REFSYSTEM-DOMAIN",
+        ),
+        ("DOMAIN P=0..1; N=0..1 <P[1]>;", "ILI-REFSYSTEM-DOMAIN"),
+        (
+            "DOMAIN P=COORD 0..1,0..1; N=0..1 <P>;",
+            "ILI-REFSYSTEM-DOMAIN",
+        ),
+        (
+            "DOMAIN P=0..1 [INTERLIS.m]; N=0..1 [INTERLIS.s] <P>;",
+            "ILI-REFSYSTEM-UNIT",
+        ),
+        (
+            "DOMAIN P=0..1 [INTERLIS.m]; N=0..1 <P>;",
+            "ILI-REFSYSTEM-UNIT",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1,ROTATION 1 -> 2; N=0..1 [INTERLIS.m] <P>;",
+            "ILI-REFSYSTEM-DIRECTION-UNIT",
+        ),
+        ("DOMAIN P=0..1 <N>; N=0..1 <P>;", "ILI-REFSYSTEM-CYCLE"),
+        (
+            "DOMAIN P=COORD 0..1 <N>,0..1; N=0..1 <P[1]>;",
+            "ILI-REFSYSTEM-CYCLE",
+        ),
+        (
+            "DOMAIN P=0..1; Q=0..1; N=0..1 <P>; Changed EXTENDS N=0..1 <Q>;",
+            "ILI-REFSYSTEM-EXTENSION",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn geometric_extensions_keep_the_origin_and_rules_of_inherited_tolerances() {
+    use interlis::OverlapTolerance;
+    let old = "INTERLIS 2.3; MODEL Old AT \"x\" VERSION \"1\" = DOMAIN P=COORD 0.000..1.000,0.000..1.000; S=SURFACE WITH (STRAIGHTS) VERTEX P WITHOUT OVERLAPS > 0.0001; END Old.";
+    let new = "INTERLIS 2.4; MODEL New AT \"x\" VERSION \"1\" = IMPORTS Old; DOMAIN Refined EXTENDS Old.S=SURFACE; END New.";
+    let report = outcome(
+        request(vec![("new", new.into()), ("old", old.into())]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(
+        matches!(graph.effective_type("New.Refined"), Some(TypeInfo::Geometry(geometry)) if matches!(&geometry.tolerance, Some(OverlapTolerance::Explicit(value)) if value.original() == "0.0001"))
+    );
+
+    let report = outcome(
+        single("DOMAIN P=COORD 0.000..10.000,0.000..10.000; Q EXTENDS P=COORD 1.000..9.000,1.000..9.000;
+            G=SURFACE WITH (STRAIGHTS) VERTEX P; X EXTENDS G=AREA VERTEX Q WITHOUT OVERLAPS;
+            Smaller=SURFACE WITH (STRAIGHTS) VERTEX Q;
+            STRUCTURE Base=geom:SURFACE WITH (STRAIGHTS) VERTEX P; END Base;
+            STRUCTURE Child EXTENDS Base=geom (EXTENDED):Smaller; END Child;"),
+        Status::CheckedSubset,
+        None,
+    );
+    assert!(
+        matches!(report.graph().unwrap().effective_type("M.X"), Some(TypeInfo::Geometry(geometry)) if matches!(&geometry.tolerance, Some(OverlapTolerance::TrackWidth(Some(domain))) if domain.target_name()=="M.P"))
+    );
 }

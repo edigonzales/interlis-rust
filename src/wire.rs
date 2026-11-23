@@ -453,6 +453,8 @@ impl Serialize for TypeOutput<'_> {
             upper: Option<&'a DecimalInfo>,
             #[serde(skip_serializing_if = "Option::is_none")]
             unit: Option<&'a crate::TypeReference>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reference_system: Option<&'a crate::DomainReferenceSystem>,
             circular: bool,
             direction: Option<crate::NumericDirection>,
         }
@@ -462,6 +464,7 @@ impl Serialize for TypeOutput<'_> {
                     lower: range.bounds.as_ref().map(|bounds| &bounds.lower),
                     upper: range.bounds.as_ref().map(|bounds| &bounds.upper),
                     unit: range.unit.as_ref(),
+                    reference_system: range.reference_system.as_ref(),
                     circular: range.circular,
                     direction: range.direction,
                 }

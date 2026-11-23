@@ -77,6 +77,8 @@ impl Analyzer<'_, '_> {
         Some(NumericRange {
             bounds,
             unit,
+            reference_system: self
+                .numeric_reference_system(owner, syntax.reference_system.as_ref())?,
             circular: syntax.circular.is_some(),
             direction: syntax.direction.as_ref().map(|direction| direction.value),
         })
@@ -285,6 +287,17 @@ impl Analyzer<'_, '_> {
                     })
                     .map(|unit| unit.declared.len() + unit.target.len())
                     .sum::<usize>();
+                let reference_bytes = numeric_pairs(own_type, base_type)
+                    .filter_map(|(own, base)| {
+                        own.reference_system
+                            .is_none()
+                            .then_some(base.reference_system.as_ref())
+                            .flatten()
+                    })
+                    .map(|reference| {
+                        reference.domain.declared.len() + reference.domain.target.len()
+                    })
+                    .sum::<usize>();
                 let crs_bytes = match (own_type, base_type) {
                     (TypeInfo::Coordinate(own), TypeInfo::Coordinate(base))
                         if own.reference_system.is_none() =>
@@ -293,7 +306,12 @@ impl Analyzer<'_, '_> {
                     }
                     _ => 0,
                 };
-                if !self.step(unit_bytes.saturating_add(crs_bytes), syntax.span()) {
+                if !self.step(
+                    unit_bytes
+                        .saturating_add(crs_bytes)
+                        .saturating_add(reference_bytes),
+                    syntax.span(),
+                ) {
                     return None;
                 }
                 let [own_type, base_type] = self
@@ -558,6 +576,9 @@ fn inherit_range(own: &mut NumericRange, base: &NumericRange) {
     if own.unit.is_none() {
         own.unit.clone_from(&base.unit);
     }
+    if own.reference_system.is_none() {
+        own.reference_system.clone_from(&base.reference_system);
+    }
 }
 
 fn numeric_extension(
@@ -568,6 +589,26 @@ fn numeric_extension(
     work: &mut WorkBudget,
     inline: bool,
 ) -> Result<Option<(&'static str, &'static str)>, NumberError> {
+    if own.direction.is_some() && base.reference_system.is_some()
+        || base.direction.is_some() && own.reference_system.is_some()
+    {
+        return Ok(Some((
+            "ILI-REFSYSTEM-EXTENSION",
+            "A numeric extension cannot exchange an explicit direction and a reference system",
+        )));
+    }
+    if let Some(reference) = &base.reference_system
+        && own.reference_system.as_ref().map_or(!inline, |own| {
+            own.domain.target_name() != reference.domain.target_name()
+                || own.domain.predefined_language() != reference.domain.predefined_language()
+                || own.axis != reference.axis
+        })
+    {
+        return Ok(Some((
+            "ILI-REFSYSTEM-EXTENSION",
+            "A numeric extension must preserve its reference system",
+        )));
+    }
     if let Some(base_direction) = base.direction
         && own
             .direction

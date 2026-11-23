@@ -3,6 +3,7 @@ use crate::{
     TypeReference, UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale,
     UnitTerm, limits::WorkBudget, number::NumberError, syntax,
 };
+use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
@@ -341,4 +342,83 @@ pub(super) fn unit_extends(
         }
     }
     Ok(false)
+}
+
+pub(super) fn units_convertible(
+    symbols: &[Symbol<'_>],
+    names: &BTreeMap<String, usize>,
+    actual: &TypeReference,
+    expected: &TypeReference,
+    work: &mut WorkBudget,
+) -> Result<bool, NumberError> {
+    if actual.target_name() == expected.target_name() {
+        return Ok(true);
+    }
+    let actual = conversion_roots(symbols, names, actual.target_name(), work)?;
+    let expected = conversion_roots(symbols, names, expected.target_name(), work)?;
+    Ok(actual == expected)
+}
+
+fn conversion_roots<'a>(
+    symbols: &'a [Symbol<'_>],
+    names: &BTreeMap<String, usize>,
+    root: &'a str,
+    work: &mut WorkBudget,
+) -> Result<BTreeMap<&'a str, BigInt>, NumberError> {
+    let mut resolved = BTreeMap::<&str, BTreeMap<&str, BigInt>>::new();
+    let mut pending = vec![(root, false)];
+    while let Some((name, ready)) = pending.pop() {
+        work.charge(1).map_err(|_| NumberError::Work)?;
+        if resolved.contains_key(name) {
+            continue;
+        }
+        let definition = declared_unit(symbols, names, name).map(|unit| &unit.definition);
+        let alias = match definition {
+            Some(UnitDefinition::Derived { target, .. }) => Some(target.target_name()),
+            None if matches!(name, "INTERLIS.min" | "INTERLIS.h" | "INTERLIS.d") => {
+                Some("INTERLIS.s")
+            }
+            _ => None,
+        };
+        let terms = match definition {
+            Some(UnitDefinition::Composed { terms }) => terms.as_slice(),
+            _ => &[],
+        };
+        if !ready && (alias.is_some() || !terms.is_empty()) {
+            pending.push((name, true));
+            pending.extend(alias.into_iter().map(|target| (target, false)));
+            pending.extend(terms.iter().map(|term| (term.unit.target_name(), false)));
+            continue;
+        }
+        let mut roots = BTreeMap::<&str, BigInt>::new();
+        if alias.is_none() && terms.is_empty() {
+            roots.insert(name, BigInt::from(1));
+        }
+        for (operator, target) in alias
+            .into_iter()
+            .map(|target| (UnitOperator::Multiply, target))
+            .chain(
+                terms
+                    .iter()
+                    .map(|term| (term.operator, term.unit.target_name())),
+            )
+        {
+            for (&anchor, exponent) in &resolved[target] {
+                let power = roots.entry(anchor).or_default();
+                let charge = exponent.bits().max(power.bits()).div_ceil(8) + 1;
+                work.charge(u32::try_from(charge).map_err(|_| NumberError::Work)?)
+                    .map_err(|_| NumberError::Work)?;
+                if operator == UnitOperator::Multiply {
+                    *power += exponent;
+                } else {
+                    *power -= exponent;
+                }
+            }
+        }
+        roots.retain(|_, power| power.bits() != 0);
+        resolved.insert(name, roots);
+    }
+    Ok(resolved
+        .remove(root)
+        .expect("every reachable conversion root was resolved"))
 }

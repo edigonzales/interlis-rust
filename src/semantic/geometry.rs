@@ -86,6 +86,10 @@ impl Analyzer<'_, '_> {
             language,
             span: syntax.span.clone(),
             base_vertex: None,
+            explicit_tolerance: syntax
+                .overlaps
+                .as_ref()
+                .is_some_and(|overlap| overlap.tolerance.is_some()),
         })
     }
 
@@ -190,9 +194,7 @@ impl Analyzer<'_, '_> {
             else {
                 unreachable!("geometry pair checked above");
             };
-            let vertex = own.vertex.as_ref().map(TypeReference::target_name);
-            let base_vertex = base.vertex.as_ref().map(TypeReference::target_name);
-            if base_vertex.is_some() && vertex != base_vertex
+            if base.vertex.is_some() && own.vertex.is_none()
                 || base.without_overlaps && !own.without_overlaps
             {
                 self.report_type_override(
@@ -202,6 +204,11 @@ impl Analyzer<'_, '_> {
                     span,
                 );
                 return None;
+            }
+            let pair = own.vertex.clone().zip(base.vertex.clone());
+            let language = self.models[self.symbols[owner].model].language;
+            if let Some((vertex, base)) = pair {
+                self.check_vertex_extension(&vertex, &base, language)?;
             }
             return Some(());
         }
@@ -232,7 +239,16 @@ impl Analyzer<'_, '_> {
             own.base_vertex.clone_from(&base.vertex);
         }
         own.without_overlaps |= base.without_overlaps;
-        if omitted && base.tolerance.is_some() {
+        if base.tolerance.is_some()
+            && (omitted
+                || matches!(
+                    (&own.tolerance, &base.tolerance),
+                    (
+                        Some(OverlapTolerance::TrackWidth(_)),
+                        Some(OverlapTolerance::TrackWidth(_))
+                    )
+                ))
+        {
             own.tolerance.clone_from(&base.tolerance);
         }
         if own.without_overlaps
@@ -274,40 +290,8 @@ impl Analyzer<'_, '_> {
                     if language == LanguageVersion::V24 {
                         self.check_line_precision(id, coordinates, &span)?;
                     }
-                    if let Some(base) = base_vertex
-                        && let Some(expected) = self.geometry_coordinate(&base)?
-                    {
-                        let check = self
-                            .check_unit_specialization(coordinates, expected, false)
-                            .and_then(|unit| {
-                                if unit.is_some() {
-                                    Ok(unit)
-                                } else {
-                                    scalar_extension(
-                                        &self.types[coordinates],
-                                        &self.types[expected],
-                                        language,
-                                        self.limits,
-                                        &mut self.work,
-                                        false,
-                                    )
-                                }
-                            });
-                        match check {
-                            Ok(None) => {}
-                            Ok(Some(_)) => {
-                                self.diagnostics.push(
-                                    "ILI-GEOMETRY-VERTEX-EXTENSION",
-                                    "The vertex domain must restrict the inherited coordinates",
-                                    Some(vertex.span),
-                                );
-                                return None;
-                            }
-                            Err(error) => {
-                                self.number_error(error, &vertex.span);
-                                return None;
-                            }
-                        }
+                    if let Some(base) = base_vertex {
+                        self.check_vertex_extension(&vertex, &base, language)?;
                     }
                 } else {
                     abstract_geometry = true;
@@ -349,6 +333,55 @@ impl Analyzer<'_, '_> {
             }
         }
         Some(())
+    }
+
+    fn check_vertex_extension(
+        &mut self,
+        vertex: &TypeReference,
+        base: &TypeReference,
+        language: LanguageVersion,
+    ) -> Option<()> {
+        let actual = self.geometry_coordinate(vertex)?;
+        let expected = self.geometry_coordinate(base)?;
+        let narrower = match (actual, expected) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(actual), Some(expected)) => {
+                let check = self
+                    .check_unit_specialization(actual, expected, false)
+                    .and_then(|unit| {
+                        if unit.is_some() {
+                            Ok(unit)
+                        } else {
+                            scalar_extension(
+                                &self.types[actual],
+                                &self.types[expected],
+                                language,
+                                self.limits,
+                                &mut self.work,
+                                false,
+                            )
+                        }
+                    });
+                match check {
+                    Ok(result) => result.is_none(),
+                    Err(error) => {
+                        self.number_error(error, &vertex.span);
+                        return None;
+                    }
+                }
+            }
+        };
+        if narrower {
+            Some(())
+        } else {
+            self.diagnostics.push(
+                "ILI-GEOMETRY-VERTEX-EXTENSION",
+                "The vertex domain must restrict the inherited coordinates",
+                Some(vertex.span.clone()),
+            );
+            None
+        }
     }
 
     fn geometry_coordinate(&mut self, vertex: &TypeReference) -> Option<Option<usize>> {
@@ -426,6 +459,7 @@ impl Analyzer<'_, '_> {
         }
         if let (Some(precision), Some(OverlapTolerance::Explicit(tolerance))) =
             (precision, &geometry.tolerance)
+            && geometry.explicit_tolerance
             && precision != tolerance.scale()
         {
             self.diagnostics.push(
