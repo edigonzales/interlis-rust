@@ -12,7 +12,7 @@ impl Analyzer<'_, '_> {
         if !self.step(issuer.value.len(), &issuer.span) {
             return None;
         }
-        if issuer.value.len() > 1023 || !valid_uri_reference(&issuer.value) {
+        if issuer.value.len() > 1023 || !valid_uri_reference(&issuer.value, UriProfile::Issuer) {
             self.diagnostics.push(
                 "ILI-MODEL-ISSUER",
                 "The model issuer must be an ASCII URI reference of at most 1023 characters",
@@ -45,7 +45,7 @@ impl Analyzer<'_, '_> {
                     namespace.value.as_str(),
                     "http://www.w3.org/2000/xmlns/" | "http://www.w3.org/XML/1998/namespace"
                 )
-                || !valid_uri_reference(&namespace.value)
+                || !valid_uri_reference(&namespace.value, UriProfile::Namespace)
             {
                 self.diagnostics.push(
                     "ILI-MODEL-XMLNS",
@@ -73,6 +73,18 @@ impl Analyzer<'_, '_> {
                 .xmlns
                 .as_ref()
                 .map(|namespace| namespace.value.clone()),
+            effective_xml_namespace: match (&model.xmlns, language) {
+                (Some(namespace), _) => namespace.value.clone(),
+                (None, LanguageVersion::V23) => "http://www.interlis.ch/INTERLIS2.3".into(),
+                (None, LanguageVersion::V24) => {
+                    format!("http://www.interlis.ch/xtf/2.4/{}", model.name.value)
+                }
+            },
+            span: model.span.clone(),
+            issuer_span: issuer.span.clone(),
+            version_span: model.version.span.clone(),
+            charset_span: model.charset.as_ref().map(|label| label.span.clone()),
+            xml_namespace_span: model.xmlns.as_ref().map(|namespace| namespace.span.clone()),
             imports: Vec::new(),
         })
     }
@@ -86,14 +98,24 @@ fn canonical_charset(label: &str) -> Option<&'static str> {
     Some(CHARSET_NAMES[index].1)
 }
 
-fn valid_uri_reference(value: &str) -> bool {
-    // RFC 2396 relative references and RFC 2732 IPv6 literals. Parse the
-    // spelling locally, without URL normalization or host resolution.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UriProfile {
+    Issuer,
+    Namespace,
+}
+
+fn valid_uri_reference(value: &str, profile: UriProfile) -> bool {
+    // The issuer uses the RFC 2396 reference grammar. XML Namespaces 1.0
+    // uses RFC 3986. Neither grammar requires normalization or resolution.
+    let query_chars: &[u8] = match profile {
+        UriProfile::Issuer => b";/?:@&=+$,[]",
+        UriProfile::Namespace => b";/?:@&=+$,!",
+    };
     let (reference, fragment) = match value.split_once('#') {
         Some((reference, fragment)) => (reference, Some(fragment)),
         None => (value, None),
     };
-    if fragment.is_some_and(|fragment| !uri_chars(fragment, b";/?:@&=+$,[]")) {
+    if fragment.is_some_and(|fragment| !uri_chars(fragment, query_chars)) {
         return false;
     }
     let scheme_end = reference.find([':', '/', '?']);
@@ -106,7 +128,7 @@ fn valid_uri_reference(value: &str) -> bool {
             .next()
             .is_some_and(|first| first.is_ascii_alphabetic())
             || !scheme.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
-            || path.is_empty()
+            || path.is_empty() && profile == UriProfile::Issuer
         {
             return false;
         }
@@ -118,20 +140,27 @@ fn valid_uri_reference(value: &str) -> bool {
         Some((path, query)) => (path, Some(query)),
         None => (hierarchy, None),
     };
-    if query.is_some_and(|query| !uri_chars(query, b";/?:@&=+$,[]")) {
+    if query.is_some_and(|query| !uri_chars(query, query_chars)) {
         return false;
     }
     if let Some(network) = path.strip_prefix("//") {
         let (authority, path) = network.split_once('/').unwrap_or((network, ""));
-        (!network.is_empty() || query.is_some())
-            && authority_is_valid(authority)
+        (profile == UriProfile::Namespace
+            || !network.is_empty()
+            || query.is_some()
+            || fragment.is_some())
+            && authority_is_valid(authority, profile)
             && uri_chars(path, b";/:@&=+$,")
     } else {
         uri_chars(path, b";/:@&=+$,")
     }
 }
 
-fn authority_is_valid(authority: &str) -> bool {
+fn authority_is_valid(authority: &str, profile: UriProfile) -> bool {
+    if profile == UriProfile::Issuer && uri_chars(authority, b";:@&=+$,") {
+        // RFC 2396 permits a registry-based authority as well as a server.
+        return true;
+    }
     let (userinfo, host) = authority.rsplit_once('@').unzip();
     let host = host.unwrap_or(authority);
     if userinfo.is_some_and(|userinfo| !uri_chars(userinfo, b";:&=+$,")) {
@@ -141,13 +170,30 @@ fn authority_is_valid(authority: &str) -> bool {
         let Some((address, port)) = literal.split_once(']') else {
             return false;
         };
-        return address.parse::<Ipv6Addr>().is_ok()
+        return (address.parse::<Ipv6Addr>().is_ok()
+            || profile == UriProfile::Namespace && ipv_future(address))
             && (port.is_empty()
                 || port
                     .strip_prefix(':')
                     .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_digit())));
     }
-    uri_chars(host, b";:&=+$,")
+    let (hostname, port) = host.split_once(':').unzip();
+    uri_chars(hostname.unwrap_or(host), b";&=+$,")
+        && port.is_none_or(|port| port.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn ipv_future(address: &str) -> bool {
+    let Some((version, name)) = address
+        .strip_prefix(['v', 'V'])
+        .and_then(|address| address.split_once('.'))
+    else {
+        return false;
+    };
+    !version.is_empty()
+        && version.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !name.is_empty()
+        && !name.contains('%')
+        && uri_chars(name, b";:&=+$,")
 }
 
 fn uri_chars(value: &str, allowed: &[u8]) -> bool {

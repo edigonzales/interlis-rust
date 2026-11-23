@@ -55,6 +55,12 @@ pub struct ModelInfo {
     pub(crate) explanation: Option<String>,
     pub(crate) charset: Option<(String, &'static str)>,
     pub(crate) xml_namespace: Option<String>,
+    pub(crate) effective_xml_namespace: String,
+    pub(crate) span: Span,
+    pub(crate) issuer_span: Span,
+    pub(crate) version_span: Span,
+    pub(crate) charset_span: Option<Span>,
+    pub(crate) xml_namespace_span: Option<Span>,
     pub(crate) imports: Vec<String>,
 }
 impl ModelInfo {
@@ -93,6 +99,24 @@ impl ModelInfo {
     }
     pub fn xml_namespace(&self) -> Option<&str> {
         self.xml_namespace.as_deref()
+    }
+    pub fn effective_xml_namespace(&self) -> &str {
+        &self.effective_xml_namespace
+    }
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+    pub fn issuer_span(&self) -> &Span {
+        &self.issuer_span
+    }
+    pub fn version_span(&self) -> &Span {
+        &self.version_span
+    }
+    pub fn charset_span(&self) -> Option<&Span> {
+        self.charset_span.as_ref()
+    }
+    pub fn xml_namespace_span(&self) -> Option<&Span> {
+        self.xml_namespace_span.as_ref()
     }
     /// Only names actually bound in the supported input/predefined namespace.
     pub fn imports(&self) -> &[String] {

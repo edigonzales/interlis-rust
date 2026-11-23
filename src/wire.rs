@@ -259,7 +259,7 @@ struct GraphOutput<'a> {
 impl Serialize for GraphOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut out = serializer.serialize_struct("ModelGraph", 2)?;
-        out.serialize_field("models", &ModelsOutput(self.graph))?;
+        out.serialize_field("models", &ModelsOutput(self.graph, self.sources))?;
         out.serialize_field(
             "declarations",
             &DeclarationsOutput {
@@ -270,7 +270,7 @@ impl Serialize for GraphOutput<'_> {
         out.end()
     }
 }
-struct ModelsOutput<'a>(&'a ModelGraph);
+struct ModelsOutput<'a>(&'a ModelGraph, &'a SourceSet);
 impl Serialize for ModelsOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -292,6 +292,15 @@ impl Serialize for ModelsOutput<'_> {
             charset: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             xml_namespace: Option<&'a str>,
+            effective_xml_namespace: &'a str,
+            issuer_location: Option<SourceLocation>,
+            version_location: Option<SourceLocation>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            charset_location: Option<SourceLocation>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            xml_namespace_location: Option<SourceLocation>,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
             imports: &'a [String],
         }
         let mut seq = serializer.serialize_seq(Some(self.0.models().len()))?;
@@ -309,6 +318,14 @@ impl Serialize for ModelsOutput<'_> {
                 declared_charset: model.declared_charset(),
                 charset: model.charset(),
                 xml_namespace: model.xml_namespace(),
+                effective_xml_namespace: model.effective_xml_namespace(),
+                issuer_location: self.1.location(model.issuer_span()),
+                version_location: self.1.location(model.version_span()),
+                charset_location: model.charset_span().and_then(|span| self.1.location(span)),
+                xml_namespace_location: model
+                    .xml_namespace_span()
+                    .and_then(|span| self.1.location(span)),
+                location: self.1.location(model.source_span()),
                 imports: model.imports(),
             })?;
         }
@@ -336,6 +353,11 @@ impl Serialize for DeclarationsOutput<'_> {
             cardinality: &'a crate::Cardinality,
             identified: bool,
             roles: Vec<&'a str>,
+        }
+        #[derive(Serialize)]
+        struct Context<'a> {
+            generic: Reference<'a>,
+            alternatives: Vec<Reference<'a>>,
         }
         fn project_reference<'a>(
             r: &'a crate::TypeReference,
@@ -380,8 +402,8 @@ impl Serialize for DeclarationsOutput<'_> {
             role: Option<&'a crate::RoleInfo>,
             #[serde(skip_serializing_if = "is_false")]
             generic: bool,
-            #[serde(skip_serializing_if = "<[crate::ContextMapping]>::is_empty")]
-            context_mappings: &'a [crate::ContextMapping],
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            context_mappings: Vec<Context<'a>>,
             #[serde(skip_serializing_if = "<[crate::TopicGenericBinding]>::is_empty")]
             generic_bindings: &'a [crate::TopicGenericBinding],
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -442,7 +464,18 @@ impl Serialize for DeclarationsOutput<'_> {
                 }),
                 role: declaration.role(),
                 generic: declaration.is_generic(),
-                context_mappings: declaration.context_mappings(),
+                context_mappings: declaration
+                    .context_mappings()
+                    .iter()
+                    .map(|mapping| Context {
+                        generic: project_reference(&mapping.generic, self.sources),
+                        alternatives: mapping
+                            .alternatives
+                            .iter()
+                            .map(|reference| project_reference(reference, self.sources))
+                            .collect(),
+                    })
+                    .collect(),
                 generic_bindings: declaration.generic_bindings(),
                 deferred_generics: declaration
                     .declared_deferred_generics()

@@ -3102,6 +3102,12 @@ fn model_header_preserves_declared_metadata_and_registered_charset() {
     assert_eq!(model.declared_charset(), Some("csUTF8"));
     assert_eq!(model.charset(), Some("UTF-8"));
     assert_eq!(model.xml_namespace(), Some("urn:namespace:metadata"));
+    assert_eq!(model.effective_xml_namespace(), "urn:namespace:metadata");
+    let charset = report
+        .sources()
+        .location(model.charset_span().unwrap())
+        .unwrap();
+    assert_eq!(charset.start_line, 3);
     assert!(model.explanation().unwrap().contains("version detail"));
 }
 
@@ -3132,6 +3138,8 @@ fn invalid_model_header_values_are_rejected_at_the_original_literal() {
     for (options, code) in [
         ("CHARSET \"utf8\";", "ILI-MODEL-CHARSET"),
         ("XMLNS \"\";", "ILI-MODEL-XMLNS"),
+        ("XMLNS \"https://example.org:bad/path\";", "ILI-MODEL-XMLNS"),
+        ("XMLNS \"urn:example?x=[y]\";", "ILI-MODEL-XMLNS"),
         (
             "XMLNS \"http://www.w3.org/2000/xmlns/\";",
             "ILI-MODEL-XMLNS",
@@ -3139,10 +3147,26 @@ fn invalid_model_header_values_are_rejected_at_the_original_literal() {
     ] {
         outcome(single(options), Status::Rejected, Some(code));
     }
-    let text =
-        "INTERLIS 2.4; MODEL M AT \"https://[2001:db8::1]/issuer?q=t%20v\" VERSION \"1\" = END M.";
+    for issuer in [
+        "https://[2001:db8::1]/issuer?q=t%20v",
+        "pkg://left@@right/path",
+        "//#local",
+    ] {
+        let report = outcome(
+            request(vec![(
+                "issuer",
+                format!("INTERLIS 2.4; MODEL M AT \"{issuer}\" VERSION \"1\" = END M."),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        assert_eq!(
+            report.graph().unwrap().models()[0].effective_xml_namespace(),
+            "http://www.interlis.ch/xtf/2.4/M"
+        );
+    }
     outcome(
-        request(vec![("ipv6-issuer", text.into())]),
+        single("XMLNS \"future://[v1.a]/path\";"),
         Status::CheckedSubset,
         None,
     );
