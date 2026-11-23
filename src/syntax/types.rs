@@ -2123,7 +2123,6 @@ mod tests {
     #[test]
     fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
         for ty in [
-            "0..1 [INTERLIS.m]",
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
             "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",

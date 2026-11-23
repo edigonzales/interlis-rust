@@ -179,6 +179,10 @@ impl Analyzer<'_, '_> {
         let (target, predefined_language) =
             match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Unit]) {
                 Ok(BoundName::Declared(id)) => {
+                    let bytes = self.symbols[id].declaration.qualified.len();
+                    if !self.step(bytes, &name.span) {
+                        return None;
+                    }
                     (self.symbols[id].declaration.qualified.clone(), None)
                 }
                 Ok(BoundName::Predefined(name, _)) => (

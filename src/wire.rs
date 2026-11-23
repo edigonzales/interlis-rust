@@ -406,6 +406,8 @@ impl Serialize for TypeOutput<'_> {
         struct Range<'a> {
             lower: Option<&'a DecimalInfo>,
             upper: Option<&'a DecimalInfo>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            unit: Option<&'a crate::TypeReference>,
             circular: bool,
             direction: Option<crate::NumericDirection>,
         }
@@ -414,6 +416,7 @@ impl Serialize for TypeOutput<'_> {
                 Self {
                     lower: range.bounds.as_ref().map(|bounds| &bounds.lower),
                     upper: range.bounds.as_ref().map(|bounds| &bounds.upper),
+                    unit: range.unit.as_ref(),
                     circular: range.circular,
                     direction: range.direction,
                 }

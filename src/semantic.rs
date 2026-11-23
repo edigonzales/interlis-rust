@@ -116,11 +116,8 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Blackbox { .. }
         | TypeSyntax::Enumeration { .. }
         | TypeSyntax::EnumTree { .. } => true,
-        TypeSyntax::Numeric(n) => n.unit.is_none() && n.reference_system.is_none(),
-        TypeSyntax::Coordinate(c) => c
-            .axes
-            .iter()
-            .all(|axis| axis.unit.is_none() && axis.reference_system.is_none()),
+        TypeSyntax::Numeric(n) => n.reference_system.is_none(),
+        TypeSyntax::Coordinate(c) => c.axes.iter().all(|axis| axis.reference_system.is_none()),
         TypeSyntax::Formatted { .. }
         | TypeSyntax::Geometry(_)
         | TypeSyntax::Oid { .. }
@@ -1195,6 +1192,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             "LineCoord" => {
                 let axis = || crate::NumericRange {
                     bounds: None,
+                    unit: None,
                     circular: false,
                     direction: None,
                 };
@@ -1337,9 +1335,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 };
                 return self.enum_tree_type(owner, value, &domain.span);
             }
-            TypeSyntax::Numeric(numeric) => TypeInfo::Numeric(self.numeric_range(numeric)?),
+            TypeSyntax::Numeric(numeric) => TypeInfo::Numeric(self.numeric_range(owner, numeric)?),
             TypeSyntax::Coordinate(coordinate) => {
-                TypeInfo::Coordinate(self.coordinate_type(coordinate)?)
+                TypeInfo::Coordinate(self.coordinate_type(owner, coordinate)?)
             }
             TypeSyntax::Named(name) => {
                 return match self.bind_name(owner, name)? {

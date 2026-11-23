@@ -1,5 +1,6 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
+    units::unit_extends,
 };
 use crate::{
     AxisRotation, CoordinateType, DecimalInfo, LanguageVersion, Limits, NumericBounds,
@@ -10,7 +11,11 @@ use crate::{
 use std::cmp::Ordering;
 
 impl Analyzer<'_, '_> {
-    pub(super) fn numeric_range(&mut self, syntax: &NumericSyntax) -> Option<NumericRange> {
+    pub(super) fn numeric_range(
+        &mut self,
+        owner: usize,
+        syntax: &NumericSyntax,
+    ) -> Option<NumericRange> {
         if !self.step(1, &syntax.span) {
             return None;
         }
@@ -55,19 +60,50 @@ impl Analyzer<'_, '_> {
         } else {
             None
         };
+        let unit = if let Some(name) = &syntax.unit {
+            let unit = self.bind_unit_reference(owner, name)?;
+            if bounds.is_some() && self.unit_is_abstract(&unit) {
+                self.diagnostics.push(
+                    "ILI-NUMERIC-UNIT-ABSTRACT",
+                    "A bounded numeric range requires a concrete unit",
+                    Some(name.span.clone()),
+                );
+                return None;
+            }
+            Some(unit)
+        } else {
+            None
+        };
         Some(NumericRange {
             bounds,
+            unit,
             circular: syntax.circular.is_some(),
             direction: syntax.direction.as_ref().map(|direction| direction.value),
         })
     }
 
-    pub(super) fn coordinate_type(&mut self, syntax: &CoordinateSyntax) -> Option<CoordinateType> {
+    pub(super) fn coordinate_type(
+        &mut self,
+        owner: usize,
+        syntax: &CoordinateSyntax,
+    ) -> Option<CoordinateType> {
         let axes = syntax
             .axes
             .iter()
-            .map(|axis| self.numeric_range(axis))
+            .map(|axis| self.numeric_range(owner, axis))
             .collect::<Option<Vec<_>>>()?;
+        if let Some(unit) = axes
+            .iter()
+            .filter_map(|axis| axis.unit.as_ref())
+            .find(|unit| self.unit_is_abstract(unit))
+        {
+            self.diagnostics.push(
+                "ILI-COORD-UNIT-ABSTRACT",
+                "Coordinate axes require concrete units",
+                Some(unit.span.clone()),
+            );
+            return None;
+        }
         let rotation = if let Some(rotation) = &syntax.rotation {
             let axis = |spelling: &str| {
                 spelling
@@ -128,16 +164,31 @@ impl Analyzer<'_, '_> {
         syntax: &TypeSyntax,
     ) -> Option<Effective> {
         let mut own = self.concrete_type(owner, syntax)?;
-        let check = scalar_extension(
-            &self.types[own.ty],
-            &self.types[base.ty],
-            self.models[self.symbols[owner].model].language,
-            self.limits,
-            &mut self.work,
-        );
+        let check = self
+            .check_unit_specialization(own.ty, base.ty)
+            .and_then(|unit_check| {
+                if unit_check.is_some() {
+                    return Ok(unit_check);
+                }
+                scalar_extension(
+                    &self.types[own.ty],
+                    &self.types[base.ty],
+                    self.models[self.symbols[owner].model].language,
+                    self.limits,
+                    &mut self.work,
+                )
+            });
         match check {
             Ok(None) => {
-                let inherited_bytes = match (&self.types[own.ty], &self.types[base.ty]) {
+                let own_type = &self.types[own.ty];
+                let base_type = &self.types[base.ty];
+                let unit_bytes = numeric_pairs(own_type, base_type)
+                    .filter_map(|(own, base)| {
+                        own.unit.is_none().then_some(base.unit.as_ref()).flatten()
+                    })
+                    .map(|unit| unit.declared.len() + unit.target.len())
+                    .sum::<usize>();
+                let crs_bytes = match (own_type, base_type) {
                     (TypeInfo::Coordinate(own), TypeInfo::Coordinate(base))
                         if own.reference_system.is_none() =>
                     {
@@ -145,7 +196,7 @@ impl Analyzer<'_, '_> {
                     }
                     _ => 0,
                 };
-                if !self.step(inherited_bytes, syntax.span()) {
+                if !self.step(unit_bytes.saturating_add(crs_bytes), syntax.span()) {
                     return None;
                 }
                 let [own_type, base_type] = self
@@ -191,6 +242,63 @@ impl Analyzer<'_, '_> {
             }
         }
     }
+
+    fn check_unit_specialization(
+        &mut self,
+        own: usize,
+        base: usize,
+    ) -> Result<Option<(&'static str, &'static str)>, NumberError> {
+        for (own, base) in numeric_pairs(&self.types[own], &self.types[base]) {
+            match (&own.unit, &base.unit) {
+                (Some(_), None) if base.bounds.is_some() => {
+                    return Ok(Some((
+                        "ILI-NUMERIC-UNIT-EXTENSION",
+                        "A bounded unitless base cannot gain a unit in an extension",
+                    )));
+                }
+                (None, Some(base)) if own.bounds.is_some() && self.unit_is_abstract(base) => {
+                    return Ok(Some((
+                        "ILI-NUMERIC-UNIT-ABSTRACT",
+                        "A bounded extension must specialize its inherited abstract unit with a concrete unit",
+                    )));
+                }
+                (Some(own), Some(base))
+                    if own.target_name() != base.target_name()
+                        && (!self.unit_is_abstract(base)
+                            || !unit_extends(
+                                &self.symbols,
+                                &self.names,
+                                own,
+                                base,
+                                &mut self.work,
+                            )?) =>
+                {
+                    return Ok(Some((
+                        "ILI-NUMERIC-UNIT-EXTENSION",
+                        "A unit change is only allowed when specializing an abstract base unit",
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn numeric_pairs<'a>(
+    own: &'a TypeInfo,
+    base: &'a TypeInfo,
+) -> impl Iterator<Item = (&'a NumericRange, &'a NumericRange)> {
+    let (own, base) = match (own, base) {
+        (TypeInfo::Numeric(own), TypeInfo::Numeric(base)) => {
+            (std::slice::from_ref(own), std::slice::from_ref(base))
+        }
+        (TypeInfo::Coordinate(own), TypeInfo::Coordinate(base)) => {
+            (own.axes.as_slice(), base.axes.as_slice())
+        }
+        _ => ([].as_slice(), [].as_slice()),
+    };
+    own.iter().zip(base)
 }
 
 fn scalar_extension(
@@ -253,6 +361,9 @@ fn scalar_extension(
 fn inherit_range(own: &mut NumericRange, base: &NumericRange) {
     own.circular |= base.circular;
     own.direction = own.direction.or(base.direction);
+    if own.unit.is_none() {
+        own.unit.clone_from(&base.unit);
+    }
 }
 
 fn numeric_extension(

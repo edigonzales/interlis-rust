@@ -163,6 +163,7 @@ pub struct CoordinateType {
 #[derive(Debug)]
 pub struct NumericRange {
     pub bounds: Option<NumericBounds>,
+    pub unit: Option<TypeReference>,
     pub circular: bool,
     pub direction: Option<NumericDirection>,
 }

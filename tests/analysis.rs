@@ -1100,42 +1100,47 @@ fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
     for (body, status, code) in [
         (
             "IMPORTS UNQUALIFIED Definitions; DOMAIN D=0..2 [m];",
-            Status::Incomplete,
-            "ILI-UNSUPPORTED",
+            Status::CheckedSubset,
+            None,
         ),
         (
             "IMPORTS Definitions; DOMAIN D=0..2 [Definitions.m];",
-            Status::Incomplete,
-            "ILI-UNSUPPORTED",
+            Status::CheckedSubset,
+            None,
         ),
         (
             "IMPORTS Definitions; DOMAIN D=0..2 [Definitions.Meter];",
             Status::Rejected,
-            "ILI-NAME-NOT-FOUND",
+            Some("ILI-NAME-NOT-FOUND"),
         ),
         (
             "DOMAIN D=0..2 [Definitions.m];",
             Status::Rejected,
-            "ILI-NAME-NOT-FOUND",
+            Some("ILI-NAME-NOT-FOUND"),
         ),
         (
             "IMPORTS Definitions; REFSYSTEM BASKET B ~ Definitions.T;",
             Status::Incomplete,
-            "ILI-UNSUPPORTED",
+            Some("ILI-UNSUPPORTED"),
         ),
         (
             "REFSYSTEM BASKET B ~ Definitions.T;",
             Status::Rejected,
-            "ILI-NAME-NOT-FOUND",
+            Some("ILI-NAME-NOT-FOUND"),
         ),
     ] {
         let text = format!("INTERLIS 2.4; MODEL Use AT \"x\" VERSION \"1\" = {body} END Use.");
         let report = outcome(
             request(vec![("definitions", defs.into()), ("use", text)]),
             status,
-            Some(code),
+            code,
         );
-        assert!(report.graph().is_none());
+        if let Some(graph) = report.graph() {
+            let Some(TypeInfo::Numeric(range)) = graph.effective_type("Use.D") else {
+                panic!("expected a bound range");
+            };
+            assert_eq!(range.unit.as_ref().unwrap().target_name(), "Definitions.m");
+        }
     }
     // Both editions permit a class to extend a structure. The inherited type
     // of another member is intentionally left to inheritance analysis.
@@ -1612,6 +1617,7 @@ fn numeric_ranges_preserve_abstractness_circularity_and_direction() {
         graph.effective_type("M.Angle"),
         Some(TypeInfo::Numeric(NumericRange {
             bounds: None,
+            unit: None,
             circular: true,
             direction: Some(NumericDirection::Clockwise)
         }))
@@ -1848,6 +1854,87 @@ fn units_reject_invalid_dependencies_and_conversions() {
         ),
         ("UNIT U = [V]; V = (INTERLIS.m/U);", "ILI-UNIT-CYCLE"),
         ("UNIT U = [Unknown];", "ILI-NAME-NOT-FOUND"),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn expanding_short_unit_references_charges_the_owned_target_names() {
+    let model = "M".repeat(240);
+    let terms = vec!["U"; 120].join("*");
+    let text = format!(
+        "INTERLIS 2.4; MODEL {model} AT \"x\" VERSION \"1\" = UNIT U; V=({terms}); END {model}."
+    );
+    let mut input = request(vec![("long-unit-name", text)]);
+    input.limits.max_semantic_steps = 8_000;
+    let report = outcome(input, Status::LimitExceeded, Some("ILI-LIMIT"));
+    assert!(report.graph().is_none());
+}
+
+#[test]
+fn numeric_and_coordinate_units_bind_inherit_and_specialize() {
+    for (edition, language) in [("2.3", LanguageVersion::V23), ("2.4", LanguageVersion::V24)] {
+        let text = format!(
+            r#"INTERLIS {edition}; MODEL M AT "x" VERSION "1" =
+            UNIT Foot [ft] = 0.3048 [INTERLIS.m];
+            DOMAIN
+                Length (ABSTRACT) = NUMERIC [INTERLIS.LENGTH];
+                Short EXTENDS Length = 0..10 [ft];
+                Narrow EXTENDS Short = 1..9;
+                Point = COORD 0..10 [INTERLIS.m], 0..10 [ft];
+                SmallPoint EXTENDS Point = COORD 2..8, 1..9;
+        END M."#
+        );
+        let report = outcome(
+            request(vec![("measures", text)]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Numeric(narrow)) = graph.effective_type("M.Narrow") else {
+            panic!("expected a numeric domain");
+        };
+        let unit = narrow.unit.as_ref().unwrap();
+        assert_eq!(unit.target_name(), "M.ft");
+        assert_eq!(unit.declared_name(), "ft");
+        let Some(TypeInfo::Coordinate(point)) = graph.effective_type("M.SmallPoint") else {
+            panic!("expected a coordinate domain");
+        };
+        let metre = point.axes[0].unit.as_ref().unwrap();
+        assert_eq!(metre.target_name(), "INTERLIS.m");
+        assert_eq!(metre.predefined_language(), Some(language));
+        assert_eq!(point.axes[1].unit.as_ref().unwrap().target_name(), "M.ft");
+    }
+}
+
+#[test]
+fn measured_ranges_reject_illegal_units_and_dimensions() {
+    for (body, code) in [
+        (
+            "DOMAIN D=0..1 [INTERLIS.LENGTH];",
+            "ILI-NUMERIC-UNIT-ABSTRACT",
+        ),
+        (
+            "DOMAIN D (ABSTRACT)=COORD NUMERIC [INTERLIS.LENGTH];",
+            "ILI-COORD-UNIT-ABSTRACT",
+        ),
+        (
+            "DOMAIN A (ABSTRACT)=NUMERIC [INTERLIS.LENGTH]; D EXTENDS A=0..1;",
+            "ILI-NUMERIC-UNIT-ABSTRACT",
+        ),
+        (
+            "DOMAIN A (ABSTRACT)=NUMERIC [INTERLIS.LENGTH]; D EXTENDS A=0..1 [INTERLIS.s];",
+            "ILI-NUMERIC-UNIT-EXTENSION",
+        ),
+        (
+            "DOMAIN A=0..1; D EXTENDS A=0..1 [INTERLIS.m];",
+            "ILI-NUMERIC-UNIT-EXTENSION",
+        ),
+        (
+            "UNIT Foot [ft]=0.3048 [INTERLIS.m]; DOMAIN A=0..1 [INTERLIS.m]; D EXTENDS A=0..1 [ft];",
+            "ILI-NUMERIC-UNIT-EXTENSION",
+        ),
     ] {
         outcome(single(body), Status::Rejected, Some(code));
     }
