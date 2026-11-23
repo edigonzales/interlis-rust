@@ -104,7 +104,7 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 }
-                self.bind_role(owner, role, declaration, inherited)?;
+                self.bind_role(role, declaration, inherited)?;
                 if let Some(position) = position {
                     roles[position] = role;
                 } else {
@@ -157,7 +157,6 @@ impl Analyzer<'_, '_> {
 
     fn bind_role(
         &mut self,
-        owner: usize,
         role: usize,
         declaration: &syntax::RoleDecl,
         inherited: Option<usize>,
@@ -244,7 +243,12 @@ impl Analyzer<'_, '_> {
         } else {
             let mut result = false;
             for target in &targets {
-                result |= self.has_concrete_reference_target(target, span)?;
+                let model_level_class = object_targets(target).iter().any(|link| {
+                    let id = self.names[link.target_name()];
+                    self.symbols[id].declaration.kind == Kind::Class
+                        && self.containing_topic(id).is_none()
+                });
+                result |= model_level_class || self.has_concrete_reference_target(target, span)?;
             }
             result
         };
@@ -286,23 +290,6 @@ impl Analyzer<'_, '_> {
             self.symbols[role].declaration.base_reference =
                 Some(self.implicit_base_reference(role, base_id, &declaration.name)?);
         }
-        let source = self.containing_topic(owner);
-        for target in &targets {
-            for link in object_targets(target) {
-                let target = self.names[link.target_name()];
-                if self.symbols[target].declaration.kind == Kind::Association
-                    && self.specializes_symbol(owner, target, &link.span)?
-                {
-                    self.diagnostics.push(
-                        "ILI-ROLE-ASSOCIATION-TARGET",
-                        "A role cannot target its own association or an association it extends",
-                        Some(link.span.clone()),
-                    );
-                    return None;
-                }
-                self.check_object_target_scope(source, target, external, &link.span)?;
-            }
-        }
         self.symbols[role].declaration.role = Some(Box::new(RoleInfo {
             strength,
             cardinality,
@@ -333,15 +320,42 @@ impl Analyzer<'_, '_> {
             let Some(association) = self.symbols[owner].declaration.association() else {
                 continue;
             };
-            for &role in &association.roles {
-                let role = self.symbols[role].declaration.role().unwrap();
-                for link in role.targets.iter().flat_map(object_targets) {
-                    let target = self.names[link.target_name()];
-                    if self.work.charge(1).is_err() {
-                        self.diagnostics
-                            .limit("Semantic work budget exceeded", Some(link.span.clone()));
+            let topic = self.containing_topic(owner);
+            let span = self.symbols[owner].name_span.clone();
+            let role_count = association.roles.len();
+            for position in 0..role_count {
+                let role = self.symbols[owner].declaration.association().unwrap().roles[position];
+                let declaration = &self.symbols[role].declaration;
+                let role = declaration.role().unwrap();
+                let external = role.external;
+                let local = declaration.parent == Some(owner);
+                let targets: Vec<_> = role
+                    .targets
+                    .iter()
+                    .flat_map(object_targets)
+                    .map(|link| {
+                        (
+                            self.names[link.target_name()],
+                            if local {
+                                link.span.clone()
+                            } else {
+                                span.clone()
+                            },
+                        )
+                    })
+                    .collect();
+                for (target, location) in targets {
+                    if self.symbols[target].declaration.kind == Kind::Association
+                        && self.specializes_symbol(owner, target, &location)?
+                    {
+                        self.diagnostics.push(
+                            "ILI-ROLE-ASSOCIATION-TARGET",
+                            "A role cannot target its own association or an association it extends",
+                            Some(location),
+                        );
                         return None;
                     }
+                    self.check_object_target_scope(topic, target, external, &location)?;
                     if self.symbols[target]
                         .declaration
                         .association()
@@ -350,7 +364,7 @@ impl Analyzer<'_, '_> {
                         self.diagnostics.push(
                             "ILI-ROLE-ASSOCIATION-OID",
                             "An association used as a role target requires its own identity",
-                            Some(link.span.clone()),
+                            Some(location),
                         );
                         return None;
                     }
@@ -361,11 +375,11 @@ impl Analyzer<'_, '_> {
     }
 
     fn check_hidden_siblings(&mut self, viewables: &[usize]) -> Option<()> {
-        let mut specializations = BTreeMap::<(usize, usize), Vec<usize>>::new();
+        let mut specializations = BTreeMap::<usize, Vec<usize>>::new();
         for &owner in viewables {
-            let Some(base) = self.symbols[owner].base_scope else {
+            if self.symbols[owner].base_scope.is_none() {
                 continue;
-            };
+            }
             let Some(association) = self.symbols[owner].declaration.association() else {
                 continue;
             };
@@ -374,15 +388,20 @@ impl Analyzer<'_, '_> {
                 if self.symbols[role].declaration.parent != Some(owner) {
                     continue;
                 }
-                let Some(base_role) = self.symbols[role].base_scope else {
+                if self.symbols[role].base_scope.is_none() {
                     continue;
-                };
+                }
                 let info = self.symbols[role].declaration.role().unwrap();
                 let targets = self.role_target_ids(&info.targets);
                 let hiding = info.hiding;
                 let span = self.symbols[role].name_span.clone();
-                let siblings = specializations.entry((base, base_role)).or_default();
+                let root = self.original_role(role, &span)?;
+                let siblings = specializations.entry(root).or_default();
                 for &previous in siblings.iter() {
+                    let previous_owner = self.symbols[previous].declaration.parent?;
+                    if self.specializes_symbol(owner, previous_owner, &span)? {
+                        continue;
+                    }
                     let previous = self.symbols[previous].declaration.role().unwrap();
                     if previous.hiding == hiding {
                         continue;
@@ -470,6 +489,7 @@ impl Analyzer<'_, '_> {
                     if let Some(member) = self
                         .visible_name(target, name, Some(&[Kind::Attribute]), &at)
                         .ok()?
+                        && !self.later_inherited_role(owner, member, role)
                     {
                         self.role_name_conflict(role, member);
                         return None;
@@ -543,6 +563,18 @@ impl Analyzer<'_, '_> {
             role = base;
         }
         Some(role)
+    }
+
+    fn later_inherited_role(&self, direct_target: usize, attribute: usize, role: usize) -> bool {
+        let Some(container) = self.symbols[attribute].declaration.parent else {
+            return false;
+        };
+        let Some(association) = self.symbols[role].declaration.parent else {
+            return false;
+        };
+        let (association_source, start, _) = self.symbols[association].declaration.span.sort_key();
+        let (owner_source, owner_start, _) = self.symbols[container].declaration.span.sort_key();
+        container != direct_target && association_source == owner_source && start > owner_start
     }
 
     fn role_name_conflict(&mut self, role: usize, previous: usize) {

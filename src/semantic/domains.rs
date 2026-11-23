@@ -232,6 +232,23 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
+        if matches!(self.types[own_id], TypeInfo::Geometry(_))
+            || matches!(self.types[base_id], TypeInfo::Geometry(_))
+        {
+            if matches!(leaf, TypeSyntax::Named(_))
+                && self.check_nominal_domain(owner, leaf.span())?
+            {
+                return Some(own);
+            }
+            self.specialize_geometry(
+                owner,
+                own_id,
+                base_id,
+                matches!(leaf, TypeSyntax::Geometry(_)),
+                leaf.span(),
+            )?;
+            return Some(own);
+        }
         let inline = !matches!(leaf, TypeSyntax::Named(_));
         if !inline {
             let nominal = self.check_nominal_domain(owner, leaf.span())?;
@@ -389,7 +406,7 @@ impl Analyzer<'_, '_> {
         );
     }
 
-    fn check_unit_specialization(
+    pub(super) fn check_unit_specialization(
         &mut self,
         own: usize,
         base: usize,
@@ -461,7 +478,7 @@ fn numeric_pairs<'a>(
     own.iter().zip(base)
 }
 
-fn scalar_extension(
+pub(super) fn scalar_extension(
     own: &TypeInfo,
     base: &TypeInfo,
     language: LanguageVersion,

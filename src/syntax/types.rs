@@ -4,7 +4,7 @@ pub(crate) use crate::model::NumericDirection as Direction;
 pub(crate) use crate::model::{
     AlignmentKind, BlackboxKind, CoordinateKind, EnumerationOrder, TemporalKind,
 };
-use crate::{CollectionKind, UnitOperator};
+use crate::{CollectionKind, GeometryKind, UnitOperator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextKind {
@@ -121,15 +121,6 @@ pub(crate) struct CoordinateSyntax {
     pub rotation: Option<RotationSyntax>,
     pub crs: Option<Located<String>>,
     pub span: Span,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GeometryKind {
-    Polyline,
-    Surface,
-    Area,
-    MultiPolyline,
-    MultiSurface,
-    MultiArea,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2120,7 +2111,6 @@ mod tests {
         for ty in [
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
-            "POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord",
             "OID 0..1 {Systems.R}",
             "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",

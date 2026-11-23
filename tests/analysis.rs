@@ -2776,3 +2776,118 @@ fn associations_reject_invalid_roles_and_access_collisions() {
         );
     }
 }
+
+#[test]
+fn inherited_roles_are_checked_in_the_receiving_association() {
+    for (body, code) in [
+        (
+            "TOPIC T=CLASS C=END C; ASSOCIATION Base (OID)=parent -- Derived; child -- C; END Base;
+               ASSOCIATION Derived EXTENDS Base=END Derived; END T;",
+            "ILI-ROLE-ASSOCIATION-TARGET",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; CLASS B=END B; ASSOCIATION Base=x -- A; y -- B; END Base; END T;
+             TOPIC U=ASSOCIATION Derived EXTENDS M.T.Base=END Derived; END U;",
+            "ILI-REFERENCE-EXTERNAL",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; CLASS B=END B; CLASS C EXTENDS A=END C;
+                ASSOCIATION Base=x -- A; y -- B; END Base;
+                ASSOCIATION Left EXTENDS Base=END Left;
+                ASSOCIATION Right EXTENDS Base=END Right;
+                ASSOCIATION Hide EXTENDS Left=x (EXTENDED,HIDING) -- C; END Hide;
+                ASSOCIATION Show EXTENDS Right=x (EXTENDED) -- C; END Show;
+             END T;",
+            "ILI-ROLE-HIDING",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn geometry_schema_retains_inherited_forms_vertex_and_symbolic_tolerance() {
+    use interlis::{GeometryKind, LineForm, OverlapTolerance};
+    let report = outcome(
+        single(
+            "DOMAIN P=COORD 0.000..100.000,0.000..100.000;
+             Inside EXTENDS P=COORD 1.000..99.000,1.000..99.000;
+             Surface= SURFACE WITH (STRAIGHTS,ARCS) VERTEX P;
+             Patch EXTENDS Surface=AREA WITH (STRAIGHTS) VERTEX Inside;
+             Line=POLYLINE WITH (STRAIGHTS,ARCS) VERTEX P WITHOUT OVERLAPS > 0.001;
+             DirectedLine EXTENDS Line=DIRECTED POLYLINE WITH (ARCS);",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::Geometry(area)) = graph.effective_type("M.Patch") else {
+        panic!("expected area descriptor");
+    };
+    assert_eq!(area.geometry_kind, GeometryKind::Area);
+    assert_eq!(area.vertex.as_ref().unwrap().target_name(), "M.Inside");
+    assert!(matches!(&area.line_forms[..], [LineForm::Straights]));
+    assert!(
+        matches!(&area.tolerance, Some(OverlapTolerance::TrackWidth(Some(origin))) if origin.target_name() == "M.P")
+    );
+    let Some(TypeInfo::Geometry(line)) = graph.effective_type("M.DirectedLine") else {
+        panic!("expected line descriptor");
+    };
+    assert!(line.directed);
+    assert!(line.without_overlaps);
+    assert!(
+        matches!(&line.tolerance, Some(OverlapTolerance::Explicit(value)) if value.original() == "0.001")
+    );
+}
+
+#[test]
+fn geometry_vertex_and_tolerance_checks_follow_the_model_edition() {
+    let body = "DOMAIN P=COORD 0.000..100.000,0.000..100.000; L=SURFACE WITH (STRAIGHTS) VERTEX P WITHOUT OVERLAPS > 0.0001;";
+    for (edition, status, code) in [
+        ("2.3", Status::CheckedSubset, None),
+        (
+            "2.4",
+            Status::Rejected,
+            Some("ILI-GEOMETRY-TOLERANCE-PRECISION"),
+        ),
+    ] {
+        let text = format!("INTERLIS {edition}; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        outcome(request(vec![("geometry-precision", text)]), status, code);
+    }
+    for (body, code) in [
+        (
+            "DOMAIN P=BOOLEAN; G=POLYLINE WITH (STRAIGHTS) VERTEX P;",
+            "ILI-GEOMETRY-VERTEX",
+        ),
+        (
+            "DOMAIN P=MULTICOORD 0..1,0..1; G=POLYLINE WITH (STRAIGHTS) VERTEX P;",
+            "ILI-GEOMETRY-VERTEX",
+        ),
+        (
+            "DOMAIN D=POLYLINE WITH (STRAIGHTS) VERTEX INTERLIS.LineCoord;",
+            "ILI-GEOMETRY-ABSTRACT",
+        ),
+        (
+            "DOMAIN P=COORD 0.0..1.0,0.00..1.00; G=POLYLINE WITH (STRAIGHTS) VERTEX P;",
+            "ILI-GEOMETRY-VERTEX-PRECISION",
+        ),
+        (
+            "DOMAIN P=COORD 0.0..1.0 [INTERLIS.s],0.0..1.0 [INTERLIS.s]; G=POLYLINE WITH (STRAIGHTS) VERTEX P;",
+            "ILI-GEOMETRY-VERTEX-UNIT",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1; G=POLYLINE WITH (STRAIGHTS) VERTEX P WITHOUT OVERLAPS > 0;",
+            "ILI-GEOMETRY-TOLERANCE",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1; G=POLYLINE WITH (STRAIGHTS) VERTEX P; Other EXTENDS G=POLYLINE WITH (ARCS);",
+            "ILI-GEOMETRY-EXTENSION",
+        ),
+        (
+            "DOMAIN P=COORD 0..1,0..1; Q=COORD 0..2,0..2; G=POLYLINE WITH (STRAIGHTS) VERTEX P; Other EXTENDS G=POLYLINE VERTEX Q;",
+            "ILI-GEOMETRY-VERTEX-EXTENSION",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}

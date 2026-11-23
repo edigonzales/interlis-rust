@@ -122,7 +122,11 @@ impl Analyzer<'_, '_> {
         })
     }
 
-    fn structure_reference(&mut self, owner: usize, name: &QualifiedName) -> Option<TypeReference> {
+    pub(super) fn structure_reference(
+        &mut self,
+        owner: usize,
+        name: &QualifiedName,
+    ) -> Option<TypeReference> {
         match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Structure]) {
             Ok(bound @ BoundName::Declared(_)) => self.bound_reference(owner, name, bound),
             Ok(BoundName::Predefined(..)) => {

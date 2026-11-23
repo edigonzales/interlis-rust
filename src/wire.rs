@@ -531,6 +531,10 @@ impl Serialize for TypeOutput<'_> {
                 external: bool,
                 target: &'a crate::ObjectTarget,
             },
+            Geometry {
+                #[serde(flatten)]
+                geometry: &'a crate::GeometryType,
+            },
         }
         match self.0 {
             TypeInfo::Text { max_length } => Type::Text {
@@ -613,6 +617,7 @@ impl Serialize for TypeOutput<'_> {
                 target: &reference.target,
             }
             .serialize(serializer),
+            TypeInfo::Geometry(geometry) => Type::Geometry { geometry }.serialize(serializer),
         }
     }
 }

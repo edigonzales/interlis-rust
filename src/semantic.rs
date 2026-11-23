@@ -2,6 +2,7 @@ mod associations;
 mod collections;
 mod domains;
 mod enumeration;
+mod geometry;
 mod names;
 mod object_references;
 mod oid;
@@ -131,8 +132,8 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         },
         TypeSyntax::Collection { element, .. } => supported_type(element),
         TypeSyntax::RestrictedStructure { .. } | TypeSyntax::Reference { .. } => true,
+        TypeSyntax::Geometry(_) => true,
         TypeSyntax::Formatted { .. }
-        | TypeSyntax::Geometry(_)
         | TypeSyntax::ClassValue { .. }
         | TypeSyntax::AttributePathValue { .. } => false,
     }
@@ -144,6 +145,7 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
         TypeSyntax::Text(_)
             | TypeSyntax::Numeric(_)
             | TypeSyntax::Coordinate(_)
+            | TypeSyntax::Geometry(_)
             | TypeSyntax::Oid { .. }
             | TypeSyntax::Enumeration { .. }
     ) && supported_type(ty)
@@ -1551,8 +1553,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     element,
                 })
             }
+            TypeSyntax::Geometry(geometry) => {
+                TypeInfo::Geometry(self.geometry_type(owner, geometry)?)
+            }
             TypeSyntax::Formatted { .. }
-            | TypeSyntax::Geometry(_)
             | TypeSyntax::ClassValue { .. }
             | TypeSyntax::AttributePathValue { .. } => {
                 unreachable!("unsupported type semantics checked before indexing")
@@ -1850,6 +1854,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
+        self.validate_geometries()?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }

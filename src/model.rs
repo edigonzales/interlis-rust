@@ -68,7 +68,7 @@ impl ModelInfo {
     }
 }
 /// Original spelling and exact value `coefficient * 10^(-scale)`. No binary float.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DecimalInfo {
     pub(crate) original: String,
     pub(crate) coefficient: String,
@@ -128,6 +128,7 @@ pub enum TypeInfo {
     Structure(StructureType),
     Collection(CollectionType),
     Reference(ReferenceType),
+    Geometry(GeometryType),
 }
 
 impl TypeInfo {
@@ -188,6 +189,50 @@ pub struct ObjectTarget {
 pub struct ReferenceType {
     pub external: bool,
     pub target: ObjectTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryKind {
+    Polyline,
+    Surface,
+    Area,
+    MultiPolyline,
+    MultiSurface,
+    MultiArea,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "reference", rename_all = "snake_case")]
+pub enum LineForm {
+    Straights,
+    Arcs,
+    Named(TypeReference),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum OverlapTolerance {
+    Explicit(DecimalInfo),
+    TrackWidth(Option<TypeReference>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeometryType {
+    pub geometry_kind: GeometryKind,
+    pub directed: bool,
+    pub line_forms: Vec<LineForm>,
+    pub vertex: Option<TypeReference>,
+    pub without_overlaps: bool,
+    pub tolerance: Option<OverlapTolerance>,
+    pub line_attributes: Option<TypeReference>,
+    #[serde(skip)]
+    pub(crate) language: LanguageVersion,
+    #[serde(skip)]
+    pub(crate) span: Span,
+    #[serde(skip)]
+    pub(crate) base_vertex: Option<TypeReference>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
