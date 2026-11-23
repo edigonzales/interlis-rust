@@ -33,7 +33,7 @@ export function verify(report, expected = 'checked_subset') {
 }
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
-const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = DOMAIN N=-1..2; D EXTENDS N = MANDATORY; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; END B.';
+const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; END A. MODEL B AT "x" VERSION "1" = IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
@@ -70,7 +70,6 @@ export const syntaxCases = [
   ['INTERLIS +2.5;', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.5; ? 😀 \"open /*', 'incomplete', 'ILI-UNSUPPORTED'],
   [syntaxDocument, 'checked_subset', null],
-  ['INTERLIS 2.4; MODEL A AT "https://example.invalid" VERSION "1" = DOMAIN Angle=0..360 CIRCULAR; END A.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT "https://example.invalid" VERSION "1" = END A.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL A AT "https://example.invalid" VERSION "1" END A.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL A AT \"https://example.invalid\" VERSION \"1\" = DOMAIN ; END A.', 'rejected', 'ILI-SYNTAX'],
@@ -84,6 +83,12 @@ export function verifySyntax(report, text, status, code) {
   if(report.status!==status || report.fullValidation!==false || (status==='checked_subset') !== (report.model!==null)) throw new Error('Unexpected syntax contract: '+JSON.stringify(report));
   if(code && !report.diagnostics.some(d=>d.code===code)) throw new Error('Missing actual syntax diagnostic');
   if(status==='checked_subset' && (report.model.models.length!==2 || report.diagnostics.length!==0)) throw new Error('Expected both checked models');
+  if(text===syntaxDocument) {
+    const declaration = name => report.model.declarations.find(d => d.qualifiedName === name);
+    const angle = declaration('A.Angle').effectiveType;
+    const oid = declaration('B.T.C').oidRules.object;
+    if (!angle.circular || angle.unit.targetName !== 'INTERLIS.rad' || oid.domain.targetName !== 'INTERLIS.I32OID') throw new Error('Lost a bound unit or inherited OID rule');
+  }
   if(text.includes('X=;')) {
     const errors=report.diagnostics.filter(d=>d.code==='ILI-SYNTAX');
     if(errors.length!==2 || errors[0].startByte!==55 || errors[0].startColumnUtf16!==54 || errors[1].startByte!==59 || errors[1].startColumnUtf16!==58) throw new Error('Lost Unicode syntax ranges: '+JSON.stringify(errors));
