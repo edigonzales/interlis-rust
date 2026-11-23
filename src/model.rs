@@ -296,6 +296,20 @@ pub(crate) struct TopicDependencies {
     pub effective: Box<[TypeReference]>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ContextMapping {
+    pub generic: TypeReference,
+    pub alternatives: Vec<TypeReference>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicGenericBinding {
+    pub generic_domain: String,
+    pub concrete_domains: Vec<String>,
+    pub deferred: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinateKind {
@@ -526,6 +540,9 @@ pub struct Declaration {
     pub(crate) effective_attributes: Option<Box<[usize]>>,
     pub(crate) association: Option<Box<AssociationInfo>>,
     pub(crate) role: Option<Box<RoleInfo>>,
+    pub(crate) generic: bool,
+    pub(crate) context: Option<Box<[ContextMapping]>>,
+    pub(crate) generic_bindings: Option<Box<[TopicGenericBinding]>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -581,6 +598,15 @@ impl Declaration {
     }
     pub fn role(&self) -> Option<&RoleInfo> {
         self.role.as_deref()
+    }
+    pub fn is_generic(&self) -> bool {
+        self.generic
+    }
+    pub fn context_mappings(&self) -> &[ContextMapping] {
+        self.context.as_deref().unwrap_or_default()
+    }
+    pub fn generic_bindings(&self) -> &[TopicGenericBinding] {
+        self.generic_bindings.as_deref().unwrap_or_default()
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

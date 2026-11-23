@@ -1323,7 +1323,6 @@ mod tests {
             "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
             "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
             "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
-            "DOMAIN G=COORD NUMERIC,NUMERIC; D=COORD 0..1,0..1; CONTEXT C=G=D;",
             "PARAMETER p:MANDATORY;",
         ] {
             let text = model("2.4", body);
@@ -1518,24 +1517,27 @@ mod review_regressions {
             };
             assert!(c.bindings.is_empty());
         }
-        for tail in [
-            "UNIT u;",
-            "FUNCTION f (x:BOOLEAN):BOOLEAN;",
-            "LINE FORM curve:Segment;",
-            "SIGN BASKET B~S;",
-            "REFSYSTEM BASKET B~S;",
+        for (tail, status) in [
+            ("UNIT u;", AnalysisStatus::CheckedSubset),
+            (
+                "FUNCTION f (x:BOOLEAN):BOOLEAN;",
+                AnalysisStatus::Incomplete,
+            ),
+            ("LINE FORM curve:Segment;", AnalysisStatus::Incomplete),
+            ("SIGN BASKET B~S;", AnalysisStatus::Incomplete),
+            ("REFSYSTEM BASKET B~S;", AnalysisStatus::Incomplete),
         ] {
             let report = analyze(CompileRequest {
                 sources: vec![SourceInput {
                     name: "x".into(),
-                    text: model(&format!("DOMAIN G=BOOLEAN; X=BOOLEAN; STRUCTURE Segment=END Segment; TOPIC S=END S; CONTEXT first=G=X; empty= {tail}"), "2.4"),
+                    text: model(&format!("DOMAIN G (GENERIC)=COORD NUMERIC; X=COORD 0..1; STRUCTURE Segment=END Segment; TOPIC S=END S; CONTEXT first=G=X; empty= {tail}"), "2.4"),
                 }],
                 limits: Limits::default(),
             })
             .unwrap();
             assert_eq!(
                 report.status(),
-                AnalysisStatus::Incomplete,
+                status,
                 "{tail}: {:?}",
                 report.diagnostics()
             );

@@ -322,6 +322,7 @@ impl Analyzer<'_, '_> {
         };
         if !declaration.is_abstract()
             && (self.types[value_type].has_unbounded_range()
+                && !self.generic_types.contains_key(&value_type)
                 || self.attribute_uses_abstract_domain(id, syntax.is_none(), &location)?
                 || mandatory && !self.structure_can_be_required(id, effective.ty, &location)?)
         {

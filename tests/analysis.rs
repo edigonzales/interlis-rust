@@ -2994,3 +2994,82 @@ fn geometric_extensions_keep_the_origin_and_rules_of_inherited_tolerances() {
         matches!(report.graph().unwrap().effective_type("M.X"), Some(TypeInfo::Geometry(geometry)) if matches!(&geometry.tolerance, Some(OverlapTolerance::TrackWidth(Some(domain))) if domain.target_name()=="M.P"))
     );
 }
+
+#[test]
+fn generic_contexts_follow_imports_and_narrow_in_extending_topics() {
+    let base = r#"
+        INTERLIS 2.4; MODEL Base AT "x" VERSION "1" =
+          DOMAIN
+            Generic (GENERIC)=COORD NUMERIC,NUMERIC;
+            West=COORD 0..10,0..10 REFSYS "EPSG:21781";
+            East=COORD 20..30,20..30 REFSYS "EPSG:2056";
+          CONTEXT standard=Generic=West OR East;
+          TOPIC T=DEFERRED GENERICS Generic;
+            CLASS Point=position:Generic; END Point;
+          END T;
+        END Base."#;
+    let refined = r#"
+        INTERLIS 2.4; MODEL Refined AT "x" VERSION "1" =
+          IMPORTS Base;
+          DOMAIN Local EXTENDS Base.East=COORD 22..29,22..29;
+          CONTEXT local=Base.Generic=Local;
+          TOPIC T EXTENDS Base.T=END T;
+        END Refined."#;
+    let report = outcome(
+        request(vec![("base", base.into()), ("refined", refined.into())]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(graph.declaration("Base.Generic").unwrap().is_generic());
+    let mapping = &graph
+        .declaration("Base.standard")
+        .unwrap()
+        .context_mappings()[0];
+    assert_eq!(mapping.generic.target_name(), "Base.Generic");
+    assert_eq!(mapping.alternatives[0].target_name(), "Base.West");
+    let old = &graph.declaration("Base.T").unwrap().generic_bindings()[0];
+    assert!(old.deferred);
+    assert_eq!(old.concrete_domains, ["Base.West", "Base.East"]);
+    let current = &graph.declaration("Refined.T").unwrap().generic_bindings()[0];
+    assert!(!current.deferred);
+    assert_eq!(current.generic_domain, "Base.Generic");
+    assert_eq!(current.concrete_domains, ["Refined.Local"]);
+}
+
+#[test]
+fn generic_contexts_check_shape_availability_and_deferred_use() {
+    for (body, code) in [
+        ("DOMAIN G (GENERIC)=TEXT;", "ILI-GENERIC-DOMAIN"),
+        (
+            "DOMAIN G (GENERIC)=COORD NUMERIC; P EXTENDS G=COORD 0..1,0..1;",
+            "ILI-GENERIC-DIMENSIONS",
+        ),
+        (
+            "DOMAIN G=COORD 0..1; P=COORD 0..1; CONTEXT C=G=P;",
+            "ILI-CONTEXT-GENERIC",
+        ),
+        (
+            "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; P=COORD 0..1; CONTEXT C=G=P;",
+            "ILI-CONTEXT-DIMENSIONS",
+        ),
+        (
+            "DOMAIN G (GENERIC)=COORD 0..1,0..1; P=COORD 0..2,0..1; CONTEXT C=G=P;",
+            "ILI-CONTEXT-RANGE",
+        ),
+        (
+            "DOMAIN G (GENERIC)=COORD NUMERIC; TOPIC T=CLASS C=x:G; END C; END T;",
+            "ILI-GENERIC-CONTEXT-MISSING",
+        ),
+        (
+            "DOMAIN G (GENERIC)=COORD NUMERIC; A=COORD 0..1; B=COORD 2..3; CONTEXT C=G=A OR B; TOPIC T=CLASS C=x:G; END C; END T;",
+            "ILI-GENERIC-DEFERRED-REQUIRED",
+        ),
+        (
+            "DOMAIN G (GENERIC)=COORD NUMERIC; A=COORD 0..1; CONTEXT C=G=A; TOPIC T=DEFERRED GENERICS G; END T;",
+            "ILI-GENERIC-DEFERRED-UNUSED",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}

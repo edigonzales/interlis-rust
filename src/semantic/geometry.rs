@@ -154,14 +154,9 @@ impl Analyzer<'_, '_> {
             self.report_type_override(owner, "ILI-GEOMETRY-EXTENSION", "A geometry extension must preserve its family and direction and narrow its line forms", span);
             return None;
         }
-        // An automatically inferred track width may be replaced by the inherited rule.
-        let own_syntax = self.symbols[owner].syntax.map(|syntax| match syntax {
-            syntax::TypeSyntax::Collection { element, .. } => element.as_ref(),
-            syntax => syntax,
-        });
-        let omitted = matches!(own_syntax, Some(syntax::TypeSyntax::Geometry(geometry)) if geometry.overlaps.is_none());
+        let inherits_tolerance = inline && !own.explicit_tolerance;
         if let Some(inherited) = &base.tolerance
-            && (!inline || !omitted)
+            && !inherits_tolerance
             && !own
                 .tolerance
                 .as_ref()
@@ -239,16 +234,7 @@ impl Analyzer<'_, '_> {
             own.base_vertex.clone_from(&base.vertex);
         }
         own.without_overlaps |= base.without_overlaps;
-        if base.tolerance.is_some()
-            && (omitted
-                || matches!(
-                    (&own.tolerance, &base.tolerance),
-                    (
-                        Some(OverlapTolerance::TrackWidth(_)),
-                        Some(OverlapTolerance::TrackWidth(_))
-                    )
-                ))
-        {
+        if inherits_tolerance && base.tolerance.is_some() {
             own.tolerance.clone_from(&base.tolerance);
         }
         if own.without_overlaps
@@ -283,6 +269,7 @@ impl Analyzer<'_, '_> {
                         unreachable!()
                     };
                     abstract_geometry |= coord.axes.iter().any(|axis| axis.bounds.is_none())
+                        && !self.generic_types.contains_key(&coordinates)
                         || self
                             .names
                             .get(vertex.target_name())

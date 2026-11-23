@@ -362,8 +362,17 @@ impl Serialize for DeclarationsOutput<'_> {
             association: Option<Association<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             role: Option<&'a crate::RoleInfo>,
+            #[serde(skip_serializing_if = "is_false")]
+            generic: bool,
+            #[serde(skip_serializing_if = "<[crate::ContextMapping]>::is_empty")]
+            context_mappings: &'a [crate::ContextMapping],
+            #[serde(skip_serializing_if = "<[crate::TopicGenericBinding]>::is_empty")]
+            generic_bindings: &'a [crate::TopicGenericBinding],
             #[serde(flatten)]
             location: Option<SourceLocation>,
+        }
+        fn is_false(value: &bool) -> bool {
+            !value
         }
         let mut seq = serializer.serialize_seq(Some(self.graph.declarations().len()))?;
         for declaration in self.graph.declarations() {
@@ -414,6 +423,9 @@ impl Serialize for DeclarationsOutput<'_> {
                         .collect(),
                 }),
                 role: declaration.role(),
+                generic: declaration.is_generic(),
+                context_mappings: declaration.context_mappings(),
+                generic_bindings: declaration.generic_bindings(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

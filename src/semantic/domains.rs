@@ -261,6 +261,19 @@ impl Analyzer<'_, '_> {
         if own_id == base_id {
             return Some(own);
         }
+        if self.generic_types.contains_key(&base_id)
+            && let (TypeInfo::Coordinate(actual), TypeInfo::Coordinate(expected)) =
+                (&self.types[own_id], &self.types[base_id])
+            && actual.axes.len() != expected.axes.len()
+        {
+            self.report_type_override(
+                owner,
+                "ILI-GENERIC-DIMENSIONS",
+                "A generic coordinate extension must preserve the number of axes",
+                leaf.span(),
+            );
+            return None;
+        }
         let check = self
             .check_unit_specialization(own_id, base_id, inline)
             .and_then(|unit_check| {

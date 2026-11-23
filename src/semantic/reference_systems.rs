@@ -86,8 +86,9 @@ impl Analyzer<'_, '_> {
                             .get(index)
                             .map(|range| (target, index, range))
                     }
-                    (Some((_, TypeInfo::Coordinate(coordinate))), None)
-                        if coordinate.rotation.is_some() =>
+                    (Some((target, TypeInfo::Coordinate(coordinate))), None)
+                        if coordinate.rotation.is_some()
+                            || self.generic_types.contains_key(&target) =>
                     {
                         direction = true;
                         None

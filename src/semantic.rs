@@ -1,5 +1,6 @@
 mod associations;
 mod collections;
+mod contexts;
 mod domains;
 mod enumeration;
 mod geometry;
@@ -114,6 +115,7 @@ struct Analyzer<'a, 'd> {
     scope_names: BTreeMap<(usize, Namespace, String), usize>,
     states: Vec<State>,
     types: Vec<TypeInfo>,
+    generic_types: BTreeMap<usize, usize>,
 }
 fn supported_numeric(ty: &syntax::NumericSyntax) -> bool {
     !matches!(
@@ -190,7 +192,7 @@ fn ensure_supported_semantics(
                     span,
                     ..
                 } => {
-                    if options.view.is_some() || !options.deferred_generics.is_empty() {
+                    if options.view.is_some() {
                         Some(span)
                     } else {
                         declarations(children, work, diagnostics)
@@ -270,7 +272,9 @@ fn ensure_supported_semantics(
                     if properties.iter().any(|p| {
                         !matches!(
                             p.value,
-                            syntax::Property::Final | syntax::Property::Abstract
+                            syntax::Property::Final
+                                | syntax::Property::Abstract
+                                | syntax::Property::Generic
                         )
                     }) || properties
                         .iter()
@@ -305,7 +309,7 @@ fn ensure_supported_semantics(
                         declarations(&association.attributes, work, diagnostics)
                     }
                 }
-                SyntaxDecl::Context(context) => Some(&context.span),
+                SyntaxDecl::Context(_) => None,
                 SyntaxDecl::View(view) => Some(&view.span),
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
                 SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
@@ -328,7 +332,9 @@ fn ensure_supported_semantics(
         let kind_supported = model.kind == syntax::ModelKind::Data
             || model.kind == syntax::ModelKind::Type
                 && model.declarations.iter().all(|d| match d {
-                    SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_) => true,
+                    SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_) | SyntaxDecl::Context(_) => {
+                        true
+                    }
                     SyntaxDecl::Container {
                         kind, properties, ..
                     } => {
@@ -389,6 +395,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             scope_names: BTreeMap::new(),
             states: vec![],
             types: vec![],
+            generic_types: BTreeMap::new(),
         }
     }
 
@@ -496,6 +503,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 effective_attributes: None,
                 association: None,
                 role: None,
+                generic: false,
+                context: None,
+                generic_bindings: None,
             },
             name_span: name.span.clone(),
             model,
@@ -725,7 +735,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
     }
-    fn check_import_cycles(&mut self) {
+    fn check_import_cycles(&mut self) -> Option<Vec<usize>> {
         #[derive(Clone, Copy, PartialEq)]
         enum Visit {
             Unseen,
@@ -734,6 +744,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         }
         let mut seen = vec![Visit::Unseen; self.selected_models.len()];
         let mut stack = Vec::new();
+        let mut order = Vec::with_capacity(self.selected_models.len());
         for start in 0..self.selected_models.len() {
             if seen[start] != Visit::Unseen {
                 continue;
@@ -743,11 +754,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             while let Some((current, edges)) = stack.last_mut() {
                 let Some(edge) = edges.next() else {
                     seen[*current] = Visit::Done;
+                    order.push(*current);
                     stack.pop();
                     continue;
                 };
                 if !self.step(1, &edge.span) {
-                    return;
+                    return None;
                 }
                 let Some(&target) = self.model_names.get(&edge.name.value) else {
                     continue; // The predefined model has no supplied import edges.
@@ -769,12 +781,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                             }],
                         );
                         if self.diagnostics.limited {
-                            return;
+                            return None;
                         }
                     }
                 }
             }
         }
+        Some(order)
     }
     fn check_translation_cycles(&mut self) {
         let mut visited_by = vec![None; self.selected_models.len()];
@@ -879,6 +892,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         self.symbols[id].syntax = ty.as_ref();
                         self.symbols[id].base = base.as_ref();
                         self.index_abstract_final(id, properties);
+                        self.symbols[id].declaration.generic = properties
+                            .iter()
+                            .any(|property| property.value == syntax::Property::Generic);
                     }
                 }
                 SyntaxDecl::Attribute {
@@ -1754,6 +1770,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
             if result.is_some_and(|value| self.types[value.ty].has_unbounded_range())
                 && !self.symbols[id].declaration.is_abstract()
+                && !self.symbols[id].declaration.is_generic()
             {
                 self.diagnostics.push(
                     "ILI-DOMAIN-ABSTRACT",
@@ -1763,6 +1780,20 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 result = None;
             }
             if let Some(mut value) = result {
+                if self.symbols[id].declaration.is_generic() {
+                    if !matches!(self.types[value.ty], TypeInfo::Coordinate(_))
+                        || self.symbols[id].declaration.is_abstract()
+                    {
+                        self.diagnostics.push(
+                            "ILI-GENERIC-DOMAIN",
+                            "GENERIC requires a coordinate domain without the ABSTRACT property",
+                            Some(self.symbols[id].name_span.clone()),
+                        );
+                        self.states[id] = State::Failed;
+                        return None;
+                    }
+                    self.generic_types.insert(value.ty, id);
+                }
                 value.mandatory |= self.symbols[id]
                     .declaration
                     .declared_mandatory
@@ -1782,10 +1813,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             return None;
         }
         self.bind_imports();
-        if !self.diagnostics.rejected && !self.diagnostics.limited {
-            self.check_import_cycles();
-            self.check_translation_cycles();
+        if self.diagnostics.limited || self.diagnostics.rejected {
+            return None;
         }
+        let model_order = self.check_import_cycles()?;
+        self.check_translation_cycles();
         if self.diagnostics.limited || self.diagnostics.rejected {
             return None;
         }
@@ -1866,6 +1898,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         }
         self.validate_domain_reference_systems()?;
         self.validate_geometries()?;
+        self.bind_contexts(&model_order, &topics, &viewables)?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }
