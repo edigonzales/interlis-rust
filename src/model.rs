@@ -177,6 +177,12 @@ pub struct OidRules {
     pub object: Option<OidRule>,
 }
 
+#[derive(Debug)]
+pub(crate) struct TopicDependencies {
+    pub declared: Box<[TypeReference]>,
+    pub effective: Box<[TypeReference]>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinateKind {
@@ -396,7 +402,7 @@ pub struct Declaration {
     pub(crate) base_reference: Option<TypeReference>,
     pub(crate) unit: Option<Box<UnitInfo>>,
     pub(crate) oids: Option<Box<OidRules>>,
-    pub(crate) topic_dependencies: Option<Box<[TypeReference]>>,
+    pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
     pub(crate) effective_attributes: Option<Box<[usize]>>,
 }
 impl Declaration {
@@ -439,7 +445,14 @@ impl Declaration {
         self.oids.as_deref()
     }
     pub fn topic_dependencies(&self) -> &[TypeReference] {
-        self.topic_dependencies.as_deref().unwrap_or_default()
+        self.topic_dependencies
+            .as_ref()
+            .map_or(&[], |links| &links.effective)
+    }
+    pub fn declared_topic_dependencies(&self) -> &[TypeReference] {
+        self.topic_dependencies
+            .as_ref()
+            .map_or(&[], |links| &links.declared)
     }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.

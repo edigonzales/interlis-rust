@@ -1,7 +1,7 @@
 use super::{
     Analyzer, BoundName, Kind, LookupError, Namespace, QualifiedName, SyntaxDecl, namespace,
 };
-use crate::{RelatedLocation, TypeReference};
+use crate::{RelatedLocation, TypeReference, model::TopicDependencies};
 use std::collections::BTreeSet;
 
 impl Analyzer<'_, '_> {
@@ -33,6 +33,7 @@ impl Analyzer<'_, '_> {
             };
             let mut targets = BTreeSet::new();
             let mut dependencies = Vec::new();
+            let mut declared = Vec::new();
             if let Some(base) = self.symbols[id].base_scope {
                 let inherited = self.symbols[base].declaration.topic_dependencies();
                 let bytes = inherited
@@ -51,12 +52,22 @@ impl Analyzer<'_, '_> {
             for name in &options.dependencies {
                 let (target, reference) = self.topic_reference(id, name)?;
                 if targets.insert(target) {
-                    dependencies.push(reference);
+                    if !self.step(
+                        reference.declared.len() + reference.target.len(),
+                        &name.span,
+                    ) {
+                        return None;
+                    }
+                    dependencies.push(reference.clone());
                 }
+                declared.push(reference);
             }
             if !dependencies.is_empty() {
                 self.symbols[id].declaration.topic_dependencies =
-                    Some(dependencies.into_boxed_slice());
+                    Some(Box::new(TopicDependencies {
+                        declared: declared.into_boxed_slice(),
+                        effective: dependencies.into_boxed_slice(),
+                    }));
             }
         }
         self.check_topic_dependency_cycles(&ordered)?;
@@ -152,11 +163,30 @@ impl Analyzer<'_, '_> {
             let Some(parent) = declaration.parent else {
                 continue;
             };
+            if self.symbols[parent].declaration.kind != Kind::Topic {
+                continue;
+            }
+            let name = declaration.name.clone();
+            let kind = declaration.kind;
+            let location = self.symbols[id].name_span.clone();
+            if let Some(model) = self.symbols[parent].declaration.parent
+                && let Some(outer) = self.visible_name(model, &name, None, &location).ok()?
+                && !(outer == parent && kind == Kind::Class)
+            {
+                self.diagnostics.push_related(
+                    "ILI-TOPIC-ENCLOSING-NAME",
+                    "A declaration cannot redeclare an enclosing model type name",
+                    Some(location),
+                    vec![RelatedLocation {
+                        span: self.symbols[outer].name_span.clone(),
+                        message: "Name in the enclosing model".into(),
+                    }],
+                );
+                return None;
+            }
             let Some(base) = self.symbols[parent].base_scope else {
                 continue;
             };
-            let name = declaration.name.clone();
-            let location = self.symbols[id].name_span.clone();
             let inherited = self.visible_name(base, &name, None, &location).ok()?;
             if let Some(inherited) = inherited
                 && !(self.symbols[id].base_scope == Some(inherited)

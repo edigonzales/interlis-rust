@@ -346,8 +346,10 @@ impl Serialize for DeclarationsOutput<'_> {
             unit: Option<&'a crate::UnitInfo>,
             #[serde(skip_serializing_if = "Option::is_none")]
             oid_rules: Option<&'a crate::OidRules>,
-            #[serde(skip_serializing_if = "<[crate::TypeReference]>::is_empty")]
-            topic_dependencies: &'a [crate::TypeReference],
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            topic_dependencies: Vec<Reference<'a>>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            declared_topic_dependencies: Vec<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             effective_attributes: Option<Vec<&'a str>>,
             #[serde(flatten)]
@@ -376,7 +378,16 @@ impl Serialize for DeclarationsOutput<'_> {
                     .map(TypeOutput),
                 unit: declaration.unit(),
                 oid_rules: declaration.oid_rules(),
-                topic_dependencies: declaration.topic_dependencies(),
+                topic_dependencies: declaration
+                    .topic_dependencies()
+                    .iter()
+                    .map(|reference| project_reference(reference, self.sources))
+                    .collect(),
+                declared_topic_dependencies: declaration
+                    .declared_topic_dependencies()
+                    .iter()
+                    .map(|reference| project_reference(reference, self.sources))
+                    .collect(),
                 effective_attributes: declaration.effective_attributes.as_ref().map(|attributes| {
                     attributes
                         .iter()

@@ -1252,23 +1252,10 @@ fn same_model_domain_references_require_prior_definition() {
         Status::CheckedSubset,
         None,
     );
-    let report = outcome(
+    outcome(
         single("DOMAIN D=TEXT*4; TOPIC T=STRUCTURE S=value:D; END S; DOMAIN D=TEXT*8; END T;"),
-        Status::CheckedSubset,
-        None,
-    );
-    let graph = report.graph().unwrap();
-    assert_eq!(
-        graph
-            .declaration("M.T.S.value")
-            .unwrap()
-            .type_reference()
-            .unwrap()
-            .target_name(),
-        "M.D"
-    );
-    assert!(
-        matches!(graph.effective_type("M.T.S.value"), Some(TypeInfo::Text { max_length }) if max_length == "4")
+        Status::Rejected,
+        Some("ILI-TOPIC-ENCLOSING-NAME"),
     );
 }
 
@@ -2150,7 +2137,7 @@ fn topics_inherit_names_oids_and_direct_dependencies() {
             "TOPIC Shared=END Shared; TOPIC Extra=END Extra;
              TOPIC Base=BASKET OID AS INTERLIS.STANDARDOID; OID AS INTERLIS.I32OID; DEPENDS ON Shared;
              DOMAIN Label=TEXT*12; END Base;
-             TOPIC Child EXTENDS Base=DEPENDS ON Extra,Shared; CLASS Item=value:Label; END Item; END Child;",
+             TOPIC Child EXTENDS Base=DEPENDS ON Extra,M.Shared; CLASS Item=value:Label; END Item; END Child;",
         ),
         Status::CheckedSubset,
         None,
@@ -2174,6 +2161,30 @@ fn topics_inherit_names_oids_and_direct_dependencies() {
     assert_eq!(
         &input[origin.start_byte as usize..origin.end_byte as usize],
         "Shared"
+    );
+    let direct = child.declared_topic_dependencies();
+    assert_eq!(
+        direct
+            .iter()
+            .map(|dep| dep.declared_name())
+            .collect::<Vec<_>>(),
+        ["Extra", "M.Shared"]
+    );
+    let written = source.location(direct[1].source_span()).unwrap();
+    assert_eq!(
+        &input[written.start_byte as usize..written.end_byte as usize],
+        "M.Shared"
+    );
+    let wire: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+    let child_json = wire["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decl| decl["qualifiedName"] == "M.Child")
+        .unwrap();
+    assert_eq!(
+        child_json["declaredTopicDependencies"][1]["startByte"],
+        written.start_byte
     );
     assert_eq!(
         child
@@ -2244,6 +2255,10 @@ fn topic_inheritance_and_dependencies_reject_cycles_and_illegal_redefinitions() 
         (
             "TOPIC A (ABSTRACT)=CLASS C (ABSTRACT)=END C; END A; TOPIC B EXTENDS A=END B;",
             "ILI-TOPIC-ABSTRACT",
+        ),
+        (
+            "DOMAIN D=TEXT; TOPIC A=END A; TOPIC B EXTENDS A=DOMAIN D=BOOLEAN; END B;",
+            "ILI-TOPIC-ENCLOSING-NAME",
         ),
     ] {
         outcome(single(body), Status::Rejected, Some(code));
