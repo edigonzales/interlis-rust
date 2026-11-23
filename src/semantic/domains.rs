@@ -99,6 +99,16 @@ impl Analyzer<'_, '_> {
             if !self.step(crs.value.len(), &crs.span) {
                 return None;
             }
+            if !crs.value.strip_prefix("EPSG:").is_some_and(|code| {
+                !code.is_empty() && code.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                self.diagnostics.push(
+                    "ILI-COORD-REFSYS",
+                    "Coordinate reference system must match EPSG:PosNumber",
+                    Some(crs.span.clone()),
+                );
+                return None;
+            }
             Some(crs.value.clone())
         } else {
             None

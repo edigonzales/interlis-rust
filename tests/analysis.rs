@@ -29,6 +29,34 @@ fn request(sources: Vec<(&str, String)>) -> CompileRequest {
 }
 
 #[test]
+fn coordinate_reference_system_requires_the_epsg_lexical_form() {
+    let input = single("DOMAIN P=COORD 0..1,0..1 REFSYS \"EPSG:0\";");
+    outcome(input, Status::CheckedSubset, None);
+    for code in ["", "bogus", "EPSG:", "epsg:2056", "EPSG:-1", "EPSG:1.5"] {
+        let value = format!("\"{code}\"");
+        let report = outcome(
+            single(&format!("DOMAIN P=COORD 0..1,0..1 REFSYS {value};")),
+            Status::Rejected,
+            Some("ILI-COORD-REFSYS"),
+        );
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "ILI-COORD-REFSYS")
+            .unwrap();
+        let sources = report.sources();
+        let location = sources
+            .location(diagnostic.primary.as_ref().unwrap())
+            .unwrap();
+        let source = &sources.files()[0].text();
+        assert_eq!(
+            &source[location.start_byte as usize..location.end_byte as usize],
+            value
+        );
+    }
+}
+
+#[test]
 fn scalar_types_keep_bounds_families_and_predefined_origins() {
     let body = "DOMAIN Unbounded=TEXT; Long=MTEXT; Bounded=MTEXT*9007199254740993; Identifier=NAME; Link=URI; Horizontal=HALIGNMENT; Vertical=VALIGNMENT; Xml=BLACKBOX XML; Binary=BLACKBOX BINARY; STRUCTURE S=day:INTERLIS.XMLDate; END S;";
     for (version, language) in [("2.3", LanguageVersion::V23), ("2.4", LanguageVersion::V24)] {
