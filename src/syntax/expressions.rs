@@ -515,9 +515,15 @@ impl Parser<'_> {
     pub(super) fn derivations(&mut self) -> Parsed<Vec<ExprId>> {
         let mut out = vec![];
         if self.take(":=") {
-            out.push(self.expression()?);
-            while self.take(",") {
-                out.push(self.expression()?);
+            loop {
+                out.push(if self.language == Language::V23 {
+                    self.factor()?
+                } else {
+                    self.expression()?
+                });
+                if !self.take(",") {
+                    break;
+                }
             }
         }
         Ok(out)
@@ -1244,6 +1250,29 @@ mod tests {
             panic!()
         };
         assert_eq!(derivations.len(), 2);
+    }
+    #[test]
+    fn typed_attribute_derivations_follow_the_language_edition() {
+        for (owner, end) in [
+            ("CLASS C=", "END C;"),
+            ("ASSOCIATION A=r--C; s--C;", "END A;"),
+        ] {
+            for value in ["b AND c", "b == c", "DEFINED(b)", "NOT(b)", "(b)"] {
+                let body = format!("TOPIC T={owner} a:BOOLEAN := #true, {value}; {end} END T;");
+                let (_, _, diagnostics) = parse_body("2.3", &body, Limits::default());
+                assert!(diagnostics.syntax_invalid, "2.3 accepted {body}");
+                clean("2.4", &body);
+            }
+            let body = format!("TOPIC T={owner} a:BOOLEAN := #true, f(b AND c); {end} END T;");
+            for edition in ["2.3", "2.4"] {
+                let (_, document) = clean(edition, &body);
+                assert!(document.expressions.iter().any(|expression| matches!(
+                    &expression.kind,
+                    ExpressionKind::Call { arguments, .. }
+                        if matches!(expr(&document, arguments[0]).kind, ExpressionKind::Binary { .. })
+                )));
+            }
+        }
     }
     #[test]
     fn new_expression_semantics_never_claim_subset_success_or_resolve_unknown_functions() {
