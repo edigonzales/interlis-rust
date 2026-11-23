@@ -2593,3 +2593,70 @@ fn collection_extensions_check_order_cardinality_and_structure_targets() {
         outcome(single(body), Status::Rejected, Some(code));
     }
 }
+
+#[test]
+fn reference_attributes_bind_concrete_restrictions_and_topic_dependencies() {
+    let report = outcome(
+        single(
+            "TOPIC Targets=CLASS Base (ABSTRACT)=END Base; CLASS Chosen EXTENDS Base=NO OID; END Chosen; END Targets;
+             TOPIC Uses=DEPENDS ON Targets;
+                 STRUCTURE Link=object:REFERENCE TO (EXTERNAL) M.Targets.Base RESTRICTION (M.Targets.Chosen); END Link;
+                 CLASS Item=wrapped:Link; direct:REFERENCE TO (EXTERNAL) M.Targets.Chosen; END Item;
+             END Uses;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::Reference(reference)) = graph.effective_type("M.Uses.Link.object") else {
+        panic!("expected a bound reference");
+    };
+    assert!(reference.external);
+    assert_eq!(
+        reference.target.target.as_ref().unwrap().target_name(),
+        "M.Targets.Base"
+    );
+    assert_eq!(
+        reference.target.restrictions[0].target_name(),
+        "M.Targets.Chosen"
+    );
+}
+
+#[test]
+fn reference_attributes_check_direct_and_contained_scope() {
+    for (body, code) in [
+        (
+            "TOPIC Target=CLASS Obj=END Obj; END Target; TOPIC Uses=DEPENDS ON Target; STRUCTURE S=link:REFERENCE TO M.Target.Obj; END S; END Uses;",
+            "ILI-REFERENCE-EXTERNAL",
+        ),
+        (
+            "TOPIC Target=CLASS Obj=END Obj; END Target; TOPIC Uses=STRUCTURE S=link:REFERENCE TO (EXTERNAL) M.Target.Obj; END S; END Uses;",
+            "ILI-REFERENCE-DEPENDS-ON",
+        ),
+        (
+            "TOPIC Target=CLASS Obj=END Obj; END Target; STRUCTURE Wrapper=link:REFERENCE TO M.Target.Obj; END Wrapper; TOPIC Uses=DEPENDS ON Target; CLASS C=wrapper:Wrapper; END C; END Uses;",
+            "ILI-REFERENCE-EXTERNAL",
+        ),
+        (
+            "TOPIC T=CLASS A=END A; CLASS B=END B; STRUCTURE S=link:REFERENCE TO A RESTRICTION (B); END S; END T;",
+            "ILI-REFERENCE-RESTRICTION",
+        ),
+        (
+            "TOPIC T (ABSTRACT)=CLASS A (ABSTRACT)=END A; STRUCTURE S=link:REFERENCE TO A; END S; END T;",
+            "ILI-REFERENCE-ABSTRACT",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+    for body in [
+        "TOPIC T=CLASS A=END A; CLASS Owner=link:REFERENCE TO A; END Owner; END T;",
+        "TOPIC T=CLASS A=END A; STRUCTURE S=link:REFERENCE TO A; END S; STRUCTURE Wrapper=member:S; END Wrapper; CLASS Owner EXTENDS Wrapper=END Owner; END T;",
+    ] {
+        let text = format!("INTERLIS 2.3; MODEL M AT \"x\" VERSION \"1\" = {body} END M.");
+        outcome(
+            request(vec![("reference-edition", text)]),
+            Status::Rejected,
+            Some("ILI-REFERENCE-ATTRIBUTE-SCOPE"),
+        );
+    }
+}

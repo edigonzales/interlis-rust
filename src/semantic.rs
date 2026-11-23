@@ -2,6 +2,7 @@ mod collections;
 mod domains;
 mod enumeration;
 mod names;
+mod object_references;
 mod oid;
 mod references;
 mod topics;
@@ -127,12 +128,11 @@ fn supported_type(ty: &TypeSyntax) -> bool {
             _ => true,
         },
         TypeSyntax::Collection { element, .. } => supported_type(element),
-        TypeSyntax::RestrictedStructure { .. } => true,
+        TypeSyntax::RestrictedStructure { .. } | TypeSyntax::Reference { .. } => true,
         TypeSyntax::Formatted { .. }
         | TypeSyntax::Geometry(_)
         | TypeSyntax::ClassValue { .. }
-        | TypeSyntax::AttributePathValue { .. }
-        | TypeSyntax::Reference { .. } => false,
+        | TypeSyntax::AttributePathValue { .. } => false,
     }
 }
 
@@ -1498,6 +1498,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 restrictions,
                 ..
             } => TypeInfo::Structure(self.restricted_structure(owner, target, restrictions)?),
+            TypeSyntax::Reference {
+                properties, target, ..
+            } => TypeInfo::Reference(self.reference_type(owner, properties, target)?),
             TypeSyntax::Collection {
                 kind,
                 cardinality,
@@ -1525,8 +1528,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Formatted { .. }
             | TypeSyntax::Geometry(_)
             | TypeSyntax::ClassValue { .. }
-            | TypeSyntax::AttributePathValue { .. }
-            | TypeSyntax::Reference { .. } => {
+            | TypeSyntax::AttributePathValue { .. } => {
                 unreachable!("unsupported type semantics checked before indexing")
             }
         };
@@ -1798,6 +1800,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for id in attributes {
             self.bind_attribute(id)?;
         }
+        self.validate_reference_types(&viewables)?;
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind != Kind::RuntimeParameter {
                 continue;

@@ -44,25 +44,7 @@ impl Analyzer<'_, '_> {
             .iter()
             .map(|link| self.names[link.target_name()])
             .collect();
-        if base.is_empty() {
-            return Some(true);
-        }
-        for candidate in &own {
-            let mut matches = false;
-            for &target in &base {
-                if !self.step(1, span) {
-                    return None;
-                }
-                if self.specializes_symbol(*candidate, target, span)? {
-                    matches = true;
-                    break;
-                }
-            }
-            if !matches {
-                return Some(false);
-            }
-        }
-        Some(!own.is_empty())
+        self.targets_specialize(&own, &base, span)
     }
     pub(super) fn effective_cardinality(
         &mut self,
@@ -221,8 +203,12 @@ impl Analyzer<'_, '_> {
                 continue;
             }
             let parent = declaration.parent;
+            let locally_visible = match (scope, parent) {
+                (Some(scope), Some(parent)) => self.specializes_symbol(scope, parent, span)?,
+                _ => scope == parent,
+            };
             for &base in &candidates {
-                if (parent == scope || parent == self.symbols[base].declaration.parent)
+                if (locally_visible || parent == self.symbols[base].declaration.parent)
                     && self.specializes_symbol(id, base, span)?
                 {
                     return Some(true);

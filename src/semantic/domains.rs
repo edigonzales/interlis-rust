@@ -218,6 +218,20 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
+        if matches!(self.types[own_id], TypeInfo::Reference(_))
+            || matches!(self.types[base_id], TypeInfo::Reference(_))
+        {
+            if self.reference_specializes(own_id, base_id, leaf.span())? {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-REFERENCE-EXTENSION",
+                "A reference override must restrict the inherited targets and external access",
+                leaf.span(),
+            );
+            return None;
+        }
         let inline = !matches!(leaf, TypeSyntax::Named(_));
         if !inline {
             let nominal = self.check_nominal_domain(owner, leaf.span())?;

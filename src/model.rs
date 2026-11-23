@@ -127,6 +127,7 @@ pub enum TypeInfo {
     Oid(OidType),
     Structure(StructureType),
     Collection(CollectionType),
+    Reference(ReferenceType),
 }
 
 impl TypeInfo {
@@ -175,6 +176,18 @@ pub struct CollectionType {
 pub struct StructureType {
     pub target: Option<TypeReference>,
     pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ObjectTarget {
+    pub target: Option<TypeReference>,
+    pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReferenceType {
+    pub external: bool,
+    pub target: ObjectTarget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

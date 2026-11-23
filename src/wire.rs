@@ -507,6 +507,10 @@ impl Serialize for TypeOutput<'_> {
                 cardinality: &'a crate::Cardinality,
                 element: TypeOutput<'a>,
             },
+            Reference {
+                external: bool,
+                target: &'a crate::ObjectTarget,
+            },
         }
         match self.0 {
             TypeInfo::Text { max_length } => Type::Text {
@@ -582,6 +586,11 @@ impl Serialize for TypeOutput<'_> {
                 collection_kind: collection.kind,
                 cardinality: &collection.cardinality,
                 element: TypeOutput(&self.1.types[collection.element], self.1),
+            }
+            .serialize(serializer),
+            TypeInfo::Reference(reference) => Type::Reference {
+                external: reference.external,
+                target: &reference.target,
             }
             .serialize(serializer),
         }
