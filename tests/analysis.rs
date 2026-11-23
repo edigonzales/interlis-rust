@@ -2660,3 +2660,119 @@ fn reference_attributes_check_direct_and_contained_scope() {
         );
     }
 }
+
+#[test]
+fn association_roles_preserve_effective_order_targets_strength_and_cardinality() {
+    use interlis::RoleStrength;
+    let report = outcome(
+        single(
+            "TOPIC T=
+                CLASS Part=END Part; CLASS Specific EXTENDS Part=END Specific; CLASS Whole=END Whole;
+                ASSOCIATION Link (OID)=
+                    parts (ORDERED) -- {1..*} Part;
+                    whole -<#> Whole;
+                    label:TEXT*40;
+                    CARDINALITY={0..2};
+                END Link;
+                ASSOCIATION Narrow EXTENDS Link=
+                    parts (EXTENDED,ORDERED) -- Specific;
+                    label (EXTENDED):TEXT*10;
+                END Narrow;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let association = graph
+        .declaration("M.T.Narrow")
+        .unwrap()
+        .association()
+        .unwrap();
+    assert!(association.identified);
+    assert_eq!(association.cardinality.upper.as_deref(), Some("2"));
+    let roles = graph
+        .effective_roles("M.T.Narrow")
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles
+            .iter()
+            .map(|role| role.qualified_name())
+            .collect::<Vec<_>>(),
+        ["M.T.Narrow.parts", "M.T.Link.whole"]
+    );
+    assert_eq!(
+        roles[0].base_reference().unwrap().target_name(),
+        "M.T.Link.parts"
+    );
+    let parts = roles[0].role().unwrap();
+    assert!(parts.ordered);
+    assert_eq!(parts.cardinality.lower, "1");
+    assert_eq!(
+        parts.targets[0].target.as_ref().unwrap().target_name(),
+        "M.T.Specific"
+    );
+    let whole = roles[1].role().unwrap();
+    assert_eq!(whole.strength, RoleStrength::Composition);
+    assert_eq!(whole.cardinality.upper.as_deref(), Some("1"));
+    assert_eq!(
+        graph
+            .effective_attributes("M.T.Narrow")
+            .unwrap()
+            .next()
+            .unwrap()
+            .qualified_name(),
+        "M.T.Narrow.label"
+    );
+}
+
+#[test]
+fn associations_reject_invalid_roles_and_access_collisions() {
+    let prefix = "TOPIC T=CLASS A=END A; CLASS B=END B; CLASS C EXTENDS A=END C;";
+    for (declarations, code) in [
+        ("ASSOCIATION Link=END Link;", "ILI-ASSOCIATION-ROLES"),
+        (
+            "ASSOCIATION Link=x -<#> {2} A; y -- B; END Link;",
+            "ILI-ROLE-COMPOSITION-CARDINALITY",
+        ),
+        (
+            "ASSOCIATION Link=x -<> A; y -<> B; END Link;",
+            "ILI-ASSOCIATION-AGGREGATION",
+        ),
+        (
+            "ASSOCIATION Link=x -- A OR C; y -- B; END Link;",
+            "ILI-ROLE-ALTERNATIVES",
+        ),
+        (
+            "ASSOCIATION Link=x -- A; y -- B; CARDINALITY={0..2}; END Link;",
+            "ILI-ASSOCIATION-OID",
+        ),
+        (
+            "ASSOCIATION Link=x -- A; y -- B; END Link; ASSOCIATION Other=x -- Link; y -- B; END Other;",
+            "ILI-ROLE-ASSOCIATION-OID",
+        ),
+        (
+            "ASSOCIATION Link=x -- A; y -- B; END Link; ASSOCIATION Other=x -- C; y -- B; END Other;",
+            "ILI-ROLE-NAMESPACE",
+        ),
+        (
+            "ASSOCIATION Link=x -- A; y -- B; END Link; ASSOCIATION Other EXTENDS Link=z (EXTENDED) -- B; END Other;",
+            "ILI-ASSOCIATION-ROLE",
+        ),
+        (
+            "ASSOCIATION Link=x -- {1..2} A; y -- B; END Link; ASSOCIATION Other EXTENDS Link=x (EXTENDED) -- {0..3} C; END Other;",
+            "ILI-ROLE-EXTENSION",
+        ),
+        (
+            "ASSOCIATION Link=x -- A; y -- B; END Link; ASSOCIATION Other EXTENDS Link=x (EXTENDED,HIDING) -- C; END Other; ASSOCIATION Third EXTENDS Link=x (EXTENDED) -- C; END Third;",
+            "ILI-ROLE-HIDING",
+        ),
+    ] {
+        outcome(
+            single(&format!("{prefix}{declarations} END T;")),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}

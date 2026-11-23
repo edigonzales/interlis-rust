@@ -15,17 +15,18 @@ impl Analyzer<'_, '_> {
             self.store_oid_rules(id, OidRules { basket, object })?;
         }
         for &id in viewables {
-            let Some(SyntaxDecl::Container {
-                kind: syntax::ContainerKind::Class,
-                oid,
-                ..
-            }) = self.symbols[id].ast
-            else {
-                continue;
+            let oid = match self.symbols[id].ast {
+                Some(SyntaxDecl::Container {
+                    kind: syntax::ContainerKind::Class,
+                    oid,
+                    ..
+                }) => oid,
+                Some(SyntaxDecl::Association(association)) => &association.oid,
+                _ => continue,
             };
-            let class_base = self.symbols[id]
-                .base_scope
-                .filter(|&base| self.symbols[base].declaration.kind == Kind::Class);
+            let class_base = self.symbols[id].base_scope.filter(|&base| {
+                self.symbols[base].declaration.kind == self.symbols[id].declaration.kind
+            });
             let object = match oid {
                 syntax::OidRule::None(span) => Some(OidRule {
                     kind: OidKind::Unstable,

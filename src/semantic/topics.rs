@@ -172,6 +172,9 @@ impl Analyzer<'_, '_> {
             if let Some(model) = self.symbols[parent].declaration.parent
                 && let Some(outer) = self.visible_name(model, &name, None, &location).ok()?
                 && !(outer == parent && kind == Kind::Class)
+                && !(kind == Kind::Association
+                    && self.symbols[outer].declaration.kind == Kind::Domain
+                    && self.models[self.symbols[id].model].language == crate::LanguageVersion::V24)
             {
                 self.diagnostics.push_related(
                     "ILI-TOPIC-ENCLOSING-NAME",
@@ -190,10 +193,11 @@ impl Analyzer<'_, '_> {
             let inherited = self.visible_name(base, &name, None, &location).ok()?;
             if let Some(inherited) = inherited
                 && !(self.symbols[id].base_scope == Some(inherited)
-                    && matches!(
-                        self.symbols[id].ast,
-                        Some(SyntaxDecl::Container { base: None, .. })
-                    ))
+                    && match self.symbols[id].ast {
+                        Some(SyntaxDecl::Container { base, .. }) => base.is_none(),
+                        Some(SyntaxDecl::Association(association)) => association.base.is_none(),
+                        _ => false,
+                    })
             {
                 self.diagnostics.push_related(
                     "ILI-TOPIC-INHERITED-NAME",

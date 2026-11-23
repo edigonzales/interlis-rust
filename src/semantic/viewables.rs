@@ -10,14 +10,14 @@ impl Analyzer<'_, '_> {
         let mut explicit = BTreeSet::new();
         let mut implicit = Vec::new();
         for id in 0..self.symbols.len() {
-            let Some(SyntaxDecl::Container {
-                name,
-                base,
-                properties,
-                ..
-            }) = self.symbols[id].ast
-            else {
-                continue;
+            let (base, properties) = match self.symbols[id].ast {
+                Some(SyntaxDecl::Container {
+                    base, properties, ..
+                }) => (base, properties),
+                Some(SyntaxDecl::Association(association)) => {
+                    (&association.base, &association.properties)
+                }
+                _ => continue,
             };
             viewables.push(id);
             let extension = properties
@@ -40,6 +40,10 @@ impl Analyzer<'_, '_> {
                     binding
                 }
                 (None, Some(property)) => {
+                    let name = syntax::Name {
+                        value: self.symbols[id].declaration.name.clone(),
+                        span: self.symbols[id].name_span.clone(),
+                    };
                     let inherited = match self.symbols[parent].base_scope {
                         Some(base) => self
                             .visible_name(base, &name.value, Some(&[kind]), &property.span)
@@ -57,7 +61,7 @@ impl Analyzer<'_, '_> {
                     implicit.push((parent, inherited, property.span.clone()));
                     (
                         inherited,
-                        self.implicit_base_reference(id, inherited, name)?,
+                        self.implicit_base_reference(id, inherited, &name)?,
                     )
                 }
                 (None, None) => continue,
@@ -65,7 +69,7 @@ impl Analyzer<'_, '_> {
             if self.symbols[binding.0].declaration.is_final() {
                 self.diagnostics.push(
                     "ILI-CLASS-FINAL",
-                    "A FINAL class or structure cannot be extended",
+                    "A FINAL class, structure or association cannot be extended",
                     Some(binding.1.span.clone()),
                 );
                 return None;
@@ -100,10 +104,10 @@ impl Analyzer<'_, '_> {
         name: &QualifiedName,
         kind: Kind,
     ) -> Option<(usize, TypeReference)> {
-        let kinds = if kind == Kind::Class {
-            &[Kind::Class, Kind::Structure][..]
-        } else {
-            &[Kind::Structure]
+        let kinds = match kind {
+            Kind::Class => &[Kind::Class, Kind::Structure][..],
+            Kind::Association => &[Kind::Association],
+            _ => &[Kind::Structure],
         };
         match self.lookup_name(owner, &name.segments, &name.span, kinds) {
             Ok(bound @ BoundName::Declared(id)) => {
@@ -121,7 +125,7 @@ impl Analyzer<'_, '_> {
             Err(_) => {
                 self.diagnostics.push(
                     "ILI-NAME-NOT-FOUND",
-                    "Class or structure base cannot be resolved",
+                    "Class, structure or association base cannot be resolved",
                     Some(name.span.clone()),
                 );
                 None
@@ -345,10 +349,11 @@ impl Analyzer<'_, '_> {
             && !type_requires_value
             && self.symbols[owner].declaration.declared_mandatory() != Some(true)
         {
-            self.diagnostics.push(
+            self.report_type_override(
+                owner,
                 "ILI-ATTRIBUTE-CARDINALITY",
                 "An override cannot make a mandatory attribute optional",
-                Some(span.clone()),
+                span,
             );
             return false;
         }

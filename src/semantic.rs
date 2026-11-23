@@ -1,3 +1,4 @@
+mod associations;
 mod collections;
 mod domains;
 mod enumeration;
@@ -63,7 +64,8 @@ impl<'a> Symbol<'a> {
                 base, properties, ..
             }) => self.base_scope.is_none() && (base.is_some() || extended(properties)),
             Some(SyntaxDecl::Association(a)) => {
-                a.base.is_some() || a.derived_from.is_some() || extended(&a.properties)
+                self.base_scope.is_none()
+                    && (a.base.is_some() || a.derived_from.is_some() || extended(&a.properties))
             }
             Some(SyntaxDecl::MetadataBasket(b)) => b.base.is_some(),
             Some(SyntaxDecl::Graphic(g)) => g.base.is_some() || extended(&g.properties),
@@ -280,7 +282,19 @@ fn ensure_supported_semantics(
                 SyntaxDecl::LineForm(form) => Some(&form.span),
                 SyntaxDecl::Function(function) => Some(&function.span),
                 SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
-                SyntaxDecl::Association(association) => Some(&association.span),
+                SyntaxDecl::Association(association) => {
+                    if association.derived_from.is_some()
+                        || !association.constraints.is_empty()
+                        || association
+                            .roles
+                            .iter()
+                            .any(|role| role.derivation.is_some())
+                    {
+                        Some(&association.span)
+                    } else {
+                        declarations(&association.attributes, work, diagnostics)
+                    }
+                }
                 SyntaxDecl::Context(context) => Some(&context.span),
                 SyntaxDecl::View(view) => Some(&view.span),
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
@@ -470,6 +484,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 oids: None,
                 topic_dependencies: None,
                 effective_attributes: None,
+                association: None,
+                role: None,
             },
             name_span: name.span.clone(),
             model,
@@ -979,6 +995,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         };
                         &implicit
                     } else {
+                        self.diagnostics.push(
+                            "ILI-ASSOCIATION-ROLES",
+                            "An anonymous association needs roles from which to form its name",
+                            Some(association.span.clone()),
+                        );
                         continue;
                     };
                     if let Some(id) = self.add(
@@ -989,8 +1010,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         None,
                     ) {
+                        self.index_abstract_final(id, &association.properties);
                         for role in &association.roles {
-                            self.add(Kind::Role, &role.name, &role.span, Some(id), model, None);
+                            if let Some(role_id) =
+                                self.add(Kind::Role, &role.name, &role.span, Some(id), model, None)
+                            {
+                                self.index_abstract_final(role_id, &role.properties);
+                            }
                         }
                         self.index_declarations(id, model, &association.attributes);
                     }
@@ -1796,11 +1822,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         self.bind_oid_rules(&topics, &viewables)?;
+        self.bind_associations(&viewables)?;
         let attributes = self.bind_effective_attributes(&viewables)?;
         for id in attributes {
             self.bind_attribute(id)?;
         }
         self.validate_reference_types(&viewables)?;
+        self.check_role_names(&viewables)?;
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind != Kind::RuntimeParameter {
                 continue;

@@ -203,6 +203,25 @@ impl Analyzer<'_, '_> {
         {
             return Some(());
         }
+        for ty in &self.types {
+            if let TypeInfo::Reference(reference) = ty {
+                for link in object_targets(&reference.target) {
+                    let target = self.names[link.target_name()];
+                    if self.symbols[target]
+                        .declaration
+                        .association()
+                        .is_some_and(|association| !association.identified)
+                    {
+                        self.diagnostics.push(
+                            "ILI-REFERENCE-ASSOCIATION-OID",
+                            "A referenced association requires its own identity",
+                            Some(link.span.clone()),
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
         for &owner in viewables {
             let topic = self.containing_topic(owner);
             let span = self.symbols[owner].name_span.clone();
@@ -214,7 +233,9 @@ impl Analyzer<'_, '_> {
             if owner_is_class_23 && let Some(base) = inherited_structure {
                 self.validate_contained_references(base, topic, &span, true)?;
             }
-            self.validate_contained_references(owner, topic, &span, false)?;
+            if topic.is_some() {
+                self.validate_contained_references(owner, topic, &span, false)?;
+            }
         }
         Some(())
     }

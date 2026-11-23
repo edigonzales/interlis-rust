@@ -1,5 +1,6 @@
 //! Model/container/relationship syntax. References remain unresolved source names.
 use super::*;
+use crate::RoleStrength;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -9,7 +10,7 @@ pub(crate) enum ModelKind {
     RefSystem,
     Symbology,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Property {
     Abstract,
     Extended,
@@ -91,12 +92,6 @@ pub(crate) struct RestrictedTarget {
     pub target: TargetRef,
     pub restrictions: Vec<QualifiedName>,
     pub span: Span,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RoleStrength {
-    Association,
-    Aggregation,
-    Composition,
 }
 #[derive(Debug)]
 #[allow(dead_code)] // Preserve complete syntax while its semantics remain unimplemented.
@@ -1328,7 +1323,6 @@ mod tests {
             "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
             "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
             "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
-            "TOPIC T=CLASS C=END C; ASSOCIATION = a -- C; b -- C; END; END T;",
             "DOMAIN G=COORD NUMERIC,NUMERIC; D=COORD 0..1,0..1; CONTEXT C=G=D;",
             "PARAMETER p:MANDATORY;",
         ] {

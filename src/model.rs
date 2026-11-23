@@ -190,6 +190,31 @@ pub struct ReferenceType {
     pub target: ObjectTarget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleStrength {
+    Association,
+    Aggregation,
+    Composition,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleInfo {
+    pub strength: RoleStrength,
+    pub cardinality: Cardinality,
+    pub ordered: bool,
+    pub external: bool,
+    pub hiding: bool,
+    pub targets: Vec<ObjectTarget>,
+}
+
+#[derive(Debug)]
+pub struct AssociationInfo {
+    pub cardinality: Cardinality,
+    pub identified: bool,
+    pub(crate) roles: Box<[usize]>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OidKind {
@@ -445,6 +470,8 @@ pub struct Declaration {
     pub(crate) oids: Option<Box<OidRules>>,
     pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
     pub(crate) effective_attributes: Option<Box<[usize]>>,
+    pub(crate) association: Option<Box<AssociationInfo>>,
+    pub(crate) role: Option<Box<RoleInfo>>,
 }
 impl Declaration {
     pub fn name(&self) -> &str {
@@ -495,6 +522,12 @@ impl Declaration {
             .as_ref()
             .map_or(&[], |links| &links.declared)
     }
+    pub fn association(&self) -> Option<&AssociationInfo> {
+        self.association.as_deref()
+    }
+    pub fn role(&self) -> Option<&RoleInfo> {
+        self.role.as_deref()
+    }
 }
 /// Read-only ordered data. Constructed only after all declared subset checks pass.
 #[derive(Debug)]
@@ -528,6 +561,7 @@ impl ModelGraph {
                 | DeclarationKind::Topic
                 | DeclarationKind::Class
                 | DeclarationKind::Structure
+                | DeclarationKind::Association
         ) {
             return None;
         }
@@ -555,7 +589,7 @@ impl ModelGraph {
         let declaration = self.declaration(name)?;
         if !matches!(
             declaration.kind,
-            DeclarationKind::Class | DeclarationKind::Structure
+            DeclarationKind::Class | DeclarationKind::Structure | DeclarationKind::Association
         ) {
             return None;
         }
@@ -567,6 +601,10 @@ impl ModelGraph {
                 .iter()
                 .map(|&id| &self.declarations[id]),
         )
+    }
+    pub fn effective_roles(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        let association = self.declaration(name)?.association()?;
+        Some(association.roles.iter().map(|&id| &self.declarations[id]))
     }
 
     /// Looks up a runtime parameter by its qualified name in the member namespace.

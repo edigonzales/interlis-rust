@@ -315,6 +315,12 @@ impl Serialize for DeclarationsOutput<'_> {
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
+        #[derive(Serialize)]
+        struct Association<'a> {
+            cardinality: &'a crate::Cardinality,
+            identified: bool,
+            roles: Vec<&'a str>,
+        }
         fn project_reference<'a>(
             r: &'a crate::TypeReference,
             sources: &SourceSet,
@@ -352,6 +358,10 @@ impl Serialize for DeclarationsOutput<'_> {
             declared_topic_dependencies: Vec<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             effective_attributes: Option<Vec<&'a str>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            association: Option<Association<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            role: Option<&'a crate::RoleInfo>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -394,6 +404,16 @@ impl Serialize for DeclarationsOutput<'_> {
                         .map(|&id| self.graph.declarations()[id].qualified_name())
                         .collect()
                 }),
+                association: declaration.association().map(|association| Association {
+                    cardinality: &association.cardinality,
+                    identified: association.identified,
+                    roles: association
+                        .roles
+                        .iter()
+                        .map(|&role| self.graph.declarations()[role].qualified_name())
+                        .collect(),
+                }),
+                role: declaration.role(),
                 location: self.sources.location(declaration.source_span()),
             })?;
         }

@@ -358,7 +358,7 @@ impl Analyzer<'_, '_> {
         None
     }
 
-    fn report_type_override(
+    pub(super) fn report_type_override(
         &mut self,
         owner: usize,
         code: &str,

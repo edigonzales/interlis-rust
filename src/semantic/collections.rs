@@ -230,3 +230,13 @@ pub(super) fn structure_targets(structure: &StructureType) -> &[TypeReference] {
 pub(super) fn compare_count(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
+
+pub(super) fn cardinality_narrows(actual: &Cardinality, base: &Cardinality) -> bool {
+    compare_count(&actual.lower, &base.lower) != Ordering::Less
+        && base.upper.as_ref().is_none_or(|maximum| {
+            actual
+                .upper
+                .as_ref()
+                .is_some_and(|actual| compare_count(actual, maximum) != Ordering::Greater)
+        })
+}
