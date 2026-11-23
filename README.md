@@ -9,9 +9,9 @@ The syntax report uses `validationScope: "syntax"` and `fullValidation: false`.
 Its statuses in descending priority are `limit_exceeded`, `invalid`,
 `unsupported_version`, and `parsed`. JSON includes document and model summaries
 only for `parsed`. A header-only file has an empty `models` list. A model summary
-contains `name`, `kind`, `version`, and original source positions. Each document
-uses the language version in its own header. Imports and names are resolved by
-model analysis.
+contains `name`, `kind`, `version`, and original source positions. The `kind`
+values are `data`, `type`, `refsystem`, and `symbology`. Each document uses the
+language version in its own header. Name and import binding belong to model analysis.
 
 The current subset includes simple data-model headers, ordinary explicit imports,
 topics, classes within topics, structures, bounded TEXT/BOOLEAN/numeric domains
