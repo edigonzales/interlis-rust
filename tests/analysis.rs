@@ -967,6 +967,20 @@ fn association_names_have_matching_opening_and_closing_presence() {
 }
 
 #[test]
+fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
+    for language in ["2.3", "2.4"] {
+        let text = format!(
+            "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S; DOMAIN KindOfViewable=CLASS RESTRICTION (S); TOPIC T=CLASS C=END C; VIEW V PROJECTION OF C; = END V; END T; DOMAIN KindOfStructure=STRUCTURE RESTRICTION (M.T.C); FUNCTION f(x:OBJECTS OF M.T.V):BOOLEAN; END M."
+        );
+        outcome(
+            request(vec![("class-values", text)]),
+            Status::Incomplete,
+            Some("ILI-UNSUPPORTED"),
+        );
+    }
+}
+
+#[test]
 fn same_model_domain_references_require_prior_definition() {
     for body in [
         "STRUCTURE S=value:Later; END S; DOMAIN Later=TEXT*4;",

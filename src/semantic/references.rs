@@ -12,6 +12,7 @@ const VALUE_TYPE: &[Kind] = &[Kind::Domain, Kind::Structure];
 const CLASS_BASE: &[Kind] = &[Kind::Class, Kind::Structure];
 const VIEWABLE: &[Kind] = &[Kind::Class, Kind::Structure, Kind::Association, Kind::View];
 const ROLE_TARGET: &[Kind] = &[Kind::Class, Kind::Association];
+const OBJECTS_TARGET: &[Kind] = &[Kind::Class, Kind::Association, Kind::View];
 
 impl Analyzer<'_, '_> {
     pub(super) fn check_direct_references(&mut self) {
@@ -71,7 +72,7 @@ impl Analyzer<'_, '_> {
                     }
                     self.check_oid(owner, &a.oid);
                     for target in a.roles.iter().flat_map(|role| &role.targets) {
-                        self.check_targets(owner, target);
+                        self.check_targets(owner, target, ROLE_TARGET);
                     }
                 }
                 Declaration::Unit(u) => {
@@ -107,7 +108,7 @@ impl Analyzer<'_, '_> {
                         match signature {
                             ArgumentType::Attribute(t) => self.check_type(owner, t.ty.as_ref()),
                             ArgumentType::Objects { target, .. } => {
-                                self.check_targets(owner, target)
+                                self.check_targets(owner, target, OBJECTS_TARGET)
                             }
                             ArgumentType::EnumValue(_) | ArgumentType::EnumTreeValue(_) => {}
                         }
@@ -213,14 +214,16 @@ impl Analyzer<'_, '_> {
                 kind, restrictions, ..
             }) => {
                 let kinds = match kind {
-                    ClassValueKind::Class => ROLE_TARGET,
-                    ClassValueKind::Structure => &[Kind::Structure],
+                    ClassValueKind::Class => VIEWABLE,
+                    ClassValueKind::Structure => CLASS_BASE,
                 };
                 for name in restrictions {
                     self.require_name(owner, name, kinds);
                 }
             }
-            Some(TypeSyntax::Reference { target, .. }) => self.check_targets(owner, target),
+            Some(TypeSyntax::Reference { target, .. }) => {
+                self.check_targets(owner, target, ROLE_TARGET)
+            }
             Some(TypeSyntax::Collection { element, .. }) => self.check_type(owner, Some(element)),
             Some(TypeSyntax::RestrictedStructure {
                 target,
@@ -250,9 +253,9 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn check_targets(&mut self, owner: usize, target: &RestrictedTarget) {
+    fn check_targets(&mut self, owner: usize, target: &RestrictedTarget, kinds: &[Kind]) {
         if let TargetRef::Named(name) = &target.target {
-            self.require_name(owner, name, ROLE_TARGET);
+            self.require_name(owner, name, kinds);
         }
         for restriction in &target.restrictions {
             self.require_name(owner, restriction, ROLE_TARGET);
