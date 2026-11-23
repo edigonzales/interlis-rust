@@ -286,7 +286,8 @@ impl Analyzer<'_, '_> {
         let lookup = self.lookup_name(owner, parts, span, kinds);
         match lookup {
             Ok(BoundName::Declared(id)) => {
-                if self.symbols[id].declaration.kind == Kind::Domain
+                if kinds == VALUE_TYPE
+                    && self.symbols[id].declaration.kind == Kind::Domain
                     && self.symbols[owner].declaration.kind != Kind::Domain
                 {
                     self.check_domain_order(owner, id, span);
