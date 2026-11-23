@@ -1,6 +1,8 @@
-use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl};
+use super::{
+    Analyzer, BoundName, Effective, Kind, LookupError, QualifiedName, SyntaxDecl, TypeSyntax,
+};
 use crate::{RelatedLocation, TypeReference, syntax};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_viewable_bases(&mut self) -> Option<Vec<usize>> {
@@ -52,17 +54,10 @@ impl Analyzer<'_, '_> {
                         );
                         return None;
                     };
-                    let original = QualifiedName {
-                        segments: vec![syntax::Name {
-                            value: name.value.clone(),
-                            span: name.span.clone(),
-                        }],
-                        span: name.span.clone(),
-                    };
                     implicit.push((parent, inherited, property.span.clone()));
                     (
                         inherited,
-                        self.bound_reference(id, &original, BoundName::Declared(inherited))?,
+                        self.implicit_base_reference(id, inherited, name)?,
                     )
                 }
                 (None, None) => continue,
@@ -80,14 +75,20 @@ impl Analyzer<'_, '_> {
         }
         let order = self.inheritance_order(viewables, "ILI-CLASS-CYCLE")?;
         for (owner, base, span) in implicit {
-            let base_topic = self.symbols[base].declaration.parent?;
-            if explicit.contains(&(owner, base)) || explicit.contains(&(base_topic, base)) {
-                self.diagnostics.push(
-                    "ILI-CLASS-EXTENDED-CONFLICT",
-                    "An EXTENDED declaration conflicts with an explicit specialization of the same base",
-                    Some(span),
-                );
-                return None;
+            let mut topic = Some(owner);
+            while let Some(id) = topic {
+                if !self.step(1, &span) {
+                    return None;
+                }
+                if explicit.contains(&(id, base)) {
+                    self.diagnostics.push(
+                        "ILI-CLASS-EXTENDED-CONFLICT",
+                        "An EXTENDED declaration conflicts with an explicit specialization of the same base",
+                        Some(span),
+                    );
+                    return None;
+                }
+                topic = self.symbols[id].base_scope;
             }
         }
         Some(order)
@@ -165,19 +166,26 @@ impl Analyzer<'_, '_> {
         Some(ordered)
     }
 
-    pub(super) fn bind_effective_attributes(&mut self, order: &[usize]) -> Option<()> {
+    pub(super) fn bind_effective_attributes(&mut self, order: &[usize]) -> Option<Vec<usize>> {
         let mut direct = vec![Vec::new(); self.symbols.len()];
         for (id, symbol) in self.symbols.iter().enumerate() {
             if symbol.declaration.kind == Kind::Attribute {
                 direct[symbol.declaration.parent?].push(id);
             }
         }
+        let mut declared = Vec::new();
         for &owner in order {
             let mut attributes = Vec::new();
             if let Some(base) = self.symbols[owner].base_scope {
                 let inherited = &self.symbols[base].declaration.effective_attributes;
                 let span = self.symbols[owner].name_span.clone();
-                if !self.step(inherited.as_ref().map_or(0, |members| members.len()), &span) {
+                let work = inherited
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&member| self.symbols[member].declaration.name.len() + 1)
+                    .sum();
+                if !self.step(work, &span) {
                     return None;
                 }
                 attributes.extend_from_slice(
@@ -188,35 +196,158 @@ impl Analyzer<'_, '_> {
                         .unwrap_or_default(),
                 );
             }
-            let inherited: BTreeSet<_> = attributes
+            let inherited: BTreeMap<_, _> = attributes
                 .iter()
-                .map(|&id| self.symbols[id].declaration.name.as_str())
+                .enumerate()
+                .map(|(index, &id)| (self.symbols[id].declaration.name.clone(), index))
                 .collect();
             for &attribute in &direct[owner] {
-                if inherited.contains(self.symbols[attribute].declaration.name.as_str()) {
-                    self.diagnostics.push_related(
-                        "ILI-ATTRIBUTE-OVERRIDE",
-                        "Overriding an inherited attribute requires EXTENDED",
-                        Some(self.symbols[attribute].name_span.clone()),
-                        vec![RelatedLocation {
-                            span: self.symbols[owner]
-                                .declaration
-                                .base_reference()
-                                .unwrap()
-                                .span
-                                .clone(),
-                            message: "Base class or structure".into(),
-                        }],
-                    );
-                    return None;
+                let Some(SyntaxDecl::Attribute {
+                    name, properties, ..
+                }) = self.symbols[attribute].ast
+                else {
+                    unreachable!("direct attributes have attribute syntax");
+                };
+                let extended = properties
+                    .iter()
+                    .any(|property| property.value == syntax::Property::Extended);
+                match inherited.get(&name.value) {
+                    Some(&position) => {
+                        let base = attributes[position];
+                        if !extended || self.symbols[base].declaration.is_final() {
+                            let message = if extended {
+                                "A FINAL attribute cannot be extended"
+                            } else {
+                                "Overriding an inherited attribute requires EXTENDED"
+                            };
+                            self.diagnostics.push_related(
+                                "ILI-ATTRIBUTE-OVERRIDE",
+                                message,
+                                Some(name.span.clone()),
+                                vec![RelatedLocation {
+                                    span: self.symbols[base].name_span.clone(),
+                                    message: "Base attribute".into(),
+                                }],
+                            );
+                            return None;
+                        }
+                        self.symbols[attribute].base_scope = Some(base);
+                        self.symbols[attribute].declaration.base_reference =
+                            Some(self.implicit_base_reference(attribute, base, name)?);
+                        attributes[position] = attribute;
+                    }
+                    None if extended => {
+                        self.diagnostics.push(
+                            "ILI-ATTRIBUTE-OVERRIDE",
+                            "EXTENDED requires an inherited attribute",
+                            Some(name.span.clone()),
+                        );
+                        return None;
+                    }
+                    None => attributes.push(attribute),
                 }
             }
-            attributes.extend_from_slice(&direct[owner]);
+            if !self.symbols[owner].declaration.is_abstract()
+                && let Some(attribute) = attributes
+                    .iter()
+                    .copied()
+                    .find(|&attribute| self.symbols[attribute].declaration.is_abstract())
+            {
+                self.diagnostics.push_related(
+                    "ILI-CLASS-ABSTRACT-ATTRIBUTE",
+                    "A concrete class or structure requires concrete attributes",
+                    Some(self.symbols[owner].name_span.clone()),
+                    vec![RelatedLocation {
+                        span: self.symbols[attribute].name_span.clone(),
+                        message: "Abstract attribute".into(),
+                    }],
+                );
+                return None;
+            }
+            declared.extend_from_slice(&direct[owner]);
             if !attributes.is_empty() {
                 self.symbols[owner].declaration.effective_attributes =
                     Some(attributes.into_boxed_slice());
             }
         }
+        Some(declared)
+    }
+
+    pub(super) fn bind_attribute(&mut self, id: usize) -> Option<()> {
+        let base_id = self.symbols[id].base_scope;
+        let inherited = base_id.and_then(|base| {
+            let declaration = &self.symbols[base].declaration;
+            Some(Effective {
+                ty: declaration.type_id?,
+                mandatory: declaration.mandatory()?,
+            })
+        });
+        let syntax = self.symbols[id].syntax;
+        let effective = match (syntax, inherited) {
+            (
+                Some(TypeSyntax::Enumeration {
+                    enumeration, order, ..
+                }),
+                Some(base),
+            ) => {
+                self.extend_enumeration(base, enumeration, order.as_ref().map(|order| order.value))?
+            }
+            (Some(ty), Some(base)) => self.specialize_scalar(id, base, ty)?,
+            (Some(ty), None) => self.concrete_type(id, ty)?,
+            (None, Some(base)) => base,
+            (None, None) => {
+                self.diagnostics.push(
+                    "ILI-ATTRIBUTE-TYPE",
+                    "An attribute without an inherited type requires a type declaration",
+                    Some(self.symbols[id].name_span.clone()),
+                );
+                return None;
+            }
+        };
+        let declaration = &self.symbols[id].declaration;
+        let location = declaration.span.clone();
+        if !declaration.is_abstract()
+            && (self.types[effective.ty].has_unbounded_range()
+                || self.attribute_uses_abstract_domain(id, syntax.is_none(), &location)?)
+        {
+            self.diagnostics.push(
+                "ILI-ATTRIBUTE-ABSTRACT",
+                "An attribute with an abstract value domain must be ABSTRACT",
+                Some(location),
+            );
+            return None;
+        }
+        let declaration = &mut self.symbols[id].declaration;
+        declaration.type_id = Some(effective.ty);
+        declaration.effective_mandatory =
+            Some(effective.mandatory || declaration.declared_mandatory.unwrap_or(false));
         Some(())
+    }
+
+    fn attribute_uses_abstract_domain(
+        &mut self,
+        mut id: usize,
+        inherits_type: bool,
+        location: &crate::Span,
+    ) -> Option<bool> {
+        if inherits_type {
+            while let Some(base) = self.symbols[id].base_scope {
+                if !self.step(1, location) {
+                    return None;
+                }
+                id = base;
+                if self.symbols[id].syntax.is_some() {
+                    break;
+                }
+            }
+        }
+        Some(
+            self.symbols[id]
+                .declaration
+                .reference
+                .as_ref()
+                .and_then(|reference| self.names.get(reference.target_name()))
+                .is_some_and(|&target| self.symbols[target].declaration.is_abstract()),
+        )
     }
 }

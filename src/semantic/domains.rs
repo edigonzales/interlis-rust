@@ -164,8 +164,20 @@ impl Analyzer<'_, '_> {
         syntax: &TypeSyntax,
     ) -> Option<Effective> {
         let mut own = self.concrete_type(owner, syntax)?;
+        own.mandatory |= base.mandatory;
+        if own.ty == base.ty {
+            return Some(own);
+        }
+        let inline = !matches!(syntax, TypeSyntax::Named(_));
+        if !inline
+            && matches!(self.types[own.ty], TypeInfo::Enumeration { .. })
+            && matches!(self.types[base.ty], TypeInfo::Enumeration { .. })
+            && self.named_enumeration_refines(owner, base.ty, syntax.span())?
+        {
+            return Some(own);
+        }
         let check = self
-            .check_unit_specialization(own.ty, base.ty)
+            .check_unit_specialization(own.ty, base.ty, inline)
             .and_then(|unit_check| {
                 if unit_check.is_some() {
                     return Ok(unit_check);
@@ -176,9 +188,11 @@ impl Analyzer<'_, '_> {
                     self.models[self.symbols[owner].model].language,
                     self.limits,
                     &mut self.work,
+                    inline,
                 )
             });
         match check {
+            Ok(None) if !inline => Some(own),
             Ok(None) => {
                 let own_type = &self.types[own.ty];
                 let base_type = &self.types[base.ty];
@@ -216,7 +230,6 @@ impl Analyzer<'_, '_> {
                     }
                     _ => {}
                 }
-                own.mandatory |= base.mandatory;
                 Some(own)
             }
             Ok(Some((code, message))) => {
@@ -224,14 +237,14 @@ impl Analyzer<'_, '_> {
                     .declaration
                     .base_reference
                     .as_ref()
-                    .expect("a domain extension has a bound base");
+                    .expect("a value type extension has a bound base");
                 self.diagnostics.push_related(
                     code,
                     message,
                     Some(syntax.span().clone()),
                     vec![RelatedLocation {
                         span: base.span.clone(),
-                        message: "Base domain reference".into(),
+                        message: "Base type reference".into(),
                     }],
                 );
                 None
@@ -243,10 +256,39 @@ impl Analyzer<'_, '_> {
         }
     }
 
+    fn named_enumeration_refines(
+        &mut self,
+        owner: usize,
+        base_type: usize,
+        span: &crate::Span,
+    ) -> Option<bool> {
+        let declaration = &self.symbols[owner].declaration;
+        let mut target = declaration
+            .reference
+            .as_ref()
+            .and_then(|link| self.names.get(link.target_name()))
+            .copied();
+        while let Some(id) = target {
+            if !self.step(1, span) {
+                return None;
+            }
+            let declaration = &self.symbols[id].declaration;
+            if declaration.type_id == Some(base_type) {
+                return Some(true);
+            }
+            target = declaration
+                .base_reference()
+                .and_then(|reference| self.names.get(reference.target_name()))
+                .copied();
+        }
+        Some(false)
+    }
+
     fn check_unit_specialization(
         &mut self,
         own: usize,
         base: usize,
+        inline: bool,
     ) -> Result<Option<(&'static str, &'static str)>, NumberError> {
         for (own, base) in numeric_pairs(&self.types[own], &self.types[base]) {
             match (&own.unit, &base.unit) {
@@ -260,6 +302,12 @@ impl Analyzer<'_, '_> {
                     return Ok(Some((
                         "ILI-NUMERIC-UNIT-ABSTRACT",
                         "A bounded extension must specialize its inherited abstract unit with a concrete unit",
+                    )));
+                }
+                (None, Some(_)) if !inline => {
+                    return Ok(Some((
+                        "ILI-NUMERIC-UNIT-EXTENSION",
+                        "A named domain used in an override must preserve the base unit",
                     )));
                 }
                 (Some(own), Some(base))
@@ -307,6 +355,7 @@ fn scalar_extension(
     language: LanguageVersion,
     limits: &Limits,
     work: &mut WorkBudget,
+    inline: bool,
 ) -> Result<Option<(&'static str, &'static str)>, NumberError> {
     use TypeInfo::*;
     let narrower = match (own, base) {
@@ -318,6 +367,11 @@ fn scalar_extension(
             text_fits(max_length.as_deref(), cap.as_deref(), work)?
         }
         (FixedText { format: a, .. }, FixedText { format: b, .. }) => a == b,
+        (Boolean, Boolean) => true,
+        (Alignment(a), Alignment(b)) => a == b,
+        (Blackbox(a), Blackbox(b)) => a == b,
+        (Temporal(a), Temporal(b)) => a == b,
+        (EnumTree { domain: a }, EnumTree { domain: b }) => a == b,
         (Oid(OidType::Typed(carrier)), Oid(OidType::Any)) if !carrier.has_unbounded_range() => true,
         (Oid(_), _) | (_, Oid(_)) => {
             return Ok(Some((
@@ -326,7 +380,7 @@ fn scalar_extension(
             )));
         }
         (Numeric(own), Numeric(base)) => {
-            return numeric_extension(own, base, language, limits, work);
+            return numeric_extension(own, base, language, limits, work, inline);
         }
         (Coordinate(own), Coordinate(base)) => {
             if own.kind != base.kind || own.axes.len() < base.axes.len() {
@@ -344,6 +398,9 @@ fn scalar_extension(
                     .as_ref()
                     .zip(base.reference_system.as_ref())
                     .is_some_and(|(own, base)| own != base)
+                || !inline
+                    && (base.rotation.is_some() && own.rotation.is_none()
+                        || base.reference_system.is_some() && own.reference_system.is_none())
             {
                 return Ok(Some((
                     "ILI-COORD-EXTENSION",
@@ -351,7 +408,8 @@ fn scalar_extension(
                 )));
             }
             for (own, base) in own.axes.iter().zip(&base.axes) {
-                if let Some(reason) = numeric_extension(own, base, language, limits, work)? {
+                if let Some(reason) = numeric_extension(own, base, language, limits, work, inline)?
+                {
                     return Ok(Some(reason));
                 }
             }
@@ -379,15 +437,22 @@ fn numeric_extension(
     language: LanguageVersion,
     limits: &Limits,
     work: &mut WorkBudget,
+    inline: bool,
 ) -> Result<Option<(&'static str, &'static str)>, NumberError> {
     if let Some(base_direction) = base.direction
         && own
             .direction
-            .is_some_and(|direction| direction != base_direction)
+            .map_or(!inline, |direction| direction != base_direction)
     {
         return Ok(Some((
             "ILI-DOMAIN-DIRECTION",
             "The direction of a numeric base domain cannot change",
+        )));
+    }
+    if !inline && base.circular && !own.circular {
+        return Ok(Some((
+            "ILI-DOMAIN-DIRECTION",
+            "A named domain used in an override must preserve circularity",
         )));
     }
     let narrower = match (&own.bounds, &base.bounds) {

@@ -1467,10 +1467,16 @@ mod review_regressions {
                     ..
                 }
             ));
-            for body in [
-                "STRUCTURE S=value:MANDATORY; END S;",
-                "STRUCTURE S=PARAMETER p:MANDATORY; END S;",
-                "PARAMETER p:MANDATORY;",
+            for (body, status) in [
+                (
+                    "STRUCTURE S=value:MANDATORY; END S;",
+                    AnalysisStatus::Rejected,
+                ),
+                (
+                    "STRUCTURE S=PARAMETER p:MANDATORY; END S;",
+                    AnalysisStatus::Incomplete,
+                ),
+                ("PARAMETER p:MANDATORY;", AnalysisStatus::Incomplete),
             ] {
                 let report = analyze(CompileRequest {
                     sources: vec![SourceInput {
@@ -1480,7 +1486,7 @@ mod review_regressions {
                     limits: Limits::default(),
                 })
                 .unwrap();
-                assert_eq!(report.status(), AnalysisStatus::Incomplete, "{body}");
+                assert_eq!(report.status(), status, "{body}");
                 assert!(report.graph().is_none());
                 assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
             }

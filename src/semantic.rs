@@ -216,9 +216,14 @@ fn ensure_supported_semantics(
                     span,
                     ..
                 } => {
-                    if !properties.is_empty()
-                        || subdivision.is_some()
-                        || type_use.ty.is_none()
+                    if properties.iter().any(|p| {
+                        !matches!(
+                            p.value,
+                            syntax::Property::Abstract
+                                | syntax::Property::Extended
+                                | syntax::Property::Final
+                        )
+                    }) || subdivision.is_some()
                         || !derivations.is_empty()
                     {
                         Some(span)
@@ -851,6 +856,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 }
                 SyntaxDecl::Attribute {
                     name,
+                    properties,
                     type_use,
                     span,
                     ..
@@ -864,6 +870,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         Some(type_use.mandatory),
                     ) {
                         self.symbols[id].syntax = type_use.ty.as_ref();
+                        self.index_abstract_final(id, properties);
                     }
                 }
                 SyntaxDecl::RuntimeParameter {
@@ -1112,6 +1119,21 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             predefined_language,
             span: name.span.clone(),
         })
+    }
+    fn implicit_base_reference(
+        &mut self,
+        owner: usize,
+        target: usize,
+        name: &Name,
+    ) -> Option<TypeReference> {
+        let reference = QualifiedName {
+            segments: vec![Name {
+                value: name.value.clone(),
+                span: name.span.clone(),
+            }],
+            span: name.span.clone(),
+        };
+        self.bound_reference(owner, &reference, BoundName::Declared(target))
     }
     fn bind_name(&mut self, owner: usize, name: &QualifiedName) -> Option<Target> {
         let kinds = if self.symbols[owner].declaration.kind == Kind::Domain {
@@ -1732,34 +1754,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         self.bind_oid_rules(&topics, &viewables)?;
-        self.bind_effective_attributes(&viewables)?;
+        let attributes = self.bind_effective_attributes(&viewables)?;
+        for id in attributes {
+            self.bind_attribute(id)?;
+        }
         for id in 0..self.symbols.len() {
-            if !matches!(
-                self.symbols[id].declaration.kind,
-                Kind::Attribute | Kind::RuntimeParameter
-            ) {
+            if self.symbols[id].declaration.kind != Kind::RuntimeParameter {
                 continue;
             }
             let Some(syntax) = self.symbols[id].syntax else {
                 continue;
             };
             if let Some(value) = self.concrete_type(id, syntax) {
-                let symbol = &self.symbols[id];
-                if symbol.declaration.kind == Kind::Attribute
-                    && (self.types[value.ty].has_unbounded_range()
-                        || symbol
-                            .declaration
-                            .type_reference()
-                            .and_then(|link| self.names.get(link.target_name()))
-                            .is_some_and(|&target| self.symbols[target].declaration.is_abstract()))
-                {
-                    self.diagnostics.push(
-                        "ILI-ATTRIBUTE-ABSTRACT",
-                        "An attribute with an abstract value domain must be ABSTRACT",
-                        Some(syntax.span().clone()),
-                    );
-                    continue;
-                }
                 self.symbols[id].declaration.type_id = Some(value.ty);
                 self.symbols[id].declaration.effective_mandatory = Some(
                     value.mandatory

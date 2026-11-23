@@ -80,8 +80,7 @@ impl Analyzer<'_, '_> {
         if let Some(name) = name {
             let rule = self.bind_oid_domain(owner, name)?;
             if let Some(inherited) = self.existing_oid(base, basket)
-                && inherited.domain.as_ref().map(|domain| domain.target_name())
-                    != rule.domain.as_ref().map(|domain| domain.target_name())
+                && !same_oid_domain(inherited, &rule)
             {
                 self.diagnostics.push(
                     "ILI-OID-OVERRIDE",
@@ -195,9 +194,7 @@ fn class_oid_specializes(
     let Some(previous) = previous else {
         return language == LanguageVersion::V23 || own.kind != OidKind::Concrete;
     };
-    if previous.domain.as_ref().map(|domain| domain.target_name())
-        == own.domain.as_ref().map(|domain| domain.target_name())
-    {
+    if same_oid_domain(previous, own) {
         return true;
     }
     matches!(
@@ -206,4 +203,15 @@ fn class_oid_specializes(
     ) || language == LanguageVersion::V24
         && previous.kind == OidKind::Unstable
         && own.kind == OidKind::Any
+}
+
+fn same_oid_domain(left: &OidRule, right: &OidRule) -> bool {
+    match (&left.domain, &right.domain) {
+        (Some(left), Some(right)) => {
+            left.target_name() == right.target_name()
+                && left.predefined_language() == right.predefined_language()
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }

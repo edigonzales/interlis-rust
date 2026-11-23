@@ -2340,6 +2340,10 @@ fn viewable_inheritance_rejects_incompatible_bases_and_attribute_shadowing() {
             "ILI-CLASS-EXTENDED-CONFLICT",
         ),
         (
+            "TOPIC A=CLASS C=END C; END A; TOPIC B EXTENDS A=CLASS Spec EXTENDS C=END Spec; END B; TOPIC Between EXTENDS B=END Between; TOPIC D EXTENDS Between=CLASS C (EXTENDED)=END C; END D;",
+            "ILI-CLASS-EXTENDED-CONFLICT",
+        ),
+        (
             "TOPIC T=CLASS A=END A; END T; TOPIC S EXTENDS T=CLASS A EXTENDS M.T.A=END A; END S;",
             "ILI-TOPIC-INHERITED-NAME",
         ),
@@ -2379,4 +2383,113 @@ fn class_oid_specialization_uses_the_declaring_language_version() {
             .kind,
         interlis::OidKind::Concrete
     );
+}
+
+#[test]
+fn attribute_specialization_replaces_its_inherited_slot_and_keeps_mandatory() {
+    let report = outcome(
+        single(
+            "DOMAIN Options=(a,b); More EXTENDS Options=(c);
+             STRUCTURE Parent (ABSTRACT)=
+                z (ABSTRACT):TEXT*30; count:MANDATORY 0..100 [INTERLIS.m]; kind:Options; active:BOOLEAN;
+             END Parent;
+             STRUCTURE Child EXTENDS Parent=
+                active (EXTENDED):BOOLEAN; z (EXTENDED):TEXT*12; count (EXTENDED):5..8; kind (EXTENDED):More; extra:BOOLEAN;
+             END Child;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let attributes = graph
+        .effective_attributes("M.Child")
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attributes
+            .iter()
+            .map(|declaration| declaration.name())
+            .collect::<Vec<_>>(),
+        ["z", "count", "kind", "active", "extra"]
+    );
+    assert_eq!(
+        attributes[1].base_reference().unwrap().target_name(),
+        "M.Parent.count"
+    );
+    assert_eq!(attributes[1].mandatory(), Some(true));
+    assert_eq!(attributes[1].declared_mandatory(), Some(false));
+    let Some(TypeInfo::Numeric(range)) = graph.effective_type("M.Child.count") else {
+        panic!("expected specialized numeric range");
+    };
+    assert_eq!(range.bounds.as_ref().unwrap().lower.original(), "5");
+    assert_eq!(range.unit.as_ref().unwrap().target_name(), "INTERLIS.m");
+    assert!(
+        matches!(graph.effective_type("M.Child.kind"), Some(TypeInfo::Enumeration {values, ..}) if values.elements().last().unwrap().name() == "c")
+    );
+}
+
+#[test]
+fn attributes_reject_illegal_overrides_and_incomplete_concretization() {
+    for (body, code) in [
+        ("STRUCTURE S=value:MANDATORY; END S;", "ILI-ATTRIBUTE-TYPE"),
+        (
+            "STRUCTURE S=value (EXTENDED):BOOLEAN; END S;",
+            "ILI-ATTRIBUTE-OVERRIDE",
+        ),
+        (
+            "STRUCTURE P=value (FINAL):TEXT; END P; STRUCTURE S EXTENDS P=value (EXTENDED):TEXT*4; END S;",
+            "ILI-ATTRIBUTE-OVERRIDE",
+        ),
+        (
+            "STRUCTURE P=value:TEXT*4; END P; STRUCTURE S EXTENDS P=value (EXTENDED):TEXT*10; END S;",
+            "ILI-DOMAIN-EXTENSION",
+        ),
+        (
+            "STRUCTURE P (ABSTRACT)=value (ABSTRACT):TEXT*4; END P; STRUCTURE S EXTENDS P=END S;",
+            "ILI-CLASS-ABSTRACT-ATTRIBUTE",
+        ),
+        (
+            "DOMAIN Unitless=0..5; STRUCTURE P=value:0..10 [INTERLIS.m]; END P; STRUCTURE S EXTENDS P=value (EXTENDED):Unitless; END S;",
+            "ILI-NUMERIC-UNIT-EXTENSION",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn inherited_predefined_oid_keeps_its_edition_in_a_mixed_closure() {
+    let base = "INTERLIS 2.3; MODEL Base AT \"x\" VERSION \"1\" = TOPIC T=CLASS Root=OID AS INTERLIS.I32OID; END Root; END T; END Base.";
+    for (local, status, code) in [
+        ("", Status::CheckedSubset, None),
+        (
+            "OID AS INTERLIS.I32OID;",
+            Status::Rejected,
+            Some("ILI-OID-OVERRIDE"),
+        ),
+    ] {
+        let child = format!(
+            "INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" = IMPORTS Base; TOPIC T=CLASS Child EXTENDS Base.T.Root={local} END Child; END T; END M."
+        );
+        let report = outcome(
+            request(vec![("base", base.into()), ("child", child)]),
+            status,
+            code,
+        );
+        if let Some(graph) = report.graph() {
+            let domain = graph
+                .declaration("M.T.Child")
+                .unwrap()
+                .oid_rules()
+                .unwrap()
+                .object
+                .as_ref()
+                .unwrap()
+                .domain
+                .as_ref()
+                .unwrap();
+            assert_eq!(domain.target_name(), "INTERLIS.I32OID");
+            assert_eq!(domain.predefined_language(), Some(LanguageVersion::V23));
+        }
+    }
 }
