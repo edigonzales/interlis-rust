@@ -286,12 +286,10 @@ fn analyze_models(
 
     let status = if diagnostics.limited {
         AnalysisStatus::LimitExceeded
-    } else if diagnostics.syntax_invalid {
+    } else if diagnostics.rejected {
         AnalysisStatus::Rejected
     } else if diagnostics.incomplete {
         AnalysisStatus::Incomplete
-    } else if diagnostics.rejected {
-        AnalysisStatus::Rejected
     } else if graph.is_some() {
         AnalysisStatus::CheckedSubset
     } else {

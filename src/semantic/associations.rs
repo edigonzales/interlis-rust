@@ -506,7 +506,37 @@ impl Analyzer<'_, '_> {
                 base = self.symbols[owner].base_scope;
             }
         }
+        self.role_accesses = accesses;
         Some(())
+    }
+
+    pub(super) fn has_role_access(
+        &mut self,
+        mut owner: usize,
+        name: &str,
+        at: &Span,
+    ) -> Option<bool> {
+        if self
+            .visible_name(owner, name, Some(&[Kind::Role]), at)
+            .ok()?
+            .is_some()
+        {
+            return Some(true);
+        }
+        let mut key = (owner, name.to_owned());
+        loop {
+            if !self.step(1, at) {
+                return None;
+            }
+            if self.role_accesses.contains_key(&key) {
+                return Some(true);
+            }
+            let Some(base) = self.symbols[owner].base_scope else {
+                return Some(false);
+            };
+            owner = base;
+            key.0 = base;
+        }
     }
 
     fn check_role_access(

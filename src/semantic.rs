@@ -125,6 +125,7 @@ struct Analyzer<'a, 'd> {
     states: Vec<State>,
     types: Vec<TypeInfo>,
     expressions: Vec<crate::BoundExpression>,
+    role_accesses: BTreeMap<(usize, String), usize>,
     generic_types: BTreeMap<usize, usize>,
 }
 fn supported_numeric(ty: &syntax::NumericSyntax) -> bool {
@@ -400,6 +401,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             states: vec![],
             types: vec![],
             expressions: vec![],
+            role_accesses: BTreeMap::new(),
             generic_types: BTreeMap::new(),
         }
     }

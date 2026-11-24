@@ -57,16 +57,21 @@ impl Analyzer<'_, '_> {
                         }
                         if let Some(first) = names.insert(name.value.as_str(), &name.span) {
                             self.duplicate(&name.span, first);
-                            return None;
+                            continue;
                         }
-                        bound.push(self.bind_constraint(
+                        if let Some(constraint) = self.bind_constraint(
                             owner,
                             expressions,
                             Some(name.value.as_str()),
                             ConstraintRule::Domain,
                             constraint.expression,
                             &constraint.span,
-                        )?);
+                        ) {
+                            bound.push(constraint);
+                        }
+                        if self.diagnostics.limited {
+                            return None;
+                        }
                     }
                 }
                 _ => {}
@@ -93,7 +98,7 @@ impl Analyzer<'_, '_> {
                 }
                 if let Some(first) = names.insert(name.value.as_str(), &name.span) {
                     self.duplicate(&name.span, first);
-                    return None;
+                    continue;
                 }
             }
             let (rule, root) = match &constraint.kind {
@@ -122,7 +127,7 @@ impl Analyzer<'_, '_> {
                             "A plausibility percentage must be between zero and one hundred",
                             Some(percentage.span.clone()),
                         );
-                        return None;
+                        continue;
                     }
                     (
                         ConstraintRule::Plausibility {
@@ -134,14 +139,19 @@ impl Analyzer<'_, '_> {
                 }
                 _ => unreachable!("unsupported constraint forms are gated"),
             };
-            bound.push(self.bind_constraint(
+            if let Some(constraint) = self.bind_constraint(
                 owner,
                 expressions,
                 constraint.name.as_ref().map(|name| name.value.as_str()),
                 rule,
                 root,
                 &constraint.span,
-            )?);
+            ) {
+                bound.push(constraint);
+            }
+            if self.diagnostics.limited {
+                return None;
+            }
         }
         Some(())
     }
@@ -397,12 +407,7 @@ impl Analyzer<'_, '_> {
             }
             Err(LookupError::Limit) => None,
             _ => {
-                if !self.step(self.symbols.len(), &name.span) {
-                    return None;
-                }
-                if self.symbols.iter().any(|symbol| {
-                    symbol.declaration.kind == Kind::Role && symbol.declaration.name == name.value
-                }) {
+                if self.has_role_access(owner, &name.value, &name.span)? {
                     self.unsupported_expression(&path.span);
                 } else {
                     self.diagnostics.push(
@@ -426,6 +431,21 @@ impl Analyzer<'_, '_> {
         match self.lookup_name(owner, &name.segments, &name.span, kinds) {
             Ok(target) => Some(target),
             Err(LookupError::Limit) => None,
+            Err(LookupError::Ambiguous(candidates)) => {
+                self.diagnostics.push_related(
+                    "ILI-EXPRESSION-NAME-AMBIGUOUS",
+                    "The name matches more than one imported declaration",
+                    Some(name.span.clone()),
+                    candidates
+                        .into_iter()
+                        .map(|candidate| RelatedLocation {
+                            span: self.symbols[candidate].name_span.clone(),
+                            message: "Candidate declaration".into(),
+                        })
+                        .collect(),
+                );
+                None
+            }
             Err(_) => {
                 self.diagnostics.push(
                     code,

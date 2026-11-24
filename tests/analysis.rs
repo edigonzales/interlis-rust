@@ -3609,6 +3609,42 @@ fn scalar_constraints_reject_wrong_operands_and_missing_attribute_names() {
 }
 
 #[test]
+fn constraint_errors_keep_name_candidates_and_check_independent_conditions() {
+    let report = outcome(
+        request(vec![
+            ("left", "INTERLIS 2.4; MODEL Left AT \"x\" VERSION \"1\" = PARAMETER flag:BOOLEAN; END Left.".into()),
+            ("right", "INTERLIS 2.4; MODEL Right AT \"x\" VERSION \"1\" = PARAMETER flag:BOOLEAN; END Right.".into()),
+            ("main", "INTERLIS 2.4; MODEL Main AT \"x\" VERSION \"1\" = IMPORTS UNQUALIFIED Left, UNQUALIFIED Right;
+             TOPIC T=CLASS Obj=MANDATORY CONSTRAINT PARAMETER flag; END Obj; END T; END Main.".into()),
+        ]),
+        Status::Rejected,
+        Some("ILI-EXPRESSION-NAME-AMBIGUOUS"),
+    );
+    assert_eq!(report.diagnostics()[0].related.len(), 2);
+    let ignored_role = "INTERLIS 2.4; MODEL Unrelated AT \"x\" VERSION \"1\" =
+        TOPIC T=CLASS Obj=END Obj; ASSOCIATION Link=left -- Obj; missing -- Obj; END Link; END T;
+        END Unrelated.";
+    let input = request(vec![
+        (
+            "main",
+            "INTERLIS 2.4; MODEL Main AT \"x\" VERSION \"1\" =
+            TOPIC T=CLASS Obj=MANDATORY CONSTRAINT missing != UNDEFINED; END Obj; END T; END Main."
+                .into(),
+        ),
+        ("unrelated", ignored_role.into()),
+    ]);
+    outcome(input, Status::Rejected, Some("ILI-PATH-NAME"));
+    outcome(
+        single(
+            "TOPIC T=CLASS Obj=MANDATORY CONSTRAINT THIS == THIS;
+                MANDATORY CONSTRAINT \"a\" < \"z\"; END Obj; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-EXPRESSION-OPERANDS"),
+    );
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;
