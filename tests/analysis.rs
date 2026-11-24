@@ -736,7 +736,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     );
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
-        "TOPIC T=CLASS C=x:0..10; UNIQUE x; END C; END T;",
+        "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.objectCount(ALL) > 0; END C; END T;",
         "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -3541,12 +3541,19 @@ fn scalar_constraints_bind_inherited_attributes_and_domain_values() {
     let domain = &graph.declaration("M.Count").unwrap().constraints()[0];
     assert!(matches!(domain.rule, ConstraintRule::Domain));
     assert_eq!(
-        graph.expression(domain.expression).unwrap().value_type,
+        graph
+            .expression(domain.expression.unwrap())
+            .unwrap()
+            .value_type,
         ExpressionType::Boolean
     );
     let constraints = graph.declaration("M.T.Child").unwrap().constraints();
     assert_eq!(constraints[0].name.as_deref(), Some("condition"));
-    let lhs = match graph.expression(constraints[0].expression).unwrap().kind {
+    let lhs = match graph
+        .expression(constraints[0].expression.unwrap())
+        .unwrap()
+        .kind
+    {
         BoundExpressionKind::Binary {
             operator: BinaryOperator::And,
             left,
@@ -3685,7 +3692,9 @@ fn function_signatures_and_calls_bind_parameters_in_order() {
             .collect::<Vec<_>>(),
         ["value", "label"],
     );
-    let call = graph.declaration("Client.T.Obj").unwrap().constraints()[0].expression;
+    let call = graph.declaration("Client.T.Obj").unwrap().constraints()[0]
+        .expression
+        .unwrap();
     let interlis::BoundExpressionKind::Call {
         function,
         arguments,
@@ -3764,7 +3773,9 @@ fn function_text_arguments_use_canonical_length_and_undefined_values() {
                 (status == Status::Rejected).then_some("ILI-FUNCTION-ARGUMENT"),
             );
             if let Some(graph) = report.graph() {
-                let call = graph.declaration("M.T.Obj").unwrap().constraints()[0].expression;
+                let call = graph.declaration("M.T.Obj").unwrap().constraints()[0]
+                    .expression
+                    .unwrap();
                 let interlis::BoundExpressionKind::Call { arguments, .. } =
                     &graph.expression(call).unwrap().kind
                 else {
@@ -3814,7 +3825,7 @@ fn object_paths_bind_structure_reference_list_and_coordinate_steps() {
         _ => panic!("expected a binary expression"),
     };
     let item = graph
-        .expression(first_operand(rules[0].expression))
+        .expression(first_operand(rules[0].expression.unwrap()))
         .unwrap();
     let BoundExpressionKind::Path { steps } = &item.kind else {
         panic!("expected a path");
@@ -3832,14 +3843,14 @@ fn object_paths_bind_structure_reference_list_and_coordinate_steps() {
         "FIRST"
     );
     let item = graph
-        .expression(first_operand(rules[1].expression))
+        .expression(first_operand(rules[1].expression.unwrap()))
         .unwrap();
     let BoundExpressionKind::Path { steps } = &item.kind else {
         panic!("expected a path");
     };
     assert_eq!(steps[1].reference.target_name(), "M.T.Target.label");
     let Some(TypeInfo::Numeric(axis)) =
-        graph.expression_declared_type(first_operand(rules[2].expression))
+        graph.expression_declared_type(first_operand(rules[2].expression.unwrap()))
     else {
         panic!("expected the selected coordinate axis");
     };
@@ -3890,7 +3901,9 @@ fn object_paths_resolve_reference_targets_in_the_extending_topic() {
         None,
     );
     let graph = report.graph().unwrap();
-    let expression = graph.declaration("M.Child.Item").unwrap().constraints()[0].expression;
+    let expression = graph.declaration("M.Child.Item").unwrap().constraints()[0]
+        .expression
+        .unwrap();
     let interlis::BoundExpressionKind::Path { steps } = &graph.expression(expression).unwrap().kind
     else {
         panic!("expected an object path");
@@ -3951,6 +3964,106 @@ fn same_topic_constraint_blocks_augment_the_target_in_source_order() {
         single("TOPIC Base=CLASS Item=flag:BOOLEAN; END Item; END Base;
             TOPIC Derived EXTENDS Base=CONSTRAINTS OF Item=MANDATORY CONSTRAINT flag; END; END Derived;"),
         Status::Incomplete, Some("ILI-UNSUPPORTED"),
+    );
+}
+
+#[test]
+fn unique_constraints_keep_scope_predicates_prefixes_and_key_order() {
+    use interlis::{BoundExpressionKind, ConstraintRule, ExpressionType};
+    let report = outcome(
+        single(
+            "TOPIC T=
+               STRUCTURE Part=code:TEXT*4; label:TEXT*5; END Part;
+               STRUCTURE Group=parts:LIST {0..3} OF Part; END Group;
+               CLASS Item=enabled:BOOLEAN; single:Part; groups:BAG OF Group;
+                   UNIQUE (BASKET) basketKey: WHERE enabled: single->label;
+                   UNIQUE localKey: (LOCAL) groups->parts: code,label;
+               END Item;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let constraints = graph.declaration("M.T.Item").unwrap().constraints();
+    let ConstraintRule::Unique {
+        basket,
+        local_prefix,
+        keys,
+    } = &constraints[0].rule
+    else {
+        panic!("expected a basket key");
+    };
+    assert!(*basket && local_prefix.is_none());
+    assert_eq!(keys.len(), 1);
+    assert_eq!(
+        graph
+            .expression(constraints[0].expression.unwrap())
+            .unwrap()
+            .value_type,
+        ExpressionType::Boolean
+    );
+    let ConstraintRule::Unique {
+        basket,
+        local_prefix,
+        keys,
+    } = &constraints[1].rule
+    else {
+        panic!("expected a local key");
+    };
+    assert!(!*basket && constraints[1].expression.is_none());
+    let prefix = graph.expression(local_prefix.unwrap()).unwrap();
+    let BoundExpressionKind::Path { steps } = &prefix.kind else {
+        panic!("expected a path to the local structures");
+    };
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| step.reference.target_name())
+            .collect::<Vec<_>>(),
+        ["M.T.Item.groups", "M.T.Group.parts"]
+    );
+    let location = report.sources().location(prefix.source_span()).unwrap();
+    let text = report.sources().files()[0].text();
+    assert_eq!(
+        &text[location.start_byte as usize..location.end_byte as usize],
+        "groups->parts"
+    );
+    assert_eq!(
+        keys.iter()
+            .map(|&key| match &graph.expression(key).unwrap().kind {
+                BoundExpressionKind::Path { steps } => steps[0].reference.target_name(),
+                _ => panic!("expected a key field"),
+            })
+            .collect::<Vec<_>>(),
+        ["M.T.Part.code", "M.T.Part.label"]
+    );
+}
+
+#[test]
+fn unique_checks_distinguish_invalid_scopes_filters_and_paths() {
+    for (rule, code) in [
+        ("UNIQUE part;", "ILI-UNIQUE-KEY"),
+        ("UNIQUE parts;", "ILI-UNIQUE-KEY"),
+        ("UNIQUE parts->code;", "ILI-PATH-MULTIPLICITY"),
+        ("UNIQUE (BASKET) (LOCAL) parts:code;", "ILI-UNIQUE-SCOPE"),
+        ("UNIQUE (LOCAL) label:code;", "ILI-UNIQUE-PREFIX"),
+        ("UNIQUE WHERE label: label;", "ILI-CONSTRAINT-BOOLEAN"),
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC T=STRUCTURE Piece=code:TEXT*4; END Piece;
+                 CLASS C=part:Piece; parts:BAG OF Piece; label:TEXT*4;
+                 {rule} END C; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        single("STRUCTURE S=code:TEXT*4; UNIQUE code; END S;"),
+        Status::Rejected,
+        Some("ILI-UNIQUE-SCOPE"),
     );
 }
 

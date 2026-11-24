@@ -121,7 +121,7 @@ selected.sources.push({name:'unselected',text:'INTERLIS 2.4; MODEL Other AT "x" 
 const missing=pair('2.4');missing.sources.shift();
 const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('Base','Other');
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
-const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','UNIQUE count; END Item;');
+const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','SET CONSTRAINT INTERLIS.objectCount(ALL) > 0; END Item;');
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};

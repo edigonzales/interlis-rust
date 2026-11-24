@@ -167,7 +167,7 @@ pub(crate) enum UniqueKey {
     Local {
         prefix: Vec<Name>,
         attributes: Vec<Name>,
-        span: Span,
+        prefix_span: Span,
     },
 }
 
@@ -719,14 +719,15 @@ impl Parser<'_> {
             let name = self.constraint_name()?;
             let filter = self.constraint_filter()?;
             let key = if self.is("(") && self.next_is("LOCAL") {
-                let start = self.start();
                 self.expect("(")?;
                 self.expect("LOCAL")?;
                 self.expect(")")?;
+                let start = self.start();
                 let mut prefix = vec![self.name(false)?];
                 while self.take("->") {
                     prefix.push(self.name(false)?);
                 }
+                let prefix_span = self.span(start, self.end());
                 self.expect(":")?;
                 let mut attributes = vec![self.name(false)?];
                 while self.take(",") {
@@ -736,7 +737,7 @@ impl Parser<'_> {
                 UniqueKey::Local {
                     prefix,
                     attributes,
-                    span: self.span(start, self.end()),
+                    prefix_span,
                 }
             } else {
                 let mut paths = vec![self.object_path()?];

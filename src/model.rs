@@ -359,7 +359,11 @@ pub enum PlausibilityDirection {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ConstraintRule {
     Domain,
     Mandatory,
@@ -367,13 +371,19 @@ pub enum ConstraintRule {
         direction: PlausibilityDirection,
         percentage: DecimalInfo,
     },
+    Unique {
+        basket: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        local_prefix: Option<ExpressionId>,
+        keys: Vec<ExpressionId>,
+    },
 }
 
 #[derive(Debug)]
 pub struct BoundConstraint {
     pub name: Option<String>,
     pub rule: ConstraintRule,
-    pub expression: ExpressionId,
+    pub expression: Option<ExpressionId>,
     pub(crate) span: Span,
 }
 

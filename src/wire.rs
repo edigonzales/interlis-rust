@@ -432,7 +432,8 @@ impl Serialize for DeclarationsOutput<'_> {
         #[derive(Serialize)]
         struct Constraint<'a> {
             name: Option<&'a str>,
-            expression: crate::ExpressionId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expression: Option<crate::ExpressionId>,
             #[serde(flatten)]
             rule: &'a crate::ConstraintRule,
             #[serde(flatten)]

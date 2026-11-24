@@ -1,6 +1,7 @@
 mod associations;
 mod charset_names;
 mod collections;
+mod constraints;
 mod contexts;
 mod domains;
 mod enumeration;
@@ -239,7 +240,7 @@ fn ensure_supported_semantics(
                         || !parameters.is_empty()
                         || constraints
                             .iter()
-                            .any(|constraint| !expressions::supported_constraint(constraint))
+                            .any(|constraint| !constraints::supported_constraint(constraint))
                     {
                         Some(span)
                     } else {
@@ -322,14 +323,14 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Constraints(block) => block
                     .constraints
                     .iter()
-                    .any(|constraint| !expressions::supported_constraint(constraint))
+                    .any(|constraint| !constraints::supported_constraint(constraint))
                     .then_some(&block.span),
                 SyntaxDecl::Association(association) => {
                     if association.derived_from.is_some()
                         || association
                             .constraints
                             .iter()
-                            .any(|constraint| !expressions::supported_constraint(constraint))
+                            .any(|constraint| !constraints::supported_constraint(constraint))
                         || association
                             .roles
                             .iter()

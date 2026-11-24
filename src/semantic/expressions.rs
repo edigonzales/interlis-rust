@@ -1,234 +1,14 @@
-use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl, TypeInfo};
+use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
-    BinaryOperator, BoundConstraint, BoundExpression, BoundExpressionKind as BoundKind,
-    ConstraintRule, ExpressionId, ExpressionType as ValueType, RelatedLocation, Span,
-    TypeReference, UnitConstant,
-    syntax::{
-        ConstraintKind, ConstraintSyntax, DecimalConstant, ExprId, Expression, ExpressionKind,
-        LiteralSyntax,
-    },
+    BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ExpressionId,
+    ExpressionType as ValueType, RelatedLocation, Span, TypeReference, UnitConstant,
+    syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
 use std::collections::BTreeMap;
 use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
 
-pub(super) fn supported_constraint(constraint: &ConstraintSyntax) -> bool {
-    matches!(
-        constraint.kind,
-        ConstraintKind::Mandatory { .. } | ConstraintKind::Plausibility { .. }
-    )
-}
-
 impl Analyzer<'_, '_> {
-    pub(super) fn bind_constraints(&mut self) -> Option<()> {
-        let documents: BTreeMap<_, _> = self
-            .documents
-            .iter()
-            .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
-            .collect();
-        let mut attached = BTreeMap::<usize, Vec<&ConstraintSyntax>>::new();
-        for index in 0..self.constraint_blocks.len() {
-            let (topic, block) = self.constraint_blocks[index];
-            let kinds = &[Kind::Class, Kind::Association];
-            let local = if let [name] = block.target.segments.as_slice() {
-                self.visible_name(topic, &name.value, Some(kinds), &name.span)
-                    .ok()?
-            } else {
-                None
-            };
-            let target = local.map(BoundName::Declared).or_else(|| {
-                self.expression_name(topic, &block.target, kinds, "ILI-CONSTRAINT-TARGET")
-            });
-            let Some(target) = target else {
-                if self.diagnostics.limited {
-                    return None;
-                }
-                continue;
-            };
-            let BoundName::Declared(target) = target else {
-                self.diagnostics.push(
-                    "ILI-CONSTRAINT-TARGET-TOPIC",
-                    "External constraints belong in the target's topic",
-                    Some(block.target.span.clone()),
-                );
-                continue;
-            };
-            let target_topic = self.containing_topic(target);
-            if target_topic != Some(topic) {
-                if let Some(base) = target_topic
-                    && self.specializes_symbol(topic, base, &block.target.span)?
-                {
-                    self.unsupported_expression(&block.target.span);
-                } else {
-                    self.diagnostics.push(
-                        "ILI-CONSTRAINT-TARGET-TOPIC",
-                        "External constraints belong in the target's topic",
-                        Some(block.target.span.clone()),
-                    );
-                }
-                continue;
-            }
-            if !self.step(block.constraints.len(), &block.span) {
-                return None;
-            }
-            attached
-                .entry(target)
-                .or_default()
-                .extend(&block.constraints);
-        }
-        for owner in 0..self.symbols.len() {
-            let mut bound = Vec::new();
-            let inline: &[ConstraintSyntax] = match self.symbols[owner].ast {
-                Some(SyntaxDecl::Container { constraints, .. }) => constraints,
-                Some(SyntaxDecl::Association(association)) => &association.constraints,
-                Some(SyntaxDecl::Domain {
-                    constraints, span, ..
-                }) => {
-                    let expressions = documents[&span.sort_key().0];
-                    let mut names = BTreeMap::new();
-                    for constraint in constraints {
-                        let name = &constraint.name;
-                        if !self.step(1 + name.value.len(), &name.span) {
-                            return None;
-                        }
-                        if let Some(first) = names.insert(name.value.as_str(), &name.span) {
-                            self.duplicate(&name.span, first);
-                            continue;
-                        }
-                        if let Some(constraint) = self.bind_constraint(
-                            owner,
-                            expressions,
-                            Some(name.value.as_str()),
-                            ConstraintRule::Domain,
-                            constraint.expression,
-                            &constraint.span,
-                        ) {
-                            bound.push(constraint);
-                        }
-                        if self.diagnostics.limited {
-                            return None;
-                        }
-                    }
-                    &[]
-                }
-                _ => &[],
-            };
-            let external = attached.remove(&owner).unwrap_or_default();
-            if !inline.is_empty() || !external.is_empty() {
-                self.bind_named_constraints(
-                    owner,
-                    &documents,
-                    inline.iter().chain(external),
-                    &mut bound,
-                )?;
-            }
-            if !bound.is_empty() {
-                self.symbols[owner].declaration.constraints = Some(bound.into_boxed_slice());
-            }
-        }
-        Some(())
-    }
-
-    fn bind_named_constraints<'syntax>(
-        &mut self,
-        owner: usize,
-        documents: &BTreeMap<u32, &[Expression]>,
-        syntax: impl Iterator<Item = &'syntax ConstraintSyntax>,
-        bound: &mut Vec<BoundConstraint>,
-    ) -> Option<()> {
-        let mut names = BTreeMap::new();
-        for constraint in syntax {
-            if let Some(name) = &constraint.name {
-                if !self.step(1 + name.value.len(), &name.span) {
-                    return None;
-                }
-                if let Some(first) = names.insert(name.value.as_str(), &name.span) {
-                    self.duplicate(&name.span, first);
-                    continue;
-                }
-            }
-            let (rule, root) = match &constraint.kind {
-                ConstraintKind::Mandatory { expression } => {
-                    (ConstraintRule::Mandatory, *expression)
-                }
-                ConstraintKind::Plausibility {
-                    direction,
-                    percentage,
-                    expression,
-                } => {
-                    let value = self.literal(percentage)?.info;
-                    let coefficient = value.coefficient();
-                    let integer_digits = i32::try_from(coefficient.len())
-                        .expect("bounded precision")
-                        - value.scale();
-                    let exact_hundred = coefficient
-                        .strip_prefix('1')
-                        .is_some_and(|tail| tail.bytes().all(|byte| byte == b'0'));
-                    if coefficient.starts_with('-')
-                        || coefficient != "0"
-                            && (integer_digits > 3 || integer_digits == 3 && !exact_hundred)
-                    {
-                        self.diagnostics.push(
-                            "ILI-CONSTRAINT-PERCENTAGE",
-                            "A plausibility percentage must be between zero and one hundred",
-                            Some(percentage.span.clone()),
-                        );
-                        continue;
-                    }
-                    (
-                        ConstraintRule::Plausibility {
-                            direction: direction.value,
-                            percentage: value,
-                        },
-                        *expression,
-                    )
-                }
-                _ => unreachable!("unsupported constraint forms are gated"),
-            };
-            if let Some(constraint) = self.bind_constraint(
-                owner,
-                documents[&constraint.span.sort_key().0],
-                constraint.name.as_ref().map(|name| name.value.as_str()),
-                rule,
-                root,
-                &constraint.span,
-            ) {
-                bound.push(constraint);
-            }
-            if self.diagnostics.limited {
-                return None;
-            }
-        }
-        Some(())
-    }
-
-    fn bind_constraint(
-        &mut self,
-        owner: usize,
-        expressions: &[Expression],
-        name: Option<&str>,
-        rule: ConstraintRule,
-        root: ExprId,
-        span: &Span,
-    ) -> Option<BoundConstraint> {
-        let expression = self.bind_expression(owner, expressions, root)?;
-        let bound = &self.expressions[expression.0 as usize];
-        if bound.value_type != ValueType::Boolean {
-            self.diagnostics.push(
-                "ILI-CONSTRAINT-BOOLEAN",
-                "A constraint requires a Boolean expression",
-                Some(bound.span.clone()),
-            );
-            return None;
-        }
-        Some(BoundConstraint {
-            name: name.map(str::to_owned),
-            rule,
-            expression,
-            span: span.clone(),
-        })
-    }
-
-    fn bind_expression(
+    pub(super) fn bind_expression(
         &mut self,
         owner: usize,
         expressions: &[Expression],
@@ -385,18 +165,28 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
             };
-            let result = ExpressionId(
-                u32::try_from(self.expressions.len()).expect("bounded expression count"),
-            );
-            self.expressions.push(BoundExpression {
-                value_type,
-                kind,
-                type_id,
-                span: expression.span.clone(),
-            });
+            let result = self.record_expression(kind, value_type, type_id, &expression.span);
             bound.insert(id.0, result);
         }
         bound.get(&root.0).copied()
+    }
+
+    pub(super) fn record_expression(
+        &mut self,
+        kind: BoundKind,
+        value_type: ValueType,
+        type_id: Option<usize>,
+        span: &Span,
+    ) -> ExpressionId {
+        let id =
+            ExpressionId(u32::try_from(self.expressions.len()).expect("bounded expression count"));
+        self.expressions.push(BoundExpression {
+            value_type,
+            kind,
+            type_id,
+            span: span.clone(),
+        });
+        id
     }
 
     fn expression_literal(

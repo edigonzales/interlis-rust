@@ -1,5 +1,5 @@
 use super::{
-    Analyzer, Kind, LookupError, TypeInfo,
+    Analyzer, Kind, LookupError, Name, TypeInfo,
     collections::{compare_count, structure_targets},
     expressions::scalar_type,
     object_references::object_targets,
@@ -10,6 +10,12 @@ use crate::{
     syntax::{ObjectPath, PathElement, PathSelector, SpecialPath},
 };
 use std::cmp::Ordering;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PathContext {
+    Object,
+    UniquePrefix,
+}
 
 impl Analyzer<'_, '_> {
     pub(super) fn expression_path(
@@ -48,22 +54,7 @@ impl Analyzer<'_, '_> {
                 self.unsupported_expression(&association.span);
                 return None;
             }
-            let member =
-                match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
-                    Ok(Some(member)) => member,
-                    Err(LookupError::Limit) => return None,
-                    _ if self.has_role_access(scope, &name.value, &name.span)? => {
-                        self.unsupported_expression(&name.span);
-                        return None;
-                    }
-                    _ => {
-                        return self.path_error(
-                            "ILI-PATH-NAME",
-                            "The attribute is absent from this object context",
-                            &name.span,
-                        );
-                    }
-                };
+            let member = self.path_attribute(scope, name)?;
             let member_type = self.symbols[member].declaration.type_id?;
             let reference = self.reference_to_symbol(owner, member, name)?;
             let (value, selection, selection_span) = match selector {
@@ -86,9 +77,25 @@ impl Analyzer<'_, '_> {
                     Some(value),
                 ));
             }
-            scope = self.path_scope(value, topic, &name.span)?;
+            scope = self.path_scope(value, topic, PathContext::Object, &name.span)?;
         }
         unreachable!("a parsed path contains at least one step")
+    }
+
+    pub(super) fn path_attribute(&mut self, scope: usize, name: &Name) -> Option<usize> {
+        match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
+            Ok(Some(member)) => Some(member),
+            Err(LookupError::Limit) => None,
+            _ if self.has_role_access(scope, &name.value, &name.span)? => {
+                self.unsupported_expression(&name.span);
+                None
+            }
+            _ => self.path_error(
+                "ILI-PATH-NAME",
+                "The attribute is absent from this object context",
+                &name.span,
+            ),
+        }
     }
 
     fn select_path_value(
@@ -181,13 +188,20 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn path_scope(&mut self, mut ty: usize, topic: Option<usize>, at: &Span) -> Option<usize> {
+    pub(super) fn path_scope(
+        &mut self,
+        mut ty: usize,
+        topic: Option<usize>,
+        context: PathContext,
+        at: &Span,
+    ) -> Option<usize> {
         while let TypeInfo::Collection(collection) = &self.types[ty] {
-            if collection
-                .cardinality
-                .upper
-                .as_deref()
-                .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater)
+            if context == PathContext::Object
+                && collection
+                    .cardinality
+                    .upper
+                    .as_deref()
+                    .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater)
             {
                 return self.path_error(
                     "ILI-PATH-MULTIPLICITY",
@@ -202,6 +216,13 @@ impl Analyzer<'_, '_> {
         }
         let targets = match &self.types[ty] {
             TypeInfo::Structure(structure) => structure_targets(structure),
+            _ if context == PathContext::UniquePrefix => {
+                return self.path_error(
+                    "ILI-UNIQUE-PREFIX",
+                    "A LOCAL key prefix must use structure attributes",
+                    at,
+                );
+            }
             TypeInfo::Reference(reference) => object_targets(&reference.target),
             _ => {
                 return self.path_error(
