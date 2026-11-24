@@ -363,6 +363,12 @@ impl Serialize for DeclarationsOutput<'_> {
             roles: Vec<&'a str>,
         }
         #[derive(Serialize)]
+        struct Subdivision {
+            continuous: bool,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
         struct Context<'a> {
             generic: Reference<'a>,
             alternatives: Vec<Reference<'a>>,
@@ -393,6 +399,8 @@ impl Serialize for DeclarationsOutput<'_> {
             declared_topic_dependencies: Vec<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             effective_attributes: Option<Vec<&'a str>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            subdivision: Option<Subdivision>,
             #[serde(skip_serializing_if = "Option::is_none")]
             association: Option<Association<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -449,6 +457,10 @@ impl Serialize for DeclarationsOutput<'_> {
                         .iter()
                         .map(|&id| self.graph.declarations()[id].qualified_name())
                         .collect()
+                }),
+                subdivision: declaration.subdivision().map(|subdivision| Subdivision {
+                    continuous: subdivision.continuous,
+                    location: self.sources.location(subdivision.source_span()),
                 }),
                 association: declaration.association().map(|association| Association {
                     cardinality: &association.cardinality,

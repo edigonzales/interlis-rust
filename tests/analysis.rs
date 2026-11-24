@@ -3367,6 +3367,115 @@ fn formatted_temporal_ranges_check_edition_component_precision_and_inheritance()
 }
 
 #[test]
+fn numeric_subdivisions_use_effective_attribute_order_and_exact_unit_periods() {
+    let report = outcome(
+        single(
+            "UNIT Hour=2*30 [INTERLIS.min]; Minute=3600/60 [INTERLIS.s];
+             STRUCTURE Clock =
+                hours: 0..23 [Hour];
+                CONTINUOUS SUBDIVISION minutes: 0..59 CIRCULAR [Minute];
+                CONTINUOUS SUBDIVISION seconds: 0.000..59.999 CIRCULAR [INTERLIS.s];
+             END Clock;
+             STRUCTURE Shift EXTENDS Clock =
+                hours (EXTENDED): 6..18 [Hour]; marker: BOOLEAN;
+             END Shift;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let members = graph
+        .effective_attributes("M.Shift")
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        members
+            .iter()
+            .map(|member| member.qualified_name())
+            .collect::<Vec<_>>(),
+        [
+            "M.Shift.hours",
+            "M.Clock.minutes",
+            "M.Clock.seconds",
+            "M.Shift.marker"
+        ]
+    );
+    let subdivision = members[2].subdivision().unwrap();
+    assert!(subdivision.continuous);
+    let location = report
+        .sources()
+        .location(subdivision.source_span())
+        .unwrap();
+    let text = report.sources().files()[0].text();
+    assert_eq!(
+        &text[location.start_byte as usize..location.end_byte as usize],
+        "CONTINUOUS SUBDIVISION"
+    );
+}
+
+#[test]
+fn numeric_subdivisions_reject_wrong_types_units_and_periods() {
+    for (body, code) in [
+        ("SUBDIVISION parts:0..9;", "ILI-SUBDIVISION-PREDECESSOR"),
+        (
+            "fraction:0.0..9.0; SUBDIVISION parts:0..9;",
+            "ILI-SUBDIVISION-INTEGER",
+        ),
+        (
+            "whole:0..9; SUBDIVISION parts:-1..9;",
+            "ILI-SUBDIVISION-RANGE",
+        ),
+        (
+            "whole:0..9; SUBDIVISION parts:BOOLEAN;",
+            "ILI-SUBDIVISION-TYPE",
+        ),
+        (
+            "whole:BOOLEAN; SUBDIVISION parts:0..1;",
+            "ILI-SUBDIVISION-PREDECESSOR-TYPE",
+        ),
+        (
+            "hours:0..23 [INTERLIS.h]; CONTINUOUS SUBDIVISION minutes:0..59 [INTERLIS.min];",
+            "ILI-SUBDIVISION-CIRCULAR",
+        ),
+        (
+            "hours:0..23 [INTERLIS.h]; CONTINUOUS SUBDIVISION minutes:0..58 CIRCULAR [INTERLIS.min];",
+            "ILI-SUBDIVISION-FACTOR",
+        ),
+        (
+            "hours:0..23 [INTERLIS.h]; CONTINUOUS SUBDIVISION length:0..59 CIRCULAR [INTERLIS.m];",
+            "ILI-SUBDIVISION-FACTOR",
+        ),
+        (
+            "minutes:0..59 [INTERLIS.min]; CONTINUOUS SUBDIVISION seconds:0.000..59.998 CIRCULAR [INTERLIS.s];",
+            "ILI-SUBDIVISION-FACTOR",
+        ),
+    ] {
+        outcome(
+            single(&format!("STRUCTURE Clock={body} END Clock;")),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        request(vec![("inherited-subdivision", r#"INTERLIS 2.3; MODEL M AT "x" VERSION "1" =
+             STRUCTURE Clock=hours:0..23 [INTERLIS.h]; SUBDIVISION minutes:0..59 [INTERLIS.min]; END Clock;
+             STRUCTURE Fraction EXTENDS Clock=hours (EXTENDED):0.0..23.0 [INTERLIS.h]; END Fraction;
+             END M."#.into())]),
+        Status::Rejected,
+        Some("ILI-SUBDIVISION-INTEGER"),
+    );
+    outcome(
+        single(
+            "UNIT Opaque=FUNCTION // dependency on an external measurement // [INTERLIS.s];
+             STRUCTURE Clock=coarse:0..23 [Opaque];
+                CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [INTERLIS.s]; END Clock;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;

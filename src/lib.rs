@@ -16,9 +16,9 @@ mod wire;
 
 pub use limits::Limits;
 pub use model::{
-    AlignmentKind, AssociationInfo, AxisRotation, BlackboxKind, Cardinality, ClassValueKind,
-    ClassValueType, CollectionKind, CollectionType, ContextMapping, CoordinateKind, CoordinateType,
-    DecimalInfo, Declaration, DeclarationKind, DomainReferenceSystem, Enumeration,
+    AlignmentKind, AssociationInfo, AttributeSubdivision, AxisRotation, BlackboxKind, Cardinality,
+    ClassValueKind, ClassValueType, CollectionKind, CollectionType, ContextMapping, CoordinateKind,
+    CoordinateType, DecimalInfo, Declaration, DeclarationKind, DomainReferenceSystem, Enumeration,
     EnumerationElement, EnumerationOrder, FixedTextFormat, GeometryKind, GeometryType,
     LanguageVersion, LineForm, ModelGraph, ModelInfo, ModelKind, NumericBounds, NumericDirection,
     NumericRange, ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance,

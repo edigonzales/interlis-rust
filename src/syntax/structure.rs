@@ -1311,11 +1311,20 @@ mod tests {
     }
     #[test]
     fn new_syntax_cannot_silently_enter_the_partial_semantic_graph() {
-        for body in [
-            "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
-            "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
-            "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
-            "PARAMETER p:MANDATORY;",
+        for (body, status) in [
+            (
+                "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
+                AnalysisStatus::Incomplete,
+            ),
+            (
+                "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",
+                AnalysisStatus::Rejected,
+            ),
+            (
+                "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
+                AnalysisStatus::Incomplete,
+            ),
+            ("PARAMETER p:MANDATORY;", AnalysisStatus::Incomplete),
         ] {
             let text = model("2.4", body);
             parse(&text);
@@ -1327,7 +1336,7 @@ mod tests {
                 limits: Limits::default(),
             })
             .unwrap();
-            assert_eq!(report.status(), AnalysisStatus::Incomplete, "{body}");
+            assert_eq!(report.status(), status, "{body}");
             assert!(report.graph().is_none());
             assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
         }

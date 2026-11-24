@@ -1,7 +1,7 @@
 use super::{Analyzer, Kind, LookupError, QualifiedName, Symbol, SyntaxDecl};
 use crate::{
-    TypeReference, UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale,
-    UnitTerm, limits::WorkBudget, number::NumberError, syntax,
+    DecimalInfo, NumericBounds, Span, TypeReference, UnitConstant, UnitDefinition, UnitFactor,
+    UnitInfo, UnitOperator, UnitScale, UnitTerm, limits::WorkBudget, number::NumberError, syntax,
 };
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet};
@@ -221,6 +221,43 @@ impl Analyzer<'_, '_> {
         }
     }
 
+    pub(super) fn subdivision_unit_period(
+        &mut self,
+        predecessor: usize,
+        subdivision: usize,
+        span: &Span,
+    ) -> Option<bool> {
+        let (crate::TypeInfo::Numeric(predecessor), crate::TypeInfo::Numeric(subdivision)) =
+            (&self.types[predecessor], &self.types[subdivision])
+        else {
+            unreachable!("a numeric subdivision and its predecessor have numeric types");
+        };
+        let (Some(coarse), Some(fine), Some(bounds)) =
+            (&predecessor.unit, &subdivision.unit, &subdivision.bounds)
+        else {
+            return Some(true);
+        };
+        let matches = if self.unit_is_abstract(coarse) {
+            unit_extends(&self.symbols, &self.names, fine, coarse, &mut self.work)
+        } else {
+            unit_period_matches(
+                &self.symbols,
+                &self.names,
+                coarse,
+                fine,
+                bounds,
+                &mut self.work,
+            )
+        };
+        match matches {
+            Ok(matches) => Some(matches),
+            Err(error) => {
+                self.number_error(error, span);
+                None
+            }
+        }
+    }
+
     fn check_unit_cycles(&mut self) -> Option<()> {
         let units: Vec<_> = self
             .symbols
@@ -354,30 +391,78 @@ pub(super) fn units_convertible(
     if actual.target_name() == expected.target_name() {
         return Ok(true);
     }
-    let actual = conversion_roots(symbols, names, actual.target_name(), work)?;
-    let expected = conversion_roots(symbols, names, expected.target_name(), work)?;
+    let actual = unit_product(
+        symbols,
+        names,
+        actual.target_name(),
+        ProductKind::Roots,
+        work,
+    )?;
+    let expected = unit_product(
+        symbols,
+        names,
+        expected.target_name(),
+        ProductKind::Roots,
+        work,
+    )?;
     Ok(actual == expected)
 }
 
-fn conversion_roots<'a>(
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProductKind {
+    Roots,
+    Ratio,
+    Dimension,
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum Factor<'a> {
+    Unit(&'a str),
+    Decimal(i32, &'a str),
+    Pi,
+    LnBase,
+}
+
+type Product<'a> = BTreeMap<Factor<'a>, BigInt>;
+
+fn unit_product<'a>(
     symbols: &'a [Symbol<'_>],
     names: &BTreeMap<String, usize>,
     root: &'a str,
+    kind: ProductKind,
     work: &mut WorkBudget,
-) -> Result<BTreeMap<&'a str, BigInt>, NumberError> {
-    let mut resolved = BTreeMap::<&str, BTreeMap<&str, BigInt>>::new();
+) -> Result<Product<'a>, NumberError> {
+    let mut resolved = BTreeMap::<&str, Product<'_>>::new();
     let mut pending = vec![(root, false)];
     while let Some((name, ready)) = pending.pop() {
         work.charge(1).map_err(|_| NumberError::Work)?;
         if resolved.contains_key(name) {
             continue;
         }
-        let definition = declared_unit(symbols, names, name).map(|unit| &unit.definition);
-        let alias = match definition {
-            Some(UnitDefinition::Derived { target, .. }) => Some(target.target_name()),
-            None if matches!(name, "INTERLIS.min" | "INTERLIS.h" | "INTERLIS.d") => {
-                Some("INTERLIS.s")
+        let unit = declared_unit(symbols, names, name);
+        let definition = unit.map(|unit| &unit.definition);
+        let predefined_scale = match name {
+            "INTERLIS.min" => Some("60"),
+            "INTERLIS.h" => Some("3600"),
+            "INTERLIS.d" => Some("86400"),
+            _ => None,
+        };
+        let alias = match (definition, kind) {
+            (
+                Some(UnitDefinition::Derived {
+                    scale: UnitScale::Function(_),
+                    ..
+                }),
+                ProductKind::Ratio,
+            ) => None,
+            (Some(UnitDefinition::Derived { target, .. }), _) => Some(target.target_name()),
+            (Some(UnitDefinition::Fundamental), ProductKind::Dimension) => unit
+                .and_then(|unit| unit.base.as_ref())
+                .map(TypeReference::target_name),
+            (None, ProductKind::Dimension) => {
+                predefined_parent(name).filter(|&parent| parent != "INTERLIS.ANYUNIT")
             }
+            (None, _) if predefined_scale.is_some() => Some("INTERLIS.s"),
             _ => None,
         };
         let terms = match definition {
@@ -390,9 +475,30 @@ fn conversion_roots<'a>(
             pending.extend(terms.iter().map(|term| (term.unit.target_name(), false)));
             continue;
         }
-        let mut roots = BTreeMap::<&str, BigInt>::new();
+        let mut product = Product::new();
         if alias.is_none() && terms.is_empty() {
-            roots.insert(name, BigInt::from(1));
+            product.insert(Factor::Unit(name), BigInt::from(1));
+        }
+        if kind == ProductKind::Ratio {
+            if let Some(UnitDefinition::Derived {
+                scale: UnitScale::Factors(factors),
+                ..
+            }) = definition
+            {
+                for factor in factors {
+                    let key = match &factor.value {
+                        UnitConstant::Decimal(value) => {
+                            Factor::Decimal(value.scale(), value.coefficient())
+                        }
+                        UnitConstant::Pi => Factor::Pi,
+                        UnitConstant::LnBase => Factor::LnBase,
+                    };
+                    add_power(&mut product, key, &BigInt::from(1), factor.operator, work)?;
+                }
+            }
+            if let Some(value) = predefined_scale {
+                product.insert(Factor::Decimal(0, value), BigInt::from(1));
+            }
         }
         for (operator, target) in alias
             .into_iter()
@@ -403,22 +509,133 @@ fn conversion_roots<'a>(
                     .map(|term| (term.operator, term.unit.target_name())),
             )
         {
-            for (&anchor, exponent) in &resolved[target] {
-                let power = roots.entry(anchor).or_default();
-                let charge = exponent.bits().max(power.bits()).div_ceil(8) + 1;
-                work.charge(u32::try_from(charge).map_err(|_| NumberError::Work)?)
-                    .map_err(|_| NumberError::Work)?;
-                if operator == UnitOperator::Multiply {
-                    *power += exponent;
-                } else {
-                    *power -= exponent;
-                }
+            for (&factor, exponent) in &resolved[target] {
+                add_power(&mut product, factor, exponent, operator, work)?;
             }
         }
-        roots.retain(|_, power| power.bits() != 0);
-        resolved.insert(name, roots);
+        product.retain(|_, power| power.bits() != 0);
+        resolved.insert(name, product);
     }
     Ok(resolved
         .remove(root)
         .expect("every reachable conversion root was resolved"))
+}
+
+fn add_power<'a>(
+    product: &mut Product<'a>,
+    factor: Factor<'a>,
+    exponent: &BigInt,
+    operator: UnitOperator,
+    work: &mut WorkBudget,
+) -> Result<(), NumberError> {
+    let power = product.entry(factor).or_default();
+    charge_product_work(exponent.bits().max(power.bits()).div_ceil(8) + 1, work)?;
+    match operator {
+        UnitOperator::Multiply => *power += exponent,
+        UnitOperator::Divide => *power -= exponent,
+    }
+    Ok(())
+}
+
+fn unit_period_matches(
+    symbols: &[Symbol<'_>],
+    names: &BTreeMap<String, usize>,
+    coarse: &TypeReference,
+    fine: &TypeReference,
+    bounds: &NumericBounds,
+    work: &mut WorkBudget,
+) -> Result<bool, NumberError> {
+    let coarse = coarse.target_name();
+    let fine = fine.target_name();
+    let mut ratio = unit_product(symbols, names, coarse, ProductKind::Ratio, work)?;
+    for (factor, exponent) in unit_product(symbols, names, fine, ProductKind::Ratio, work)? {
+        add_power(&mut ratio, factor, &exponent, UnitOperator::Divide, work)?;
+    }
+    ratio.retain(|_, power| power.bits() != 0);
+    if ratio.keys().any(|factor| matches!(factor, Factor::Unit(_))) {
+        let coarse = unit_product(symbols, names, coarse, ProductKind::Dimension, work)?;
+        let fine = unit_product(symbols, names, fine, ProductKind::Dimension, work)?;
+        let unknown = coarse.contains_key(&Factor::Unit("INTERLIS.ANYUNIT"))
+            || fine.contains_key(&Factor::Unit("INTERLIS.ANYUNIT"));
+        return Ok(unknown || coarse == fine);
+    }
+    let symbolic = usize::from(ratio.contains_key(&Factor::Pi))
+        + usize::from(ratio.contains_key(&Factor::LnBase));
+    if symbolic != 0 {
+        // A nonzero integral power of either constant is transcendental.
+        // A product involving both constants has no established rational value.
+        return Ok(symbolic == 2);
+    }
+
+    let mut numerator = BigInt::from(1);
+    let mut denominator = BigInt::from(1);
+    for (factor, power) in ratio {
+        let Factor::Decimal(scale, coefficient) = factor else {
+            unreachable!("unit roots and symbolic factors were checked");
+        };
+        let exponent = u32::try_from(power.magnitude()).map_err(|_| NumberError::Work)?;
+        let base = parse_coefficient(coefficient);
+        let decimal_places = scale
+            .unsigned_abs()
+            .checked_mul(exponent)
+            .ok_or(NumberError::Work)?;
+        let magnitude = exact_power(&base, exponent, work)?;
+        let decimal = exact_power(&BigInt::from(10), decimal_places, work)?;
+        let (top, bottom) = if scale >= 0 {
+            (magnitude, decimal)
+        } else {
+            (exact_product(magnitude, &decimal, work)?, BigInt::from(1))
+        };
+        let (top, bottom) = if power.sign() == num_bigint::Sign::Minus {
+            (bottom, top)
+        } else {
+            (top, bottom)
+        };
+        numerator = exact_product(numerator, &top, work)?;
+        denominator = exact_product(denominator, &bottom, work)?;
+    }
+
+    let scale = bounds.lower.scale().max(bounds.upper.scale());
+    let aligned = |bound: &DecimalInfo, work: &mut WorkBudget| {
+        let shift = exact_power(&BigInt::from(10), scale.abs_diff(bound.scale()), work)?;
+        exact_product(parse_coefficient(bound.coefficient()), &shift, work)
+    };
+    let period = aligned(&bounds.upper, work)? - aligned(&bounds.lower, work)?
+        + exact_power(
+            &BigInt::from(10),
+            scale.abs_diff(bounds.upper.scale()),
+            work,
+        )?;
+    let divisor = exact_power(&BigInt::from(10), scale.unsigned_abs(), work)?;
+    if scale >= 0 {
+        Ok(exact_product(numerator, &divisor, work)? == exact_product(denominator, &period, work)?)
+    } else {
+        Ok(numerator == exact_product(exact_product(denominator, &period, work)?, &divisor, work)?)
+    }
+}
+
+fn parse_coefficient(value: &str) -> BigInt {
+    value
+        .parse()
+        .expect("an exact decimal has a valid coefficient")
+}
+
+fn exact_power(base: &BigInt, exponent: u32, work: &mut WorkBudget) -> Result<BigInt, NumberError> {
+    let bits = base.bits().saturating_mul(u64::from(exponent));
+    charge_product_work(bits.saturating_mul(bits) / 4096 + 1, work)?;
+    Ok(base.pow(exponent))
+}
+
+fn exact_product(
+    left: BigInt,
+    right: &BigInt,
+    work: &mut WorkBudget,
+) -> Result<BigInt, NumberError> {
+    charge_product_work(left.bits().saturating_mul(right.bits()) / 4096 + 1, work)?;
+    Ok(left * right)
+}
+
+fn charge_product_work(cost: u64, work: &mut WorkBudget) -> Result<(), NumberError> {
+    work.charge(u32::try_from(cost).map_err(|_| NumberError::Work)?)
+        .map_err(|_| NumberError::Work)
 }

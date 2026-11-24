@@ -225,6 +225,18 @@ pub struct Cardinality {
 }
 
 #[derive(Debug)]
+pub struct AttributeSubdivision {
+    pub continuous: bool,
+    pub(crate) span: Span,
+}
+
+impl AttributeSubdivision {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Debug)]
 pub struct CollectionType {
     pub kind: CollectionKind,
     pub cardinality: Cardinality,
@@ -634,6 +646,7 @@ pub struct Declaration {
     pub(crate) oids: Option<Box<OidRules>>,
     pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
     pub(crate) effective_attributes: Option<Box<[usize]>>,
+    pub(crate) subdivision: Option<AttributeSubdivision>,
     pub(crate) association: Option<Box<AssociationInfo>>,
     pub(crate) role: Option<Box<RoleInfo>>,
     pub(crate) generic: bool,
@@ -676,6 +689,9 @@ impl Declaration {
     }
     pub fn unit(&self) -> Option<&UnitInfo> {
         self.unit.as_deref()
+    }
+    pub fn subdivision(&self) -> Option<&AttributeSubdivision> {
+        self.subdivision.as_ref()
     }
     pub fn oid_rules(&self) -> Option<&OidRules> {
         self.oids.as_deref()

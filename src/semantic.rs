@@ -11,6 +11,7 @@ mod object_references;
 mod oid;
 mod reference_systems;
 mod references;
+mod subdivisions;
 mod temporal;
 mod topics;
 mod units;
@@ -235,7 +236,6 @@ fn ensure_supported_semantics(
                 }
                 SyntaxDecl::Attribute {
                     properties,
-                    subdivision,
                     type_use,
                     derivations,
                     span,
@@ -248,8 +248,7 @@ fn ensure_supported_semantics(
                                 | syntax::Property::Extended
                                 | syntax::Property::Final
                         )
-                    }) || subdivision.is_some()
-                        || !derivations.is_empty()
+                    }) || !derivations.is_empty()
                     {
                         Some(span)
                     } else {
@@ -501,6 +500,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 oids: None,
                 topic_dependencies: None,
                 effective_attributes: None,
+                subdivision: None,
                 association: None,
                 role: None,
                 generic: false,
@@ -1898,6 +1898,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for id in attributes {
             self.bind_attribute(id)?;
         }
+        self.validate_subdivisions(&viewables)?;
         self.validate_reference_types(&viewables)?;
         self.check_role_names(&viewables)?;
         for id in 0..self.symbols.len() {
