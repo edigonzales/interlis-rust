@@ -1,13 +1,16 @@
 use super::{
-    Analyzer, Kind, LookupError, Name, TypeInfo,
+    Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, TypeInfo,
     collections::{compare_count, structure_targets},
+    domains::scalar_extension,
     expressions::scalar_type,
+    functions::text_details,
     object_references::object_targets,
 };
 use crate::{
-    BoundExpressionKind, BoundPathStep, CollectionKind, CoordinateKind, ExpressionType,
-    LanguageVersion, ObjectSelection, PathSelection, Span, TypeReference,
-    syntax::{ObjectPath, PathElement, PathSelector, SpecialPath},
+    AttributePathType, BoundExpressionKind, BoundPathStep, CollectionKind, CoordinateKind,
+    ExpressionType, LanguageVersion, ObjectSelection, PathSelection, Span, TypeReference,
+    model::AttributeRestriction,
+    syntax::{ObjectPath, PathElement, PathSelector, SpecialPath, TypeUseSyntax},
 };
 use std::cmp::Ordering;
 
@@ -19,6 +22,213 @@ pub(super) enum PathContext {
 }
 
 impl Analyzer<'_, '_> {
+    pub(super) fn attribute_path_type(
+        &mut self,
+        owner: usize,
+        restrictions: &[TypeUseSyntax],
+    ) -> Option<AttributePathType> {
+        let reference = self.symbols[owner].declaration.reference.take();
+        let restrictions = restrictions
+            .iter()
+            .map(|restriction| {
+                self.concrete_type(owner, restriction.ty.as_ref()?)
+                    .map(|effective| AttributeRestriction {
+                        ty: effective.ty,
+                        mandatory: restriction.mandatory || effective.mandatory,
+                    })
+            })
+            .collect::<Option<Vec<_>>>();
+        self.symbols[owner].declaration.reference = reference;
+        Some(AttributePathType {
+            viewable: None,
+            restrictions: restrictions?,
+        })
+    }
+
+    pub(super) fn attribute_path_literal(
+        &mut self,
+        owner: usize,
+        viewable: Option<&QualifiedName>,
+        attribute: &Name,
+    ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
+        let (scope, selected) = if let Some(name) = viewable {
+            let target = self.expression_name(
+                owner,
+                name,
+                &[Kind::Class, Kind::Structure, Kind::Association, Kind::View],
+                "ILI-ATTRIBUTE-PATH-VIEWABLE",
+            )?;
+            let BoundName::Declared(scope) = target else {
+                self.unsupported_expression(&name.span);
+                return None;
+            };
+            (scope, self.bound_reference(owner, name, target)?)
+        } else {
+            (owner, self.reference_to_symbol(owner, owner, attribute)?)
+        };
+        let member = self.path_attribute(scope, attribute)?;
+        let member_declaration = &self.symbols[member].declaration;
+        let restriction = AttributeRestriction {
+            ty: member_declaration.type_id?,
+            mandatory: member_declaration.mandatory() == Some(true),
+        };
+        let reference = self.reference_to_symbol(owner, member, attribute)?;
+        let id = self.types.len();
+        self.types.push(TypeInfo::AttributePath(AttributePathType {
+            viewable: Some(selected),
+            restrictions: vec![restriction],
+        }));
+        Some((
+            BoundExpressionKind::AttributePath { reference },
+            ExpressionType::AttributePath,
+            Some(id),
+        ))
+    }
+
+    pub(super) fn attribute_path_specializes(
+        &mut self,
+        owner: usize,
+        actual: usize,
+        expected: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        if actual == expected {
+            return Some(true);
+        }
+        let (TypeInfo::AttributePath(source), TypeInfo::AttributePath(target)) =
+            (&self.types[actual], &self.types[expected])
+        else {
+            return Some(false);
+        };
+        if target.restrictions.is_empty() {
+            return Some(true);
+        }
+        if !self.step(source.restrictions.len() + target.restrictions.len(), at) {
+            return None;
+        }
+        let (TypeInfo::AttributePath(source), TypeInfo::AttributePath(target)) =
+            (&self.types[actual], &self.types[expected])
+        else {
+            unreachable!();
+        };
+        let sources = source.restrictions.clone();
+        let targets = target.restrictions.clone();
+        for &source in &sources {
+            let mut accepted = false;
+            for &target in &targets {
+                if (!target.mandatory || source.mandatory)
+                    && self.attribute_type_fits(owner, source.ty, target.ty, at)?
+                {
+                    accepted = true;
+                    break;
+                }
+            }
+            if !accepted {
+                return Some(false);
+            }
+        }
+        Some(!sources.is_empty())
+    }
+
+    fn attribute_type_fits(
+        &mut self,
+        owner: usize,
+        source: usize,
+        target: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        if !self.step(1, at) {
+            return None;
+        }
+        if source == target {
+            return Some(true);
+        }
+        if self.is_enum_type(source) && self.is_enum_type(target) {
+            return self.enum_specializes(source, target, at);
+        }
+        if let Some((source_multi, source_max, source_format)) = text_details(&self.types[source])
+            && let Some((target_multi, target_max, target_format)) =
+                text_details(&self.types[target])
+        {
+            return Some(
+                (!source_multi || target_multi)
+                    && (target_format.is_none() || source_format == target_format)
+                    && target_max.is_none_or(|max| {
+                        source_max
+                            .is_some_and(|given| compare_count(given, max) != Ordering::Greater)
+                    }),
+            );
+        }
+        match (&self.types[source], &self.types[target]) {
+            (TypeInfo::Reference(_), TypeInfo::Reference(_)) => {
+                return self.reference_specializes(source, target, at);
+            }
+            (TypeInfo::Structure(_), TypeInfo::Structure(_)) => {
+                return self.structure_specializes(source, target, at);
+            }
+            (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_)) => {
+                return self.class_value_specializes(source, target, at, false);
+            }
+            (TypeInfo::Oid(a), TypeInfo::Oid(b)) => {
+                return Some(super::existence::oid_compatible(a, b));
+            }
+            (
+                TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
+                TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
+            ) => {
+                return Some(self.preserves_temporal_layout(source, target));
+            }
+            (TypeInfo::Collection(source), TypeInfo::Collection(target)) => {
+                let cardinality =
+                    compare_count(&source.cardinality.lower, &target.cardinality.lower)
+                        != Ordering::Less
+                        && target.cardinality.upper.as_deref().is_none_or(|upper| {
+                            source.cardinality.upper.as_deref().is_some_and(|value| {
+                                compare_count(value, upper) != Ordering::Greater
+                            })
+                        });
+                if !cardinality
+                    || (source.kind != target.kind && target.kind != CollectionKind::Bag)
+                {
+                    return Some(false);
+                }
+                return self.attribute_type_fits(owner, source.element, target.element, at);
+            }
+            (TypeInfo::AttributePath(_), TypeInfo::AttributePath(_)) => {
+                return self.attribute_path_specializes(owner, source, target, at);
+            }
+            (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
+                self.unsupported_expression(at);
+                return None;
+            }
+            _ => {}
+        }
+        let language = self.models[self.symbols[owner].model].language();
+        let check = self
+            .check_unit_specialization(source, target, false)
+            .and_then(|reason| {
+                if reason.is_some() {
+                    Ok(reason)
+                } else {
+                    scalar_extension(
+                        &self.types[source],
+                        &self.types[target],
+                        language,
+                        self.limits,
+                        &mut self.work,
+                        false,
+                    )
+                }
+            });
+        match check {
+            Ok(reason) => Some(reason.is_none()),
+            Err(error) => {
+                self.number_error(error, at);
+                None
+            }
+        }
+    }
+
     pub(super) fn expression_path(
         &mut self,
         owner: usize,

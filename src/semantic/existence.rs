@@ -208,6 +208,9 @@ impl Analyzer<'_, '_> {
             (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_)) => {
                 return self.class_value_specializes(actual, expected, at, false);
             }
+            (TypeInfo::AttributePath(_), TypeInfo::AttributePath(_)) => {
+                return self.attribute_path_specializes(owner, actual, expected, at);
+            }
             (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
                 self.unsupported_expression(at);
                 return None;

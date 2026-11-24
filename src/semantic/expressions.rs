@@ -361,6 +361,12 @@ impl Analyzer<'_, '_> {
                 }));
                 return Some((BoundKind::Class { reference }, ValueType::Class, Some(ty)));
             }
+            LiteralSyntax::AttributePath {
+                viewable,
+                attribute,
+            } => {
+                return self.attribute_path_literal(owner, viewable.as_ref(), attribute);
+            }
             _ => {
                 self.unsupported_expression(span);
                 return None;
@@ -468,6 +474,7 @@ impl Analyzer<'_, '_> {
             || a == Text && b == Text && equality
             || a == Object && b == Object && equality
             || a == Class && b == Class && equality
+            || a == AttributePath && b == AttributePath && equality
         {
             return Some(Boolean);
         }
@@ -603,6 +610,7 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
         TypeInfo::ObjectSelection(_) => ValueType::Object,
         TypeInfo::ClassValue(_) => ValueType::Class,
+        TypeInfo::AttributePath(_) => ValueType::AttributePath,
         TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_) => ValueType::Temporal,
         TypeInfo::Coordinate(_) => ValueType::Coordinate,
         TypeInfo::Geometry(_) => ValueType::Geometry,

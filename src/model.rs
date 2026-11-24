@@ -192,6 +192,7 @@ pub enum TypeInfo {
     Oid(OidType),
     Structure(StructureType),
     ClassValue(ClassValueType),
+    AttributePath(AttributePathType),
     Collection(CollectionType),
     Reference(ReferenceType),
     ObjectSelection(ObjectSelection),
@@ -257,6 +258,7 @@ pub enum ExpressionType {
     Object,
     ObjectSet,
     Class,
+    AttributePath,
     Enumeration,
     Other,
 }
@@ -313,6 +315,9 @@ pub enum BoundExpressionKind {
         explicit: bool,
     },
     Class {
+        reference: TypeReference,
+    },
+    AttributePath {
         reference: TypeReference,
     },
     Path {
@@ -480,6 +485,18 @@ pub enum ClassValueKind {
 pub struct ClassValueType {
     pub kind: ClassValueKind,
     pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Debug)]
+pub struct AttributePathType {
+    pub viewable: Option<TypeReference>,
+    pub(crate) restrictions: Vec<AttributeRestriction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AttributeRestriction {
+    pub ty: usize,
+    pub mandatory: bool,
 }
 
 #[derive(Debug)]
@@ -991,6 +1008,15 @@ impl ModelGraph {
             return None;
         };
         self.types.get(*base)
+    }
+    pub fn attribute_path_restrictions<'a>(
+        &'a self,
+        attribute: &'a AttributePathType,
+    ) -> impl Iterator<Item = (&'a TypeInfo, bool)> + 'a {
+        attribute
+            .restrictions
+            .iter()
+            .map(|restriction| (&self.types[restriction.ty], restriction.mandatory))
     }
     pub fn function_arguments(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
         Some(

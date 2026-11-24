@@ -165,7 +165,14 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::ClassValue { .. } => true,
         TypeSyntax::Geometry(_) => true,
         TypeSyntax::Formatted { base, .. } => !matches!(base, syntax::FormatBase::Structure { .. }),
-        TypeSyntax::AttributePathValue { .. } => false,
+        TypeSyntax::AttributePathValue {
+            of, restrictions, ..
+        } => {
+            of.is_none()
+                && restrictions
+                    .iter()
+                    .all(|restriction| restriction.ty.as_ref().is_some_and(supported_type))
+        }
     }
 }
 
@@ -1621,8 +1628,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Formatted { .. } => {
                 return self.temporal_format(owner, syntax, None, None);
             }
-            TypeSyntax::AttributePathValue { .. } => {
-                unreachable!("unsupported type semantics checked before indexing")
+            TypeSyntax::AttributePathValue { restrictions, .. } => {
+                TypeInfo::AttributePath(self.attribute_path_type(owner, restrictions)?)
             }
         };
         let mandatory =

@@ -294,7 +294,7 @@ impl Serialize for ExpressionsOutput<'_> {
                 kind: &'static str,
                 steps: Vec<PathStep<'a>>,
             },
-            Class {
+            Symbol {
                 kind: &'static str,
                 reference: Reference<'a>,
             },
@@ -320,7 +320,9 @@ impl Serialize for ExpressionsOutput<'_> {
                     crate::BoundExpressionKind::ObjectSet { .. }
                 ) || matches!(
                     expression.value_type,
-                    crate::ExpressionType::Class | crate::ExpressionType::Temporal
+                    crate::ExpressionType::Class
+                        | crate::ExpressionType::Temporal
+                        | crate::ExpressionType::AttributePath
                 ) || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
                     && expression.value_type == crate::ExpressionType::Numeric
                 {
@@ -347,8 +349,12 @@ impl Serialize for ExpressionsOutput<'_> {
                             })
                             .collect(),
                     },
-                    crate::BoundExpressionKind::Class { reference } => Kind::Class {
+                    crate::BoundExpressionKind::Class { reference } => Kind::Symbol {
                         kind: "class",
+                        reference: project_reference(reference, self.1),
+                    },
+                    crate::BoundExpressionKind::AttributePath { reference } => Kind::Symbol {
+                        kind: "attribute_path",
                         reference: project_reference(reference, self.1),
                     },
                     kind => Kind::Other(kind),
@@ -721,6 +727,12 @@ impl<'report> Serialize for TypeOutput<'report> {
             target: Option<Reference<'a>>,
             restrictions: Vec<Reference<'a>>,
         }
+        #[derive(Serialize)]
+        struct AttributeRestriction<'a> {
+            #[serde(flatten)]
+            ty: TypeOutput<'a>,
+            mandatory: bool,
+        }
         impl<'a> From<&'a crate::NumericRange> for Range<'a> {
             fn from(range: &'a crate::NumericRange) -> Self {
                 Self {
@@ -801,6 +813,10 @@ impl<'report> Serialize for TypeOutput<'report> {
             ClassValue {
                 value_kind: crate::ClassValueKind,
                 restrictions: Vec<Reference<'a>>,
+            },
+            AttributePath {
+                viewable: Option<Reference<'a>>,
+                restrictions: Vec<AttributeRestriction<'a>>,
             },
             Collection {
                 collection_kind: crate::CollectionKind,
@@ -918,6 +934,21 @@ impl<'report> Serialize for TypeOutput<'report> {
                     .restrictions
                     .iter()
                     .map(|reference| project_reference(reference, self.2))
+                    .collect(),
+            }
+            .serialize(serializer),
+            TypeInfo::AttributePath(attribute) => Type::AttributePath {
+                viewable: attribute
+                    .viewable
+                    .as_ref()
+                    .map(|reference| project_reference(reference, self.2)),
+                restrictions: self
+                    .1
+                    .attribute_path_restrictions(attribute)
+                    .map(|(ty, mandatory)| AttributeRestriction {
+                        ty: TypeOutput(ty, self.1, self.2),
+                        mandatory,
+                    })
                     .collect(),
             }
             .serialize(serializer),

@@ -448,6 +448,16 @@ impl Analyzer<'_, '_> {
         } else {
             self.bind_temporal_literal(expression, target)?;
         }
+        if matches!(self.types[target], TypeInfo::AttributePath(_)) {
+            let actual = underlying_expression(&self.expressions, expression);
+            if actual.value_type != ExpressionType::Undefined {
+                let Some(source) = actual.type_id else {
+                    return Some(false);
+                };
+                let at = actual.span.clone();
+                return self.attribute_path_specializes(owner, source, target, &at);
+            }
+        }
         match self.argument_fits(owner, expression, target, mandatory, context) {
             Ok(Some(result)) => Some(result),
             Ok(None) => {
@@ -697,7 +707,9 @@ fn text_argument_fits(
     )
 }
 
-fn text_details(ty: &TypeInfo) -> Option<(bool, Option<&str>, Option<crate::FixedTextFormat>)> {
+pub(super) fn text_details(
+    ty: &TypeInfo,
+) -> Option<(bool, Option<&str>, Option<crate::FixedTextFormat>)> {
     match ty {
         TypeInfo::Text { max_length } => Some((false, Some(max_length), None)),
         TypeInfo::UnboundedText => Some((false, None, None)),

@@ -5109,6 +5109,72 @@ fn coordinate_and_oid_comparisons_distinguish_shapes_and_ordering() {
 }
 
 #[test]
+fn attribute_constants_bind_declaring_member_and_selected_viewable() {
+    for version in ["2.3", "2.4"] {
+        let report = outcome(
+            request(vec![(
+                "memory:///paths.ili",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                    FUNCTION accepts(path:ATTRIBUTE RESTRICTION (MANDATORY TEXT*7; 0..10)):BOOLEAN;
+                    TOPIC T=CLASS Base=label:MANDATORY TEXT*4; END Base;
+                      CLASS Child EXTENDS Base=
+                        position:0..5; selected:ATTRIBUTE := >>Child->label;
+                        MANDATORY CONSTRAINT selected == >>label;
+                        MANDATORY CONSTRAINT accepts(>>label);
+                        MANDATORY CONSTRAINT accepts(>>position);
+                      END Child;
+                    END T; END M."
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let decl = graph.declaration("M.T.Child.selected").unwrap();
+        let expr = decl.derivations()[0];
+        let interlis::BoundExpressionKind::AttributePath { reference } =
+            &graph.expression(expr).unwrap().kind
+        else {
+            panic!("expected a bound attribute constant");
+        };
+        assert_eq!(reference.target_name(), "M.T.Base.label");
+        let Some(TypeInfo::AttributePath(value)) = graph.expression_declared_type(expr) else {
+            panic!("expected the attribute-path type");
+        };
+        assert_eq!(value.viewable.as_ref().unwrap().target_name(), "M.T.Child");
+        let (ty, mandatory) = graph.attribute_path_restrictions(value).next().unwrap();
+        assert!(mandatory);
+        assert!(matches!(ty, TypeInfo::Text { max_length } if max_length == "4"));
+    }
+}
+
+#[test]
+fn attribute_path_restrictions_check_member_scope_and_type() {
+    let base = "FUNCTION accepts(path:ATTRIBUTE RESTRICTION (MANDATORY TEXT*5)):BOOLEAN;
+        TOPIC T=CLASS Item=required:MANDATORY TEXT*4; optional:TEXT*4; wide:MANDATORY TEXT*6;";
+    for (condition, code) in [
+        ("accepts(>>optional)", "ILI-FUNCTION-ARGUMENT"),
+        ("accepts(>>wide)", "ILI-FUNCTION-ARGUMENT"),
+        ("accepts(>>absent)", "ILI-PATH-NAME"),
+        (
+            "accepts(>>Missing->required)",
+            "ILI-ATTRIBUTE-PATH-VIEWABLE",
+        ),
+        (">>required < >>wide", "ILI-EXPRESSION-OPERANDS"),
+        (">>required == \"required\"", "ILI-EXPRESSION-OPERANDS"),
+    ] {
+        outcome(
+            single(&format!(
+                "{base} MANDATORY CONSTRAINT {condition}; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (

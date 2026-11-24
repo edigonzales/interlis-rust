@@ -1668,7 +1668,7 @@ mod reference_and_type_start_regressions {
                     (format!("PARAMETER p:{ty};"), false),
                 ] {
                     let report = run(&body, version);
-                    let checked = !parameter_section && !ty.starts_with("ATTRIBUTE");
+                    let checked = !parameter_section && !ty.starts_with("ATTRIBUTE OF");
                     assert_eq!(
                         report.status(),
                         if checked {

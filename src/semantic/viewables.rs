@@ -422,6 +422,7 @@ impl Analyzer<'_, '_> {
                         | BoundExpressionKind::Temporal { .. }
                         | BoundExpressionKind::Enumeration { .. }
                         | BoundExpressionKind::Class { .. }
+                        | BoundExpressionKind::AttributePath { .. }
                 )
             {
                 symbol.declaration.final_declaration = true;
