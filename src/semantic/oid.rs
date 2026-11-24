@@ -47,7 +47,7 @@ impl Analyzer<'_, '_> {
     pub(super) fn bind_oid_rules(&mut self, topics: &[usize], viewables: &[usize]) -> Option<()> {
         for &id in topics {
             let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[id].ast else {
-                unreachable!("topic ordering only contains topics");
+                continue;
             };
             let base = self.symbols[id].base_scope;
             let basket = self.topic_rule(id, base, options.basket_oid.as_ref(), true)?;

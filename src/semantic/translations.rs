@@ -1139,6 +1139,10 @@ impl Comparison<'_> {
                         Some(AttributePathOwner::ClassAttribute(a)),
                         Some(AttributePathOwner::ClassAttribute(b)),
                     ) => self.expressions_match(vec![(*a, *b)])?,
+                    (
+                        Some(AttributePathOwner::Argument(a)),
+                        Some(AttributePathOwner::Argument(b)),
+                    ) => Some(self.reference(Some(a), Some(b))?),
                     _ => Some(false),
                 };
                 let mut complete = owners == Some(true);
@@ -1176,7 +1180,7 @@ impl Comparison<'_> {
                 return self.types(a.element, b.element);
             }
             (Geometry(a), Geometry(b)) => self.geometry(a, b)?,
-            (MetaObject(a), MetaObject(b)) => self.reference(Some(a), Some(b))?,
+            (MetaObject(a), MetaObject(b)) => self.reference(a.as_ref(), b.as_ref())?,
             _ => false,
         }))
     }

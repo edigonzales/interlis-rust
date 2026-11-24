@@ -67,6 +67,7 @@ impl Analyzer<'_, '_> {
                 };
                 let (ty, mandatory) = match &parameter.ty {
                     ParameterType::Attribute(syntax) => {
+                        self.symbols[id].declaration.declared_mandatory = Some(syntax.mandatory);
                         let effective = match (&syntax.ty, inherited) {
                             (Some(ty), Some(base)) => self.specialize_scalar(id, base, ty)?,
                             (Some(ty), None) => self.concrete_type(id, ty)?,
@@ -109,9 +110,9 @@ impl Analyzer<'_, '_> {
                                     &class.span,
                                 );
                             }
-                            self.bound_reference(id, class, bound)?
+                            Some(self.bound_reference(id, class, bound)?)
                         } else {
-                            self.predefined_reference(id, "METAOBJECT")
+                            None
                         };
                         if let Some(inherited) = inherited {
                             let TypeInfo::MetaObject(base) = &self.types[inherited.ty] else {
@@ -121,12 +122,19 @@ impl Analyzer<'_, '_> {
                                     &parameter.span,
                                 );
                             };
-                            if !self.specializes_symbol(
-                                self.names[reference.target_name()],
-                                self.names[base.target_name()],
-                                &parameter.span,
-                            )? {
-                                return self.metadata_error("ILI-PARAMETER-TYPE", "A metadata parameter override must specialize the inherited class", &parameter.span);
+                            if let Some(base) = base {
+                                let valid = if let Some(reference) = &reference {
+                                    self.specializes_symbol(
+                                        self.names[reference.target_name()],
+                                        self.names[base.target_name()],
+                                        &parameter.span,
+                                    )?
+                                } else {
+                                    false
+                                };
+                                if !valid {
+                                    return self.metadata_error("ILI-PARAMETER-TYPE", "A metadata parameter override must specialize the inherited class", &parameter.span);
+                                }
                             }
                         }
                         let ty = self.types.len();

@@ -26,15 +26,44 @@ impl Analyzer<'_, '_> {
     ) -> Option<ExpressionId> {
         enum Visit {
             Start(ExprId),
+            Argument(ExprId, ExprId),
             Finish(ExprId, Option<BoundName>),
         }
         let mut pending = vec![Visit::Start(root)];
         let mut bound = BTreeMap::new();
+        let mut literal_scopes = BTreeMap::new();
         let modern = self.models[self.symbols[owner].model].language == LanguageVersion::V24;
         let mut uses_objects = false;
         while let Some(visit) = pending.pop() {
             let id = match visit {
                 Visit::Start(id) | Visit::Finish(id, _) => id,
+                Visit::Argument(id, dependency) => {
+                    let mut literal = id;
+                    while let ExpressionKind::Parenthesized { expression } =
+                        expressions[literal.0 as usize].kind
+                    {
+                        if !self.step(1, &expressions[literal.0 as usize].span) {
+                            return None;
+                        }
+                        literal = expression;
+                    }
+                    let expression = &expressions[literal.0 as usize];
+                    if matches!(
+                        expression.kind,
+                        ExpressionKind::Literal(LiteralSyntax::AttributePath {
+                            viewable: None,
+                            ..
+                        })
+                    ) {
+                        let roots =
+                            self.attribute_argument_roots(bound[&dependency.0], &expression.span)?;
+                        if roots.len() == 1 {
+                            literal_scopes.insert(literal.0, *roots.first()?);
+                        }
+                    }
+                    pending.push(Visit::Start(id));
+                    continue;
+                }
             };
             let expression = &expressions[id.0 as usize];
             if !self.step(1, &expression.span) {
@@ -42,6 +71,7 @@ impl Analyzer<'_, '_> {
             }
             let target = match visit {
                 Visit::Finish(_, target) => target,
+                Visit::Argument(..) => unreachable!("argument context was resolved before binding"),
                 Visit::Start(_) => {
                     let target = if let ExpressionKind::Call {
                         function,
@@ -85,7 +115,23 @@ impl Analyzer<'_, '_> {
                             if !self.step(arguments.len(), &expression.span) {
                                 return None;
                             }
-                            pending.extend(arguments.iter().rev().copied().map(Visit::Start));
+                            if let Some(BoundName::Declared(function)) = target {
+                                let order = &self.symbols[function]
+                                    .declaration
+                                    .function()?
+                                    .argument_order;
+                                pending.extend(order.iter().rev().map(|binding| {
+                                    let argument = arguments[binding.position];
+                                    binding.dependency.map_or(
+                                        Visit::Start(argument),
+                                        |dependency| {
+                                            Visit::Argument(argument, arguments[dependency])
+                                        },
+                                    )
+                                }));
+                            } else {
+                                pending.extend(arguments.iter().rev().copied().map(Visit::Start));
+                            }
                         }
                         _ => {}
                     }
@@ -93,9 +139,12 @@ impl Analyzer<'_, '_> {
                 }
             };
             let (kind, value_type, type_id) = match &expression.kind {
-                ExpressionKind::Literal(literal) => {
-                    self.expression_literal(owner, literal, &expression.span)?
-                }
+                ExpressionKind::Literal(literal) => self.expression_literal(
+                    owner,
+                    literal,
+                    &expression.span,
+                    literal_scopes.get(&id.0).copied(),
+                )?,
                 ExpressionKind::Path(path) => {
                     if context == ExpressionContext::Set {
                         self.diagnostics.push(
@@ -286,6 +335,7 @@ impl Analyzer<'_, '_> {
         owner: usize,
         literal: &LiteralSyntax,
         span: &Span,
+        contextual_scope: Option<usize>,
     ) -> Option<(BoundKind, ValueType, Option<usize>)> {
         let (kind, value_type) = match literal {
             LiteralSyntax::Undefined => (BoundKind::Undefined, ValueType::Undefined),
@@ -369,7 +419,12 @@ impl Analyzer<'_, '_> {
                 viewable,
                 attribute,
             } => {
-                return self.attribute_path_literal(owner, viewable.as_ref(), attribute);
+                return self.attribute_path_literal(
+                    owner,
+                    viewable.as_ref(),
+                    attribute,
+                    contextual_scope,
+                );
             }
             _ => {
                 self.unsupported_expression(span);

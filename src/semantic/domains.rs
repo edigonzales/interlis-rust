@@ -175,6 +175,19 @@ impl Analyzer<'_, '_> {
         {
             return None;
         }
+        if self.symbols[owner].declaration.kind == super::Kind::Parameter
+            && base.mandatory
+            && !own.mandatory
+            && self.symbols[owner].declaration.declared_mandatory() != Some(true)
+        {
+            self.report_type_override(
+                owner,
+                "ILI-PARAMETER-TYPE",
+                "An override cannot make a mandatory parameter optional",
+                syntax.span(),
+            );
+            return None;
+        }
         own.mandatory |= base.mandatory;
         let (own_id, base_id, leaf) = match (&self.types[own.ty], &self.types[base.ty]) {
             (TypeInfo::Collection(actual), TypeInfo::Collection(expected)) => {

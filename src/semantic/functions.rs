@@ -7,14 +7,16 @@ use super::{
     units::unit_extends,
 };
 use crate::{
-    BoundExpressionKind, ClassValueKind, ClassValueType, DecimalInfo, ExpressionId, ExpressionType,
-    FunctionInfo, GeometryKind, NumericRange, ObjectSelection, ObjectTarget, RelatedLocation, Span,
-    UnitConstant,
+    AttributePathOwner, AttributePathType, BoundExpressionKind, ClassValueKind, ClassValueType,
+    DecimalInfo, ExpressionId, ExpressionType, FunctionInfo, GeometryKind, NumericRange,
+    ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
     limits::WorkBudget,
+    model::ArgumentBinding,
     number::{DecimalLiteral, NumberError},
     syntax::ArgumentType,
 };
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum AssignmentContext {
@@ -35,13 +37,154 @@ impl Analyzer<'_, '_> {
                 arguments.push(id);
             }
             self.bind_function_type(owner, &function.result)?;
+            let argument_order = self.function_argument_order(owner, &arguments, &function.span)?;
             self.symbols[owner].declaration.function = Some(Box::new(FunctionInfo {
                 arguments: arguments.into_boxed_slice(),
                 explanation: function.explanation.as_ref().map(|text| text.value.clone()),
                 explanation_span: function.explanation.as_ref().map(|text| text.span.clone()),
+                argument_order,
             }));
         }
         Some(())
+    }
+
+    fn argument_dependency(&self, ty: usize) -> Option<usize> {
+        let TypeInfo::AttributePath(ty) = &self.types[ty] else {
+            return None;
+        };
+        let Some(AttributePathOwner::Argument(argument)) = &ty.owner else {
+            return None;
+        };
+        self.names.get(argument.target_name()).copied()
+    }
+
+    fn function_argument_order(
+        &mut self,
+        function: usize,
+        arguments: &[usize],
+        at: &Span,
+    ) -> Option<Box<[ArgumentBinding]>> {
+        if !self.step(arguments.len(), at) {
+            return None;
+        }
+        let positions: BTreeMap<_, _> = arguments
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+        let mut dependencies = Vec::with_capacity(arguments.len());
+        for &arg in arguments.iter().chain(std::iter::once(&function)) {
+            let ty = self.symbols[arg].declaration.type_id?;
+            let dependency = self.argument_dependency(ty);
+            if let Some(dep) = dependency {
+                let ty = self.symbols[dep].declaration.type_id?;
+                if !matches!(
+                    self.types[ty],
+                    TypeInfo::ClassValue(_)
+                        | TypeInfo::ObjectSelection(_)
+                        | TypeInfo::Reference(_)
+                        | TypeInfo::Structure(_)
+                        | TypeInfo::AttributePath(_)
+                        | TypeInfo::Collection(_)
+                ) {
+                    self.diagnostics.push(
+                        "ILI-FUNCTION-ATTRIBUTE-OWNER",
+                        "The dependent formal must provide a class or structure scope",
+                        Some(self.symbols[arg].name_span.clone()),
+                    );
+                    return None;
+                }
+            }
+            if arg != function {
+                dependencies.push(dependency.map(|arg| positions[&arg]));
+            }
+        }
+        let mut order = Vec::with_capacity(arguments.len());
+        let mut visited = vec![0; arguments.len()];
+        let mut chain = Vec::new();
+        for start in 0..arguments.len() {
+            let mut position = Some(start);
+            while let Some(current) = position {
+                match visited[current] {
+                    0 => {
+                        visited[current] = 1;
+                        chain.push(current);
+                        position = dependencies[current];
+                    }
+                    1 => {
+                        self.diagnostics.push(
+                            "ILI-FUNCTION-ARGUMENT-CYCLE",
+                            "Attribute-path arguments cannot depend on one another cyclically",
+                            Some(self.symbols[arguments[current]].name_span.clone()),
+                        );
+                        return None;
+                    }
+                    _ => break,
+                }
+            }
+            for current in chain.drain(..).rev() {
+                visited[current] = 2;
+                order.push(ArgumentBinding {
+                    position: current,
+                    dependency: dependencies[current],
+                });
+            }
+        }
+        Some(order.into_boxed_slice())
+    }
+
+    pub(super) fn attribute_argument_roots(
+        &mut self,
+        argument: ExpressionId,
+        at: &Span,
+    ) -> Option<BTreeSet<usize>> {
+        let mut pending: Vec<_> = self.expressions[argument.0 as usize]
+            .type_id
+            .into_iter()
+            .collect();
+        let mut scopes = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            if !self.step(1, at) {
+                return None;
+            }
+            let mut insert = |links: &[crate::TypeReference]| -> Option<()> {
+                for link in links {
+                    let Some(&id) = self.names.get(link.target_name()) else {
+                        self.diagnostics.push(
+                            "ILI-UNSUPPORTED",
+                            "This argument needs the full predefined object scope",
+                            Some(at.clone()),
+                        );
+                        return None;
+                    };
+                    scopes.insert(id);
+                }
+                Some(())
+            };
+            match &self.types[ty] {
+                TypeInfo::ObjectSelection(objects) => {
+                    for target in &objects.targets {
+                        insert(object_targets(target))?;
+                    }
+                }
+                TypeInfo::Reference(reference) => insert(object_targets(&reference.target))?,
+                TypeInfo::Structure(structure) => insert(structure_targets(structure))?,
+                TypeInfo::ClassValue(value) => insert(&value.restrictions)?,
+                TypeInfo::Collection(collection) => pending.push(collection.element),
+                TypeInfo::AttributePath(attribute) => pending.extend(
+                    attribute
+                        .restrictions
+                        .iter()
+                        .map(|restriction| restriction.ty),
+                ),
+                _ => {}
+            }
+        }
+        Some(scopes)
     }
 
     fn bind_function_type(&mut self, owner: usize, argument: &ArgumentType) -> Option<()> {
@@ -122,6 +265,14 @@ impl Analyzer<'_, '_> {
                     let ty = declaration.type_id?;
                     let mandatory = declaration.mandatory() == Some(true);
                     let at = self.expressions[argument.0 as usize].span.clone();
+                    let ty = self.instantiate_attribute_argument(
+                        owner,
+                        target,
+                        ty,
+                        &arguments,
+                        Some(argument),
+                        &at,
+                    )?;
                     if !self.value_fits(
                         owner,
                         argument,
@@ -141,7 +292,15 @@ impl Analyzer<'_, '_> {
                         return None;
                     }
                 }
-                self.symbols[target].declaration.type_id?
+                let result = self.symbols[target].declaration.type_id?;
+                self.instantiate_attribute_argument(
+                    owner,
+                    target,
+                    result,
+                    &arguments,
+                    None,
+                    &function.span,
+                )?
             }
             BoundName::Predefined(name, _) => self.bind_predefined_call(owner, name, &arguments)?,
         };
@@ -154,6 +313,81 @@ impl Analyzer<'_, '_> {
             scalar_type(&self.types[result]),
             Some(result),
         ))
+    }
+
+    fn instantiate_attribute_argument(
+        &mut self,
+        owner: usize,
+        function: usize,
+        ty: usize,
+        arguments: &[ExpressionId],
+        checking: Option<ExpressionId>,
+        at: &Span,
+    ) -> Option<usize> {
+        let Some(dependency) = self.argument_dependency(ty) else {
+            return Some(ty);
+        };
+        if checking.is_some_and(|id| {
+            self.expressions[id.0 as usize].value_type == ExpressionType::Undefined
+        }) {
+            return Some(ty);
+        }
+        let parameters = &self.symbols[function].declaration.function()?.arguments;
+        if !self.step(parameters.len(), at) {
+            return None;
+        }
+        let parameters = &self.symbols[function].declaration.function()?.arguments;
+        let position = parameters.iter().position(|&param| param == dependency)?;
+        let dependency = arguments[position];
+        let supplied = underlying_expression(&self.expressions, dependency);
+        let dynamic = supplied.value_type == ExpressionType::Class
+            && !matches!(supplied.kind, BoundExpressionKind::Class { .. })
+            && checking.is_none_or(|id| matches!(
+                self.expressions[id.0 as usize].type_id.map(|id| &self.types[id]),
+                Some(TypeInfo::AttributePath(p)) if matches!(p.owner, Some(AttributePathOwner::ClassAttribute(_)))
+            ));
+        let context = if dynamic {
+            Some(AttributePathOwner::ClassAttribute(dependency))
+        } else {
+            let scopes = self.attribute_argument_roots(dependency, at)?;
+            match scopes.len() {
+                1 => {
+                    let scope = *scopes.first()?;
+                    let name = crate::syntax::Name {
+                        value: self.symbols[scope].declaration.name.clone(),
+                        span: self.symbols[scope].name_span.clone(),
+                    };
+                    Some(AttributePathOwner::Viewable(
+                        self.reference_to_symbol(owner, scope, &name)?,
+                    ))
+                }
+                0 if checking.is_some() => None,
+                _ if checking.is_none() => return Some(ty),
+                _ => {
+                    self.diagnostics.push(
+                        "ILI-FUNCTION-ATTRIBUTE-OWNER",
+                        "The actual argument does not identify a single attribute scope",
+                        Some(at.clone()),
+                    );
+                    return None;
+                }
+            }
+        };
+        let TypeInfo::AttributePath(formal) = &self.types[ty] else {
+            unreachable!()
+        };
+        if !self.step(formal.restrictions.len(), at) {
+            return None;
+        }
+        let TypeInfo::AttributePath(formal) = &self.types[ty] else {
+            unreachable!()
+        };
+        let result = self.types.len();
+        self.types.push(TypeInfo::AttributePath(AttributePathType {
+            owner: context,
+            restrictions: formal.restrictions.clone(),
+        }));
+        Some(result)
     }
 
     pub(super) fn resolve_call(

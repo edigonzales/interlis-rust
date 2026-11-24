@@ -337,7 +337,7 @@ impl Analyzer<'_, '_> {
         let mut deferred = vec![BTreeSet::new(); self.symbols.len()];
         for &topic in topics {
             let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[topic].ast else {
-                unreachable!()
+                continue;
             };
             let span = self.symbols[topic].name_span.clone();
             let model = self.symbols[topic].model;

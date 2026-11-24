@@ -266,9 +266,8 @@ impl Analyzer<'_, '_> {
             }
             "SIGN" => {
                 let ty = self.types.len();
-                let reference = self.predefined_reference(owner, "METAOBJECT");
-                self.types.push(TypeInfo::MetaObject(reference.clone()));
-                self.predefined_member(id, Kind::Parameter, "Sign", ty, false, Some(reference))?;
+                self.types.push(TypeInfo::MetaObject(None));
+                self.predefined_member(id, Kind::Parameter, "Sign", ty, false, None)?;
             }
             _ => {}
         }

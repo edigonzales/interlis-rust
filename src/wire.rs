@@ -906,12 +906,14 @@ impl<'report> Serialize for TypeOutput<'report> {
                 restrictions: Vec<Reference<'a>>,
             },
             MetaObject {
-                target: Reference<'a>,
+                target: Option<Reference<'a>>,
             },
             AttributePath {
                 viewable: Option<Reference<'a>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 class_attribute: Option<crate::ExpressionId>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                argument: Option<Reference<'a>>,
                 restrictions: Vec<AttributeRestriction<'a>>,
             },
             Collection {
@@ -1063,20 +1065,28 @@ impl<'report> Serialize for TypeOutput<'report> {
             }
             .serialize(serializer),
             TypeInfo::MetaObject(target) => Type::MetaObject {
-                target: project_reference(target, self.2),
+                target: target
+                    .as_ref()
+                    .map(|target| project_reference(target, self.2)),
             }
             .serialize(serializer),
             TypeInfo::AttributePath(attribute) => {
-                let (viewable, class_attribute) = match &attribute.owner {
+                let (viewable, class_attribute, argument) = match &attribute.owner {
                     Some(crate::AttributePathOwner::Viewable(reference)) => {
-                        (Some(project_reference(reference, self.2)), None)
+                        (Some(project_reference(reference, self.2)), None, None)
                     }
-                    Some(crate::AttributePathOwner::ClassAttribute(path)) => (None, Some(*path)),
-                    None => (None, None),
+                    Some(crate::AttributePathOwner::ClassAttribute(path)) => {
+                        (None, Some(*path), None)
+                    }
+                    Some(crate::AttributePathOwner::Argument(reference)) => {
+                        (None, None, Some(project_reference(reference, self.2)))
+                    }
+                    None => (None, None, None),
                 };
                 Type::AttributePath {
                     viewable,
                     class_attribute,
+                    argument,
                     restrictions: self
                         .1
                         .attribute_path_restrictions(attribute)

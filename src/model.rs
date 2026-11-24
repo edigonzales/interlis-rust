@@ -200,7 +200,7 @@ pub enum TypeInfo {
     Oid(OidType),
     Structure(StructureType),
     ClassValue(ClassValueType),
-    MetaObject(TypeReference),
+    MetaObject(Option<TypeReference>),
     AttributePath(AttributePathType),
     Collection(CollectionType),
     Reference(ReferenceType),
@@ -490,6 +490,13 @@ pub struct FunctionInfo {
     pub explanation: Option<String>,
     pub(crate) arguments: Box<[usize]>,
     pub(crate) explanation_span: Option<Span>,
+    pub(crate) argument_order: Box<[ArgumentBinding]>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ArgumentBinding {
+    pub position: usize,
+    pub dependency: Option<usize>,
 }
 
 impl FunctionInfo {
@@ -540,6 +547,7 @@ pub struct AttributePathType {
 pub enum AttributePathOwner {
     Viewable(TypeReference),
     ClassAttribute(ExpressionId),
+    Argument(TypeReference),
 }
 
 #[derive(Debug, Clone, Copy)]

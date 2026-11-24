@@ -2208,6 +2208,64 @@ fn metadata_baskets_bind_the_topic_class_and_ordered_external_object_names() {
 }
 
 #[test]
+fn dependent_function_attribute_paths_bind_later_arguments_and_return_types() {
+    for version in ["2.3", "2.4"] {
+        let input = |literal: &str| {
+            request(vec![(
+            "function", format!(
+                "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                 FUNCTION choose(path:ATTRIBUTE OF @source RESTRICTION (TEXT*12); source:OBJECT OF M.T.Base)
+                    : ATTRIBUTE OF @source RESTRICTION (TEXT*12);
+                 TOPIC T =
+                    CLASS Base=caption:TEXT*10; count:0..10; END Base;
+                    CLASS Other=caption:TEXT*10; END Other;
+                    STRUCTURE Caller=target:REFERENCE TO Base;
+                        picked:ATTRIBUTE RESTRICTION (TEXT*12) := choose(({literal}),target);
+                    END Caller;
+                 END T; END M."
+            ),
+        )])
+        };
+        let report = outcome(input(">>caption"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::AttributePath(formal)) = graph.effective_type("M.choose.path") else {
+            panic!("expected a bound attribute-path parameter");
+        };
+        let Some(interlis::AttributePathOwner::Argument(dependency)) = &formal.owner else {
+            panic!("expected an argument dependency");
+        };
+        assert_eq!(dependency.target_name(), "M.choose.source");
+        let derivation = graph
+            .declaration("M.T.Caller.picked")
+            .unwrap()
+            .derivations()[0];
+        let Some(TypeInfo::AttributePath(result)) = graph.expression_declared_type(derivation)
+        else {
+            panic!("expected a specialized attribute-path result");
+        };
+        let Some(interlis::AttributePathOwner::Viewable(scope)) = &result.owner else {
+            panic!("expected the scope of the supplied object");
+        };
+        assert_eq!(scope.target_name(), "M.T.Base");
+        outcome(
+            input(">>Other->caption"),
+            Status::Rejected,
+            Some("ILI-FUNCTION-ARGUMENT"),
+        );
+        outcome(
+            input(">>count"),
+            Status::Rejected,
+            Some("ILI-FUNCTION-ARGUMENT"),
+        );
+    }
+    outcome(
+        single("FUNCTION loop(first:ATTRIBUTE OF @second; second:ATTRIBUTE OF @first):BOOLEAN;"),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ARGUMENT-CYCLE"),
+    );
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(
@@ -4141,6 +4199,60 @@ fn predefined_time_baskets_support_inherited_metadata_and_type_model_rules() {
             input("SIGN"),
             Status::Rejected,
             Some("ILI-TYPE-MODEL-METADATA"),
+        );
+    }
+}
+
+#[test]
+fn predefined_topic_inheritance_and_signature_parameter_overrides_keep_their_types() {
+    for version in ["2.3", "2.4"] {
+        outcome(
+            request(vec![(
+                "time-topic",
+                format!(
+                    "INTERLIS {version}; MODEL Types AT \"x\" VERSION \"1\" = TOPIC CivilTime EXTENDS INTERLIS.TIMESYSTEMS=END CivilTime; END Types."
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        let signs = |mandatory: &str, result_kind: &str| {
+            request(vec![(
+                "signs",
+                format!(
+                    "INTERLIS {version}; SYMBOLOGY MODEL Original AT \"x\" VERSION \"1\" =
+                   TOPIC T=CLASS Parent EXTENDS INTERLIS.SIGN=
+                       PARAMETER Label:MANDATORY TEXT*20; Identity:METAOBJECT;
+                   END Parent;
+                   CLASS Child EXTENDS Parent=
+                       PARAMETER Label(EXTENDED):{mandatory} TEXT*10;
+                   END Child; END T;
+                 END Original.
+                 SYMBOLOGY MODEL Translated AT \"x\" VERSION \"1\" TRANSLATION OF Original [\"1\"] =
+                   TOPIC P=CLASS Parent EXTENDS INTERLIS.SIGN=
+                       PARAMETER Caption:MANDATORY TEXT*20; Identity:{result_kind};
+                   END Parent;
+                   CLASS Child EXTENDS Parent=
+                       PARAMETER Caption(EXTENDED):MANDATORY TEXT*10;
+                   END Child; END P;
+                 END Translated."
+                ),
+            )])
+        };
+        outcome(
+            signs("MANDATORY", "METAOBJECT"),
+            Status::CheckedSubset,
+            None,
+        );
+        outcome(
+            signs("", "METAOBJECT"),
+            Status::Rejected,
+            Some("ILI-PARAMETER-TYPE"),
+        );
+        outcome(
+            signs("MANDATORY", "METAOBJECT OF INTERLIS.METAOBJECT"),
+            Status::Rejected,
+            Some("ILI-TRANSLATION-DEFINITION"),
         );
     }
 }

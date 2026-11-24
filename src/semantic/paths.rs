@@ -52,6 +52,40 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
+        let formal = if let Some(AttributePathOf::Argument(name)) = of {
+            let declaration = &self.symbols[owner].declaration;
+            let function = if declaration.kind == Kind::Function {
+                Some(owner)
+            } else if declaration.kind == Kind::Parameter {
+                declaration
+                    .parent
+                    .filter(|&parent| self.symbols[parent].declaration.kind == Kind::Function)
+            } else {
+                None
+            };
+            let Some(function) = function else {
+                return self.path_error(
+                    "ILI-ATTRIBUTE-PATH-ARGUMENT",
+                    "ATTRIBUTE OF @ requires a function signature",
+                    &name.span,
+                );
+            };
+            let Some(target) = self
+                .visible_name(function, &name.value, Some(&[Kind::Parameter]), &name.span)
+                .ok()?
+            else {
+                return self.path_error(
+                    "ILI-ATTRIBUTE-PATH-ARGUMENT",
+                    "The named formal argument is absent from this function",
+                    &name.span,
+                );
+            };
+            Some(AttributePathOwner::Argument(
+                self.reference_to_symbol(owner, target, name)?,
+            ))
+        } else {
+            None
+        };
         let reference = self.symbols[owner].declaration.reference.take();
         let restrictions = restrictions
             .iter()
@@ -65,7 +99,7 @@ impl Analyzer<'_, '_> {
             .collect::<Option<Vec<_>>>();
         self.symbols[owner].declaration.reference = reference;
         Some(AttributePathType {
-            owner: None,
+            owner: formal,
             restrictions: restrictions?,
         })
     }
@@ -177,6 +211,7 @@ impl Analyzer<'_, '_> {
         owner: usize,
         viewable: Option<&QualifiedName>,
         attribute: &Name,
+        contextual_scope: Option<usize>,
     ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
         let (scope, selected) = if let Some(name) = viewable {
             let target = self.expression_name(
@@ -191,11 +226,12 @@ impl Analyzer<'_, '_> {
             };
             (scope, self.bound_reference(owner, name, target)?)
         } else {
+            let scope = contextual_scope.unwrap_or(owner);
             let name = Name {
-                value: self.symbols[owner].declaration.name.clone(),
-                span: self.symbols[owner].name_span.clone(),
+                value: self.symbols[scope].declaration.name.clone(),
+                span: self.symbols[scope].name_span.clone(),
             };
-            (owner, self.reference_to_symbol(owner, owner, &name)?)
+            (scope, self.reference_to_symbol(owner, scope, &name)?)
         };
         let member = self.path_attribute(scope, attribute)?;
         let member_declaration = &self.symbols[member].declaration;
@@ -265,6 +301,10 @@ impl Analyzer<'_, '_> {
             (
                 Some(AttributePathOwner::Viewable(source)),
                 Some(AttributePathOwner::Viewable(target)),
+            ) => source.target_name() == target.target_name(),
+            (
+                Some(AttributePathOwner::Argument(source)),
+                Some(AttributePathOwner::Argument(target)),
             ) => source.target_name() == target.target_name(),
             (
                 Some(AttributePathOwner::ClassAttribute(source)),

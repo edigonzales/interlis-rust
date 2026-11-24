@@ -176,14 +176,9 @@ fn supported_type(ty: &TypeSyntax) -> bool {
             }),
             _ => true,
         },
-        TypeSyntax::AttributePathValue {
-            of, restrictions, ..
-        } => {
-            !matches!(of, Some(syntax::AttributePathOf::Argument(_)))
-                && restrictions
-                    .iter()
-                    .all(|restriction| restriction.ty.as_ref().is_some_and(supported_type))
-        }
+        TypeSyntax::AttributePathValue { restrictions, .. } => restrictions
+            .iter()
+            .all(|restriction| restriction.ty.as_ref().is_some_and(supported_type)),
     }
 }
 
