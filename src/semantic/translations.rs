@@ -3,9 +3,10 @@ use super::{
     paths::equivalent_selector,
 };
 use crate::{
-    AttributePathOwner, BoundConstraint, BoundExpression, BoundExpressionKind, ConstraintRule,
-    DecimalInfo, Enumeration, ExpressionId, LanguageVersion, NumericRange, OidRule, OidType,
-    RelatedLocation, TypeInfo, TypeReference, UnitConstant, limits::WorkBudget,
+    AttributePathOwner, BoundConstraint, BoundExpression, BoundExpressionKind, Cardinality,
+    ConstraintRule, DecimalInfo, Enumeration, ExpressionId, GeometryType, LanguageVersion,
+    LineForm, NumericRange, ObjectTarget, OidRule, OidType, OverlapTolerance, RelatedLocation,
+    TypeInfo, TypeReference, UnitConstant, UnitDefinition, UnitInfo, UnitScale, limits::WorkBudget,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -328,6 +329,44 @@ impl Analyzer<'_, '_> {
         } else if a.oid_rules().is_some() != b.oid_rules().is_some() {
             return Ok(Some(false));
         }
+        if let (Some(a), Some(b)) = (a.association(), b.association())
+            && (!same_cardinality(&a.cardinality, &b.cardinality) || a.identified != b.identified)
+        {
+            return Ok(Some(false));
+        }
+        if let (Some(a), Some(b)) = (a.role(), b.role())
+            && (!same_cardinality(&a.cardinality, &b.cardinality)
+                || a.strength != b.strength
+                || a.ordered != b.ordered
+                || a.external != b.external
+                || a.hiding != b.hiding
+                || !comparison.object_targets(&a.targets, &b.targets)?)
+        {
+            return Ok(Some(false));
+        }
+        if let (Some(a), Some(b)) = (a.unit(), b.unit())
+            && !comparison.units(a, b)?
+        {
+            return Ok(Some(false));
+        }
+        if !comparison.unordered_references(
+            a.deferred_generics.as_deref().unwrap_or_default(),
+            b.deferred_generics.as_deref().unwrap_or_default(),
+        )? {
+            return Ok(Some(false));
+        }
+        let a_context = a.context.as_deref().unwrap_or_default();
+        let b_context = b.context.as_deref().unwrap_or_default();
+        if a_context.len() != b_context.len() {
+            return Ok(Some(false));
+        }
+        for (a, b) in a_context.iter().zip(b_context) {
+            if !comparison.reference(Some(&a.generic), Some(&b.generic))?
+                || !comparison.unordered_references(&a.alternatives, &b.alternatives)?
+            {
+                return Ok(Some(false));
+            }
+        }
         if !matches!(
             a.kind,
             Kind::Topic
@@ -338,10 +377,11 @@ impl Analyzer<'_, '_> {
                 | Kind::Attribute
                 | Kind::Function
                 | Kind::Parameter
-        ) || a.context.is_some()
-            || a.deferred_generics.is_some()
-            || b.deferred_generics.is_some()
-        {
+                | Kind::Association
+                | Kind::Role
+                | Kind::Unit
+                | Kind::Context
+        ) {
             return Ok(None);
         }
         if a.function()
@@ -402,6 +442,7 @@ fn properties(syntax: Option<&SyntaxDecl>) -> &[crate::syntax::Located<crate::sy
             | SyntaxDecl::Attribute { properties, .. }
             | SyntaxDecl::Domain { properties, .. },
         ) => properties,
+        Some(SyntaxDecl::Association(association)) => &association.properties,
         _ => &[],
     }
 }
@@ -416,6 +457,10 @@ fn pair_expressions(
     }
     pending.extend(a.iter().copied().zip(b.iter().copied()));
     true
+}
+
+fn same_cardinality(a: &Cardinality, b: &Cardinality) -> bool {
+    a.lower == b.lower && a.upper == b.upper
 }
 
 fn pair_optional(
@@ -672,6 +717,99 @@ impl Comparison<'_> {
         }
     }
 
+    fn object_targets(&mut self, a: &[ObjectTarget], b: &[ObjectTarget]) -> Result<bool, ()> {
+        if a.len() != b.len() {
+            return Ok(false);
+        }
+        for (a, b) in a.iter().zip(b) {
+            if !self.reference(a.target.as_ref(), b.target.as_ref())?
+                || !self.references(&a.restrictions, &b.restrictions)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn units(&mut self, a: &UnitInfo, b: &UnitInfo) -> Result<bool, ()> {
+        if a.abstract_unit != b.abstract_unit
+            || !self.reference(a.base.as_ref(), b.base.as_ref())?
+        {
+            return Ok(false);
+        }
+        use UnitDefinition::*;
+        Ok(match (&a.definition, &b.definition) {
+            (Fundamental, Fundamental) => true,
+            (Composed { terms: a }, Composed { terms: b }) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for (a, b) in a.iter().zip(b) {
+                    if a.operator != b.operator || !self.reference(Some(&a.unit), Some(&b.unit))? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            (
+                Derived {
+                    target: a,
+                    scale: av,
+                },
+                Derived {
+                    target: b,
+                    scale: bv,
+                },
+            ) => {
+                if !self.reference(Some(a), Some(b))? {
+                    return Ok(false);
+                }
+                use UnitScale::*;
+                match (av, bv) {
+                    (Identity, Identity) | (Function(_), Function(_)) => true,
+                    (Factors(a), Factors(b)) => {
+                        if a.len() != b.len() {
+                            return Ok(false);
+                        }
+                        for (a, b) in a.iter().zip(b) {
+                            self.work.charge(1)?;
+                            if a.operator != b.operator || !self.constant(&a.value, &b.value)? {
+                                return Ok(false);
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
+    fn geometry(&mut self, a: &GeometryType, b: &GeometryType) -> Result<bool, ()> {
+        if a.geometry_kind != b.geometry_kind
+            || a.directed != b.directed
+            || a.without_overlaps != b.without_overlaps
+            || !self.reference(a.vertex.as_ref(), b.vertex.as_ref())?
+            || !self.reference(a.line_attributes.as_ref(), b.line_attributes.as_ref())?
+            || !self.unordered_names(
+                a.line_forms.iter().map(line_form_name),
+                b.line_forms.iter().map(line_form_name),
+            )?
+        {
+            return Ok(false);
+        }
+        use OverlapTolerance::*;
+        Ok(match (&a.tolerance, &b.tolerance) {
+            (None, None) => true,
+            (Some(TrackWidth(a)), Some(TrackWidth(b))) => self.reference(a.as_ref(), b.as_ref())?,
+            (Some(Explicit(a)), Some(Explicit(b))) => {
+                compare_decimal(a, b, self.work).map_err(|_| ())? == Ordering::Equal
+            }
+            _ => false,
+        })
+    }
+
     fn enum_positions(
         &mut self,
         ty: Option<usize>,
@@ -730,16 +868,22 @@ impl Comparison<'_> {
         a: &[TypeReference],
         b: &[TypeReference],
     ) -> Result<bool, ()> {
-        if a.len() != b.len() {
-            return Ok(false);
-        }
+        self.unordered_names(
+            a.iter().map(TypeReference::target_name),
+            b.iter().map(TypeReference::target_name),
+        )
+    }
+
+    fn unordered_names<'a, 'b>(
+        &mut self,
+        a: impl Iterator<Item = &'a str>,
+        b: impl Iterator<Item = &'b str>,
+    ) -> Result<bool, ()> {
         let mut a = a
-            .iter()
-            .map(|reference| self.target(reference.target_name(), false))
+            .map(|name| self.target(name, false))
             .collect::<Result<Vec<_>, _>>()?;
         let mut b = b
-            .iter()
-            .map(|reference| self.target(reference.target_name(), true))
+            .map(|name| self.target(name, true))
             .collect::<Result<Vec<_>, _>>()?;
         a.sort_unstable();
         b.sort_unstable();
@@ -938,29 +1082,24 @@ impl Comparison<'_> {
                     && self.references(&a.target.restrictions, &b.target.restrictions)?
             }
             (ObjectSelection(a), ObjectSelection(b)) => {
-                if a.plural != b.plural || a.targets.len() != b.targets.len() {
-                    return Ok(Some(false));
-                }
-                for (a, b) in a.targets.iter().zip(&b.targets) {
-                    if !self.reference(a.target.as_ref(), b.target.as_ref())?
-                        || !self.references(&a.restrictions, &b.restrictions)?
-                    {
-                        return Ok(Some(false));
-                    }
-                }
-                true
+                a.plural == b.plural && self.object_targets(&a.targets, &b.targets)?
             }
             (Collection(a), Collection(b)) => {
-                if a.kind != b.kind
-                    || a.cardinality.lower != b.cardinality.lower
-                    || a.cardinality.upper != b.cardinality.upper
-                {
+                if a.kind != b.kind || !same_cardinality(&a.cardinality, &b.cardinality) {
                     return Ok(Some(false));
                 }
                 return self.types(a.element, b.element);
             }
-            (Geometry(_), Geometry(_)) => return Ok(None),
+            (Geometry(a), Geometry(b)) => self.geometry(a, b)?,
             _ => false,
         }))
+    }
+}
+
+fn line_form_name(form: &LineForm) -> &str {
+    match form {
+        LineForm::Straights => "INTERLIS.STRAIGHTS",
+        LineForm::Arcs => "INTERLIS.ARCS",
+        LineForm::Named(reference) => reference.target_name(),
     }
 }

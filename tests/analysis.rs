@@ -1396,6 +1396,62 @@ fn translations_compare_bound_expressions_after_renaming_members_and_enum_values
 }
 
 #[test]
+fn translations_compare_geometry_units_and_association_roles() {
+    for version in ["2.3", "2.4"] {
+        let input = |factor: &str, direction: &str, cardinality: &str| {
+            request(vec![
+            (
+                "original",
+                format!(
+                    "INTERLIS {version}; MODEL Original AT \"x\" VERSION \"1\" =
+                       UNIT Length=1.00 [INTERLIS.m];
+                       DOMAIN Position=COORD 0.00..100.00 [Length],0.00..100.00 [Length];
+                           Route=POLYLINE WITH (STRAIGHTS,ARCS) VERTEX Position;
+                       TOPIC T=CLASS Station=END Station; CLASS Road=route:Route; END Road;
+                           ASSOCIATION Link=parent -- {{0..1}} Station; paths -- {{0..*}} Road; END Link;
+                       END T; END Original."
+                ),
+            ),
+            (
+                "localized",
+                format!(
+                    "INTERLIS {version}; MODEL French AT \"x\" VERSION \"1\" TRANSLATION OF Original [\"1\"] =
+                       UNIT Longueur={factor} [INTERLIS.m];
+                       DOMAIN Point=COORD 0.00..100.00 [Longueur],0.00..100.00 [Longueur];
+                           Chemin={direction} POLYLINE WITH (ARCS,STRAIGHTS) VERTEX Point;
+                       TOPIC P=CLASS Gare=END Gare; CLASS Rue=chemin:Chemin; END Rue;
+                           ASSOCIATION Lien=place -- {{0..1}} Gare; routes -- {{{cardinality}}} Rue; END Lien;
+                       END P; END French."
+                ),
+            ),
+        ])
+        };
+        let report = outcome(input("1", "", "0..*"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        assert_eq!(
+            graph
+                .declaration("French.P.Lien.routes")
+                .unwrap()
+                .translation_of()
+                .unwrap()
+                .target_name(),
+            "Original.T.Link.paths"
+        );
+        for (factor, direction, cardinality) in [
+            ("2", "", "0..*"),
+            ("1", "DIRECTED", "0..*"),
+            ("1", "", "0..2"),
+        ] {
+            outcome(
+                input(factor, direction, cardinality),
+                Status::Rejected,
+                Some("ILI-TRANSLATION-DEFINITION"),
+            );
+        }
+    }
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(
