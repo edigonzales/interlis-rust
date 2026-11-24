@@ -1,6 +1,8 @@
 use super::{
     Analyzer, BoundName, Kind, QualifiedName, SyntaxDecl, TypeInfo,
-    expressions::{ExpressionContext, scalar_type, underlying_expression},
+    expressions::{
+        ExpressionContext, binary_definedness_inputs, scalar_type, underlying_expression,
+    },
     functions::AssignmentContext,
     paths::PathContext,
 };
@@ -1369,24 +1371,14 @@ impl Analyzer<'_, '_> {
         result: &mut ViewAttributeDependencies,
     ) -> Option<DerivationBranch> {
         let actual = underlying_expression(&self.expressions, root);
+        let at = actual.span.clone();
         let mut branch = DerivationBranch {
             nullable: actual.value_type == ExpressionType::Undefined,
-            unconditional: actual.value_type != ExpressionType::Undefined
-                && matches!(
-                    actual.kind,
-                    BoundExpressionKind::Boolean { .. }
-                        | BoundExpressionKind::Number { .. }
-                        | BoundExpressionKind::Text { .. }
-                        | BoundExpressionKind::Temporal { .. }
-                        | BoundExpressionKind::Formatted { .. }
-                        | BoundExpressionKind::Enumeration { .. }
-                        | BoundExpressionKind::Class { .. }
-                        | BoundExpressionKind::AttributePath { .. }
-                ),
+            unconditional: union && self.derivation_is_defined(root, &at)?,
             ..DerivationBranch::default()
         };
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
+        let mut pending = vec![(root, true)];
+        while let Some((id, affects_definedness)) = pending.pop() {
             let at = self.expressions[id.0 as usize].span.clone();
             if !self.step(1, &at) {
                 return None;
@@ -1396,18 +1388,24 @@ impl Analyzer<'_, '_> {
                     for (position, step) in steps.iter().enumerate() {
                         let id = self.names[step.reference.target_name()];
                         let target = &self.symbols[id].declaration;
-                        branch.nullable |= target.is_nullable_view_base();
-                        if union && position == 0 && target.kind == Kind::ViewBase {
+                        branch.nullable |= affects_definedness && target.is_nullable_view_base();
+                        if affects_definedness
+                            && union
+                            && position == 0
+                            && target.kind == Kind::ViewBase
+                        {
                             branch.bases.insert(id);
                         }
                         if self.is_derived_member(id) {
                             result
                                 .attributes
                                 .push((id, step.reference.source_span().clone()));
-                            if position == 0 {
-                                branch.attributes.insert(id);
-                            } else {
-                                branch.nested_attributes.insert(id);
+                            if affects_definedness {
+                                if position == 0 {
+                                    branch.attributes.insert(id);
+                                } else {
+                                    branch.nested_attributes.insert(id);
+                                }
                             }
                         }
                         if let Some(access) = step.association_access.as_ref()
@@ -1419,25 +1417,44 @@ impl Analyzer<'_, '_> {
                                 result
                                     .attributes
                                     .push((role, step.reference.source_span().clone()));
-                                branch.nested_attributes.insert(role);
+                                if affects_definedness {
+                                    branch.nested_attributes.insert(role);
+                                }
                             }
                         }
                     }
                 }
                 BoundExpressionKind::Call { arguments, .. } => {
-                    pending.extend(arguments.iter().copied())
+                    pending.extend(arguments.iter().map(|&arg| (arg, affects_definedness)))
                 }
-                BoundExpressionKind::TextPath { binding, .. } => pending.extend(binding),
+                BoundExpressionKind::TextPath { binding, .. } => {
+                    pending.extend(binding.iter().map(|&id| (id, affects_definedness)))
+                }
                 BoundExpressionKind::Inspection {
                     path, restriction, ..
                 } => {
-                    pending.push(*path);
-                    pending.extend(restriction);
+                    pending.push((*path, affects_definedness));
+                    pending.extend(restriction.iter().map(|&id| (id, affects_definedness)));
                 }
-                BoundExpressionKind::Binary { left, right, .. } => pending.extend([*left, *right]),
-                BoundExpressionKind::Unary { operand, .. } => pending.push(*operand),
-                BoundExpressionKind::Group { expression }
-                | BoundExpressionKind::Defined { expression } => pending.push(*expression),
+                BoundExpressionKind::Binary {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    let (needs_left, needs_right) =
+                        binary_definedness_inputs(&self.expressions, *operator, *left, *right);
+                    pending.extend([
+                        (*left, affects_definedness && needs_left),
+                        (*right, affects_definedness && needs_right),
+                    ]);
+                }
+                BoundExpressionKind::Unary { operand, .. } => {
+                    pending.push((*operand, affects_definedness))
+                }
+                BoundExpressionKind::Group { expression } => {
+                    pending.push((*expression, affects_definedness))
+                }
+                BoundExpressionKind::Defined { expression } => pending.push((*expression, false)),
                 _ => {}
             }
         }

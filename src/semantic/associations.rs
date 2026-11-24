@@ -1,7 +1,7 @@
 use super::{
     Analyzer, Kind, Namespace, SyntaxDecl,
     collections::{cardinality_narrows, compare_count},
-    expressions::{ExpressionContext, underlying_expression},
+    expressions::{ExpressionContext, binary_definedness_inputs, underlying_expression},
     functions::AssignmentContext,
     object_references::object_targets,
 };
@@ -270,31 +270,71 @@ impl Analyzer<'_, '_> {
         Some(inherited)
     }
 
-    fn derivation_is_defined(&mut self, value: ExpressionId, at: &Span) -> Option<bool> {
-        let expression = underlying_expression(&self.expressions, value);
-        let BoundExpressionKind::Path { steps } = &expression.kind else {
-            return Some(
-                expression.value_type != crate::ExpressionType::Undefined
-                    && matches!(
-                        expression.kind,
-                        BoundExpressionKind::Boolean { .. }
-                            | BoundExpressionKind::Number { .. }
-                            | BoundExpressionKind::Temporal { .. }
-                            | BoundExpressionKind::Formatted { .. }
-                            | BoundExpressionKind::Text { .. }
-                            | BoundExpressionKind::Enumeration { .. }
-                            | BoundExpressionKind::Class { .. }
-                            | BoundExpressionKind::AttributePath { .. }
-                            | BoundExpressionKind::Defined { .. }
-                    ),
-            );
-        };
-        if self.work.charge(u32::try_from(steps.len()).ok()?).is_err() {
-            self.diagnostics
-                .limit("Semantic work budget exceeded", Some(at.clone()));
-            return None;
+    pub(super) fn derivation_is_defined(&mut self, value: ExpressionId, at: &Span) -> Option<bool> {
+        let mut pending = vec![value];
+        while let Some(id) = pending.pop() {
+            if !self.step(1, at) {
+                return None;
+            }
+            let expr = &self.expressions[id.0 as usize];
+            if expr.value_type == crate::ExpressionType::Undefined {
+                return Some(false);
+            }
+            use BoundExpressionKind::*;
+            match &expr.kind {
+                Boolean { .. }
+                | Number { .. }
+                | Temporal { .. }
+                | Formatted { .. }
+                | Text { .. }
+                | Enumeration { .. }
+                | Class { .. }
+                | AttributePath { .. }
+                | Defined { .. } => {}
+                Group { expression } => pending.push(*expression),
+                Unary { operand, .. } => pending.push(*operand),
+                Binary {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    if *operator == crate::BinaryOperator::Divide {
+                        let denominator = super::expressions::numeric_operand(
+                            &self.expressions,
+                            &self.types,
+                            *right,
+                        );
+                        if !denominator.bounds.is_some_and(|(lower, upper)| {
+                            let low = lower.coefficient();
+                            (low != "0" && !low.starts_with('-'))
+                                || upper.coefficient().starts_with('-')
+                        }) {
+                            return Some(false);
+                        }
+                    }
+                    let (needs_left, needs_right) =
+                        binary_definedness_inputs(&self.expressions, *operator, *left, *right);
+                    pending.extend(needs_left.then_some(*left));
+                    pending.extend(needs_right.then_some(*right));
+                }
+                Path { steps } => {
+                    if self.work.charge(u32::try_from(steps.len()).ok()?).is_err() {
+                        self.diagnostics
+                            .limit("Semantic work budget exceeded", Some(at.clone()));
+                        return None;
+                    }
+                    if !self.path_is_defined(steps) {
+                        return Some(false);
+                    }
+                }
+                _ => return Some(false),
+            }
         }
-        Some(steps.iter().all(|step| {
+        Some(true)
+    }
+
+    fn path_is_defined(&self, steps: &[crate::BoundPathStep]) -> bool {
+        steps.iter().all(|step| {
             if let Some(access) = &step.association_access {
                 return compare_count(&access.cardinality.lower, "0") == Ordering::Greater;
             }
@@ -321,7 +361,7 @@ impl Analyzer<'_, '_> {
                 matches!(decl.type_id.map(|ty| &self.types[ty]), Some(TypeInfo::Collection(collection))
                     if compare_count(&collection.cardinality.lower, minimum) != Ordering::Less)
             })
-        }))
+        })
     }
 
     fn require_association_view_path(&mut self, value: ExpressionId, at: &Span) -> Option<()> {

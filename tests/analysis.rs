@@ -8485,5 +8485,60 @@ fn inspection_base_extensions_and_view_factors_use_the_same_optional_alias() {
             Status::Rejected,
             Some("ILI-VIEW-NULLABLE-ATTRIBUTE"),
         );
+        if edition == "2.4" {
+            for factor in [
+                "DEFINED(sub->flag)",
+                "sub->flag != UNDEFINED",
+                "#false AND sub->flag",
+            ] {
+                outcome(input("Special", factor), Status::CheckedSubset, None);
+            }
+        }
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS Item=rank:MANDATORY 0..10; END Item;
+                VIEW Rows PROJECTION OF row~Item;= rank:0..10 := row->rank; END Rows;
+                VIEW Narrow EXTENDS Rows=rank (EXTENDED):0..5 := 2+3; END Narrow;
+                END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+}
+
+#[test]
+fn arithmetic_retains_units_for_scaling_and_cancels_identical_units_in_ratios() {
+    let report = outcome(
+        single(
+            "TOPIC T=CLASS Track=
+            raw:MANDATORY 0..10 [INTERLIS.m];
+            scaled:0..20 [INTERLIS.m] := raw*2;
+            ratio:0..5 := raw/2 [INTERLIS.m];
+            END Track; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    for (name, unit, upper) in [
+        ("M.T.Track.scaled", Some("INTERLIS.m"), "20"),
+        ("M.T.Track.ratio", None, "5"),
+    ] {
+        let member = graph.declaration(name).unwrap();
+        let TypeInfo::Numeric(number) = graph
+            .expression_declared_type(member.derivations()[0])
+            .unwrap()
+        else {
+            panic!("expected a typed numeric expression");
+        };
+        assert_eq!(
+            number
+                .unit
+                .as_ref()
+                .map(interlis::TypeReference::target_name),
+            unit
+        );
+        assert_eq!(number.bounds.as_ref().unwrap().upper.coefficient(), upper);
     }
 }

@@ -246,7 +246,10 @@ pub(crate) fn arithmetic_bounds(
         return Ok(None);
     };
     let singleton = x.lower == x.upper && y.lower == y.upper;
-    if !singleton && (!x.integral || !y.integral || operator == BinaryOperator::Divide) {
+    let exact_division = y.lower == y.upper && (y.lower / GRID).unsigned_abs().is_power_of_two();
+    if !singleton
+        && (!x.integral || !y.integral || operator == BinaryOperator::Divide && !exact_division)
+    {
         return Ok(None);
     }
     let mut minimum = i64::MAX;

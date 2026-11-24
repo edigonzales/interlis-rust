@@ -673,6 +673,17 @@ impl Analyzer<'_, '_> {
                     }
                 }
             }
+            (Some(unit), None)
+                if matches!(operator, BinaryOperator::Multiply | BinaryOperator::Divide) =>
+            {
+                Some(unit)
+            }
+            (None, Some(unit)) if operator == BinaryOperator::Multiply => Some(unit),
+            (Some(a), Some(b))
+                if operator == BinaryOperator::Divide && a.target_name() == b.target_name() =>
+            {
+                None
+            }
             _ => {
                 self.unsupported_expression(at);
                 return None;
@@ -784,6 +795,27 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         | TypeInfo::EnumArgument { .. }
         | TypeInfo::Alignment(_) => ValueType::Enumeration,
         _ => ValueType::Other,
+    }
+}
+
+pub(super) fn binary_definedness_inputs(
+    expressions: &[BoundExpression],
+    operator: BinaryOperator,
+    left: ExpressionId,
+    right: ExpressionId,
+) -> (bool, bool) {
+    use BinaryOperator::*;
+    let left = underlying_expression(expressions, left);
+    match operator {
+        Equal | NotEqual
+            if left.value_type == ValueType::Undefined
+                || underlying_expression(expressions, right).value_type == ValueType::Undefined =>
+        {
+            (false, false)
+        }
+        And | Implies if matches!(left.kind, BoundKind::Boolean { value: false }) => (true, false),
+        Or if matches!(left.kind, BoundKind::Boolean { value: true }) => (true, false),
+        _ => (true, true),
     }
 }
 
