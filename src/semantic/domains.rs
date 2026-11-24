@@ -255,6 +255,23 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
+        if matches!(self.types[own_id], TypeInfo::AttributePath(_))
+            || matches!(self.types[base_id], TypeInfo::AttributePath(_))
+        {
+            if matches!(leaf, TypeSyntax::Named(_)) {
+                self.check_nominal_domain(owner, leaf.span())?;
+            }
+            if self.attribute_path_specializes(owner, own_id, base_id, leaf.span())? {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-ATTRIBUTE-PATH-EXTENSION",
+                "The ATTRIBUTE extension must specialize the inherited restrictions",
+                leaf.span(),
+            );
+            return None;
+        }
         if matches!(
             self.types[own_id],
             TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_)

@@ -662,7 +662,7 @@ impl Analyzer<'_, '_> {
     }
 }
 
-fn compare_decimal(
+pub(super) fn compare_decimal(
     left: &DecimalInfo,
     right: &DecimalInfo,
     work: &mut WorkBudget,

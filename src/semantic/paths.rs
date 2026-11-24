@@ -1,5 +1,5 @@
 use super::{
-    Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, TypeInfo,
+    Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, TypeInfo, TypeSyntax,
     collections::{compare_count, structure_targets},
     domains::scalar_extension,
     expressions::scalar_type,
@@ -7,10 +7,11 @@ use super::{
     object_references::object_targets,
 };
 use crate::{
-    AttributePathType, BoundExpressionKind, BoundPathStep, CollectionKind, CoordinateKind,
-    ExpressionType, LanguageVersion, ObjectSelection, PathSelection, Span, TypeReference,
+    AttributePathOwner, AttributePathType, BoundExpressionKind, BoundPathStep, CollectionKind,
+    CoordinateKind, ExpressionType, LanguageVersion, ObjectSelection, PathSelection, Span,
+    TypeReference,
     model::AttributeRestriction,
-    syntax::{ObjectPath, PathElement, PathSelector, SpecialPath, TypeUseSyntax},
+    syntax::{AttributePathOf, ObjectPath, PathElement, PathSelector, SpecialPath, TypeUseSyntax},
 };
 use std::cmp::Ordering;
 
@@ -21,12 +22,36 @@ pub(super) enum PathContext {
     UniquePrefix(LanguageVersion),
 }
 
+#[derive(Clone, Copy)]
+enum RestrictionMatch {
+    Fits,
+    Outside,
+    Unchecked,
+}
+
+impl From<bool> for RestrictionMatch {
+    fn from(fits: bool) -> Self {
+        if fits { Self::Fits } else { Self::Outside }
+    }
+}
+
 impl Analyzer<'_, '_> {
     pub(super) fn attribute_path_type(
         &mut self,
         owner: usize,
+        of: Option<&AttributePathOf>,
         restrictions: &[TypeUseSyntax],
     ) -> Option<AttributePathType> {
+        if let Some(AttributePathOf::Path(path)) = of
+            && self.symbols[owner].declaration.kind != Kind::Attribute
+        {
+            self.diagnostics.push(
+                "ILI-ATTRIBUTE-PATH-OWNER",
+                "ATTRIBUTE OF requires the context of a class or structure attribute",
+                Some(path.span.clone()),
+            );
+            return None;
+        }
         let reference = self.symbols[owner].declaration.reference.take();
         let restrictions = restrictions
             .iter()
@@ -40,9 +65,115 @@ impl Analyzer<'_, '_> {
             .collect::<Option<Vec<_>>>();
         self.symbols[owner].declaration.reference = reference;
         Some(AttributePathType {
-            viewable: None,
+            owner: None,
             restrictions: restrictions?,
         })
+    }
+
+    pub(super) fn bind_attribute_path_owners(&mut self) -> Option<()> {
+        for id in 0..self.symbols.len() {
+            let symbol = &self.symbols[id];
+            if symbol.declaration.kind != Kind::Attribute {
+                continue;
+            }
+            let (Some(syntax), Some(ty), Some(owner)) = (
+                symbol.syntax,
+                symbol.declaration.type_id,
+                symbol.declaration.parent,
+            ) else {
+                continue;
+            };
+            let mut pending = vec![(syntax, ty)];
+            while let Some((syntax, ty)) = pending.pop() {
+                if !self.step(1, syntax.span()) {
+                    return None;
+                }
+                match (syntax, &self.types[ty]) {
+                    (TypeSyntax::Collection { element, .. }, TypeInfo::Collection(collection)) => {
+                        pending.push((element.as_ref(), collection.element));
+                    }
+                    (
+                        TypeSyntax::AttributePathValue {
+                            of, restrictions, ..
+                        },
+                        TypeInfo::AttributePath(attribute),
+                    ) => {
+                        pending.extend(
+                            restrictions.iter().zip(&attribute.restrictions).filter_map(
+                                |(syntax, restriction)| Some((syntax.ty.as_ref()?, restriction.ty)),
+                            ),
+                        );
+                        let Some(AttributePathOf::Path(path)) = of else {
+                            continue;
+                        };
+                        match self.expression_path(owner, path) {
+                            Some((kind, ExpressionType::Class, type_id)) => {
+                                let expression = self.record_expression(
+                                    kind,
+                                    ExpressionType::Class,
+                                    type_id,
+                                    &path.span,
+                                );
+                                let TypeInfo::AttributePath(attribute) = &mut self.types[ty] else {
+                                    unreachable!()
+                                };
+                                attribute.owner =
+                                    Some(AttributePathOwner::ClassAttribute(expression));
+                            }
+                            Some(_) => self.diagnostics.push(
+                                "ILI-ATTRIBUTE-PATH-OWNER-TYPE",
+                                "The ATTRIBUTE OF path must select a class-valued attribute",
+                                Some(path.span.clone()),
+                            ),
+                            None if self.diagnostics.limited => return None,
+                            None => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for id in 0..self.symbols.len() {
+            let symbol = &self.symbols[id];
+            if symbol.declaration.kind != Kind::Attribute {
+                continue;
+            }
+            let Some(own) = symbol
+                .declaration
+                .type_id
+                .and_then(|ty| self.attribute_path_leaf(ty))
+            else {
+                continue;
+            };
+            let Some(base) = symbol
+                .base_scope
+                .and_then(|base| self.symbols[base].declaration.type_id)
+                .and_then(|ty| self.attribute_path_leaf(ty))
+            else {
+                continue;
+            };
+            if !matches!(&self.types[base], TypeInfo::AttributePath(attribute) if attribute.owner.is_some())
+            {
+                continue;
+            }
+            let span = symbol.declaration.span.clone();
+            if !self.attribute_path_specializes(id, own, base, &span)? {
+                self.report_type_override(
+                    id,
+                    "ILI-ATTRIBUTE-PATH-EXTENSION",
+                    "The ATTRIBUTE extension must preserve its inherited class-valued path",
+                    &span,
+                );
+            }
+        }
+        Some(())
+    }
+
+    fn attribute_path_leaf(&self, mut ty: usize) -> Option<usize> {
+        while let TypeInfo::Collection(collection) = &self.types[ty] {
+            ty = collection.element;
+        }
+        matches!(self.types[ty], TypeInfo::AttributePath(_)).then_some(ty)
     }
 
     pub(super) fn attribute_path_literal(
@@ -64,7 +195,11 @@ impl Analyzer<'_, '_> {
             };
             (scope, self.bound_reference(owner, name, target)?)
         } else {
-            (owner, self.reference_to_symbol(owner, owner, attribute)?)
+            let name = Name {
+                value: self.symbols[owner].declaration.name.clone(),
+                span: self.symbols[owner].name_span.clone(),
+            };
+            (owner, self.reference_to_symbol(owner, owner, &name)?)
         };
         let member = self.path_attribute(scope, attribute)?;
         let member_declaration = &self.symbols[member].declaration;
@@ -75,7 +210,7 @@ impl Analyzer<'_, '_> {
         let reference = self.reference_to_symbol(owner, member, attribute)?;
         let id = self.types.len();
         self.types.push(TypeInfo::AttributePath(AttributePathType {
-            viewable: Some(selected),
+            owner: Some(AttributePathOwner::Viewable(selected)),
             restrictions: vec![restriction],
         }));
         Some((
@@ -92,16 +227,77 @@ impl Analyzer<'_, '_> {
         expected: usize,
         at: &Span,
     ) -> Option<bool> {
+        match self.attribute_path_match(owner, actual, expected, at)? {
+            RestrictionMatch::Fits => Some(true),
+            RestrictionMatch::Outside => Some(false),
+            RestrictionMatch::Unchecked => {
+                self.unsupported_expression(at);
+                None
+            }
+        }
+    }
+
+    fn attribute_path_match(
+        &mut self,
+        owner: usize,
+        actual: usize,
+        expected: usize,
+        at: &Span,
+    ) -> Option<RestrictionMatch> {
         if actual == expected {
-            return Some(true);
+            return Some(RestrictionMatch::Fits);
         }
         let (TypeInfo::AttributePath(source), TypeInfo::AttributePath(target)) =
             (&self.types[actual], &self.types[expected])
         else {
-            return Some(false);
+            return Some(RestrictionMatch::Outside);
         };
+        let same_owner = match (&source.owner, &target.owner) {
+            (_, None) => true,
+            (
+                Some(AttributePathOwner::Viewable(source)),
+                Some(AttributePathOwner::Viewable(target)),
+            ) => source.target_name() == target.target_name(),
+            (
+                Some(AttributePathOwner::ClassAttribute(source)),
+                Some(AttributePathOwner::ClassAttribute(target)),
+            ) => {
+                match (
+                    &self.expressions[source.0 as usize].kind,
+                    &self.expressions[target.0 as usize].kind,
+                ) {
+                    (
+                        BoundExpressionKind::Path { steps: source },
+                        BoundExpressionKind::Path { steps: target },
+                    ) => {
+                        if self
+                            .work
+                            .charge((source.len() + target.len()) as u32)
+                            .is_err()
+                        {
+                            self.diagnostics
+                                .limit("Semantic work budget exceeded", Some(at.clone()));
+                            return None;
+                        }
+                        source.len() == target.len()
+                            && source.iter().zip(target).all(|(source, target)| {
+                                source.reference.target_name() == target.reference.target_name()
+                                    && source.selection == target.selection
+                            })
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !same_owner {
+            return Some(RestrictionMatch::Outside);
+        }
         if target.restrictions.is_empty() {
-            return Some(true);
+            return Some(RestrictionMatch::Fits);
+        }
+        if source.restrictions.is_empty() {
+            return Some(RestrictionMatch::Outside);
         }
         if !self.step(source.restrictions.len() + target.restrictions.len(), at) {
             return None;
@@ -113,70 +309,88 @@ impl Analyzer<'_, '_> {
         };
         let sources = source.restrictions.clone();
         let targets = target.restrictions.clone();
+        let mut all = RestrictionMatch::Fits;
         for &source in &sources {
-            let mut accepted = false;
+            let mut alternatives = RestrictionMatch::Outside;
             for &target in &targets {
-                if (!target.mandatory || source.mandatory)
-                    && self.attribute_type_fits(owner, source.ty, target.ty, at)?
-                {
-                    accepted = true;
-                    break;
+                if target.mandatory && !source.mandatory {
+                    continue;
+                }
+                match self.attribute_type_match(owner, source.ty, target.ty, at)? {
+                    RestrictionMatch::Fits => {
+                        alternatives = RestrictionMatch::Fits;
+                        break;
+                    }
+                    RestrictionMatch::Unchecked => alternatives = RestrictionMatch::Unchecked,
+                    RestrictionMatch::Outside => {}
                 }
             }
-            if !accepted {
-                return Some(false);
+            match alternatives {
+                RestrictionMatch::Fits => {}
+                RestrictionMatch::Unchecked => all = RestrictionMatch::Unchecked,
+                RestrictionMatch::Outside => return Some(RestrictionMatch::Outside),
             }
         }
-        Some(!sources.is_empty())
+        Some(all)
     }
 
-    fn attribute_type_fits(
+    fn attribute_type_match(
         &mut self,
         owner: usize,
         source: usize,
         target: usize,
         at: &Span,
-    ) -> Option<bool> {
+    ) -> Option<RestrictionMatch> {
         if !self.step(1, at) {
             return None;
         }
         if source == target {
-            return Some(true);
+            return Some(RestrictionMatch::Fits);
         }
         if self.is_enum_type(source) && self.is_enum_type(target) {
-            return self.enum_specializes(source, target, at);
+            return self.enum_specializes(source, target, at).map(Into::into);
         }
         if let Some((source_multi, source_max, source_format)) = text_details(&self.types[source])
             && let Some((target_multi, target_max, target_format)) =
                 text_details(&self.types[target])
         {
-            return Some(
-                (!source_multi || target_multi)
-                    && (target_format.is_none() || source_format == target_format)
-                    && target_max.is_none_or(|max| {
-                        source_max
-                            .is_some_and(|given| compare_count(given, max) != Ordering::Greater)
-                    }),
-            );
+            let fits = (!source_multi || target_multi)
+                && (target_format.is_none() || source_format == target_format)
+                && target_max.is_none_or(|max| {
+                    source_max.is_some_and(|given| compare_count(given, max) != Ordering::Greater)
+                });
+            return Some(fits.into());
         }
         match (&self.types[source], &self.types[target]) {
             (TypeInfo::Reference(_), TypeInfo::Reference(_)) => {
-                return self.reference_specializes(source, target, at);
+                return self
+                    .reference_specializes(source, target, at)
+                    .map(Into::into);
             }
             (TypeInfo::Structure(_), TypeInfo::Structure(_)) => {
-                return self.structure_specializes(source, target, at);
+                return self
+                    .structure_specializes(source, target, at)
+                    .map(Into::into);
             }
             (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_)) => {
-                return self.class_value_specializes(source, target, at, false);
+                return self
+                    .class_value_specializes(source, target, at, false)
+                    .map(Into::into);
             }
             (TypeInfo::Oid(a), TypeInfo::Oid(b)) => {
-                return Some(super::existence::oid_compatible(a, b));
+                return match super::oid::oid_value_fits(a, b, &mut self.work) {
+                    Ok(fits) => Some(fits.into()),
+                    Err(error) => {
+                        self.number_error(error, at);
+                        None
+                    }
+                };
             }
             (
                 TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
                 TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
             ) => {
-                return Some(self.preserves_temporal_layout(source, target));
+                return Some(self.preserves_temporal_layout(source, target).into());
             }
             (TypeInfo::Collection(source), TypeInfo::Collection(target)) => {
                 let cardinality =
@@ -190,16 +404,15 @@ impl Analyzer<'_, '_> {
                 if !cardinality
                     || (source.kind != target.kind && target.kind != CollectionKind::Bag)
                 {
-                    return Some(false);
+                    return Some(RestrictionMatch::Outside);
                 }
-                return self.attribute_type_fits(owner, source.element, target.element, at);
+                return self.attribute_type_match(owner, source.element, target.element, at);
             }
             (TypeInfo::AttributePath(_), TypeInfo::AttributePath(_)) => {
-                return self.attribute_path_specializes(owner, source, target, at);
+                return self.attribute_path_match(owner, source, target, at);
             }
             (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
-                self.unsupported_expression(at);
-                return None;
+                return Some(RestrictionMatch::Unchecked);
             }
             _ => {}
         }
@@ -221,7 +434,7 @@ impl Analyzer<'_, '_> {
                 }
             });
         match check {
-            Ok(reason) => Some(reason.is_none()),
+            Ok(reason) => Some(reason.is_none().into()),
             Err(error) => {
                 self.number_error(error, at);
                 None

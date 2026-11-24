@@ -1,7 +1,47 @@
-use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl};
-use crate::{
-    LanguageVersion, OidKind, OidRule, OidRules, OidType, RelatedLocation, TypeInfo, syntax,
+use super::{
+    Analyzer, BoundName, Kind, LookupError, QualifiedName, SyntaxDecl, collections::compare_count,
+    existence::numeric_compatible, functions::compare_decimal,
 };
+use crate::{
+    LanguageVersion, OidKind, OidRule, OidRules, OidType, RelatedLocation, TypeInfo,
+    limits::WorkBudget, number::NumberError, syntax,
+};
+use std::cmp::Ordering;
+
+pub(super) fn oid_value_fits(
+    actual: &OidType,
+    expected: &OidType,
+    work: &mut WorkBudget,
+) -> Result<bool, NumberError> {
+    use OidType::*;
+    Ok(match (actual, expected) {
+        (_, Any) | (Unstable, Unstable) | (Standard, Standard) | (Uuid, Uuid) => true,
+        (Standard, Typed(carrier)) => matches!(carrier.as_ref(), TypeInfo::Text { max_length }
+            if compare_count("16", max_length) != Ordering::Greater),
+        (Typed(actual), Typed(expected)) => match (actual.as_ref(), expected.as_ref()) {
+            (TypeInfo::Numeric(actual), TypeInfo::Numeric(expected)) => {
+                numeric_compatible(actual, expected)
+                    && match (&actual.bounds, &expected.bounds) {
+                        (_, None) => true,
+                        (Some(actual), Some(expected)) => {
+                            compare_decimal(&actual.lower, &expected.lower, work)? != Ordering::Less
+                                && compare_decimal(&actual.upper, &expected.upper, work)?
+                                    != Ordering::Greater
+                        }
+                        (None, Some(_)) => false,
+                    }
+            }
+            (
+                TypeInfo::Text { max_length: actual },
+                TypeInfo::Text {
+                    max_length: expected,
+                },
+            ) => compare_count(actual, expected) != Ordering::Greater,
+            _ => false,
+        },
+        _ => false,
+    })
+}
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_oid_rules(&mut self, topics: &[usize], viewables: &[usize]) -> Option<()> {

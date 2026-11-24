@@ -1668,18 +1668,23 @@ mod reference_and_type_start_regressions {
                     (format!("PARAMETER p:{ty};"), false),
                 ] {
                     let report = run(&body, version);
-                    let checked = !parameter_section && !ty.starts_with("ATTRIBUTE OF");
+                    let expected = if parameter_section {
+                        AnalysisStatus::Incomplete
+                    } else if ty.starts_with("ATTRIBUTE OF") {
+                        AnalysisStatus::Rejected
+                    } else {
+                        AnalysisStatus::CheckedSubset
+                    };
                     assert_eq!(
                         report.status(),
-                        if checked {
-                            AnalysisStatus::CheckedSubset
-                        } else {
-                            AnalysisStatus::Incomplete
-                        },
+                        expected,
                         "{version}: {body}: {:?}",
                         report.diagnostics()
                     );
-                    assert_eq!(report.graph().is_some(), checked);
+                    assert_eq!(
+                        report.graph().is_some(),
+                        expected == AnalysisStatus::CheckedSubset
+                    );
                     assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
                 }
             }

@@ -168,7 +168,7 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         TypeSyntax::AttributePathValue {
             of, restrictions, ..
         } => {
-            of.is_none()
+            !matches!(of, Some(syntax::AttributePathOf::Argument(_)))
                 && restrictions
                     .iter()
                     .all(|restriction| restriction.ty.as_ref().is_some_and(supported_type))
@@ -185,6 +185,7 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
             | TypeSyntax::Geometry(_)
             | TypeSyntax::Formatted { .. }
             | TypeSyntax::ClassValue { .. }
+            | TypeSyntax::AttributePathValue { of: None, .. }
             | TypeSyntax::Oid { .. }
             | TypeSyntax::Enumeration { .. }
     ) && supported_type(ty)
@@ -1628,9 +1629,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Formatted { .. } => {
                 return self.temporal_format(owner, syntax, None, None);
             }
-            TypeSyntax::AttributePathValue { restrictions, .. } => {
-                TypeInfo::AttributePath(self.attribute_path_type(owner, restrictions)?)
-            }
+            TypeSyntax::AttributePathValue {
+                of, restrictions, ..
+            } => TypeInfo::AttributePath(self.attribute_path_type(
+                owner,
+                of.as_ref(),
+                restrictions,
+            )?),
         };
         let mandatory =
             matches!(&ty, TypeInfo::Collection(collection) if collection.cardinality.lower != "0");
@@ -1975,6 +1980,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             .iter()
             .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
             .collect();
+        self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
         self.bind_constraints(&expressions)?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {

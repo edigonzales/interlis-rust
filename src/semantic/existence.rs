@@ -221,7 +221,7 @@ impl Analyzer<'_, '_> {
     }
 }
 
-fn numeric_compatible(actual: &NumericRange, expected: &NumericRange) -> bool {
+pub(super) fn numeric_compatible(actual: &NumericRange, expected: &NumericRange) -> bool {
     actual.unit.as_ref().map(TypeReference::target_name)
         == expected.unit.as_ref().map(TypeReference::target_name)
         && actual.circular == expected.circular

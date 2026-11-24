@@ -5142,7 +5142,8 @@ fn attribute_constants_bind_declaring_member_and_selected_viewable() {
         let Some(TypeInfo::AttributePath(value)) = graph.expression_declared_type(expr) else {
             panic!("expected the attribute-path type");
         };
-        assert_eq!(value.viewable.as_ref().unwrap().target_name(), "M.T.Child");
+        assert!(matches!(&value.owner,
+            Some(interlis::AttributePathOwner::Viewable(viewable)) if viewable.target_name() == "M.T.Child"));
         let (ty, mandatory) = graph.attribute_path_restrictions(value).next().unwrap();
         assert!(mandatory);
         assert!(matches!(ty, TypeInfo::Text { max_length } if max_length == "4"));
@@ -5170,6 +5171,123 @@ fn attribute_path_restrictions_check_member_scope_and_type() {
             )),
             Status::Rejected,
             Some(code),
+        );
+    }
+}
+
+#[test]
+fn attribute_of_binds_class_attributes_after_types_are_known() {
+    let report = outcome(
+        single(
+            "TOPIC T=STRUCTURE Info=selection:CLASS; END Info;
+             CLASS Item=
+                slot:ATTRIBUTE OF details->selection;
+                alias:ATTRIBUTE OF THIS->details->selection := slot;
+                details:Info;
+             END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::AttributePath(path)) = graph.effective_type("M.T.Item.slot") else {
+        panic!("expected an attribute path");
+    };
+    let Some(interlis::AttributePathOwner::ClassAttribute(id)) = path.owner else {
+        panic!("expected a bound class-valued path");
+    };
+    let expression = graph.expression(id).unwrap();
+    assert_eq!(expression.value_type, interlis::ExpressionType::Class);
+    let interlis::BoundExpressionKind::Path { steps } = &expression.kind else {
+        panic!("expected an attribute path");
+    };
+    assert_eq!(steps[0].reference.target_name(), "M.T.Item.details");
+    assert_eq!(steps[1].reference.target_name(), "M.T.Info.selection");
+
+    for (body, code) in [
+        (
+            "CLASS Item=label:TEXT; slot:ATTRIBUTE OF label; END Item;",
+            "ILI-ATTRIBUTE-PATH-OWNER-TYPE",
+        ),
+        (
+            "CLASS Item=slot:ATTRIBUTE OF absent; END Item;",
+            "ILI-PATH-NAME",
+        ),
+        (
+            "CLASS Item=a:CLASS; b:CLASS; first:ATTRIBUTE OF a; second:ATTRIBUTE OF b := first; END Item;",
+            "ILI-ATTRIBUTE-DERIVATION-TYPE",
+        ),
+        ("DOMAIN D=ATTRIBUTE OF missing;", "ILI-ATTRIBUTE-PATH-OWNER"),
+    ] {
+        outcome(
+            single(&format!("TOPIC T={body} END T;")),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}
+
+#[test]
+fn attribute_path_restrictions_can_narrow_domains_and_oid_carriers() {
+    let declarations = "DOMAIN Loose=ATTRIBUTE;
+        Narrow EXTENDS Loose=ATTRIBUTE RESTRICTION (TEXT*4);
+        SmallId=OID 0..10; LargerId=OID 0..100;
+        FUNCTION check(path:ATTRIBUTE RESTRICTION (SmallId)):BOOLEAN;
+        FUNCTION open(path:ATTRIBUTE RESTRICTION (INTERLIS.ANYOID)):BOOLEAN;
+        TOPIC T=CLASS Item=narrow:SmallId; large:LargerId; generic:INTERLIS.ANYOID;";
+    outcome(
+        single(&format!(
+            "{declarations} MANDATORY CONSTRAINT check(>>narrow) AND open(>>large); END Item; END T;"
+        )),
+        Status::CheckedSubset,
+        None,
+    );
+    for argument in [">>large", ">>generic"] {
+        outcome(
+            single(&format!(
+                "{declarations} MANDATORY CONSTRAINT check({argument}); END Item; END T;"
+            )),
+            Status::Rejected,
+            Some("ILI-FUNCTION-ARGUMENT"),
+        );
+    }
+    outcome(
+        single(
+            "DOMAIN Base=ATTRIBUTE RESTRICTION (TEXT*4); Wide EXTENDS Base=ATTRIBUTE RESTRICTION (TEXT*8);",
+        ),
+        Status::Rejected,
+        Some("ILI-ATTRIBUTE-PATH-EXTENSION"),
+    );
+}
+
+#[test]
+fn attribute_path_restriction_alternatives_keep_a_proven_type_match() {
+    for restrictions in [
+        "POLYLINE WITH (STRAIGHTS) VERTEX Position; Road",
+        "Road; POLYLINE WITH (STRAIGHTS) VERTEX Position",
+    ] {
+        outcome(
+            single(&format!(
+                "DOMAIN Position=COORD 0..10,0..10; Road=POLYLINE WITH (STRAIGHTS) VERTEX Position;
+                 FUNCTION accepts(path:ATTRIBUTE RESTRICTION ({restrictions})):BOOLEAN;
+                 TOPIC T=CLASS Item=route:Road; MANDATORY CONSTRAINT accepts(>>route); END Item; END T;"
+            )),
+            Status::CheckedSubset,
+            None,
+        );
+    }
+}
+
+#[test]
+fn attribute_path_overrides_preserve_the_inherited_class_selector() {
+    for (selector, status) in [("kind", Status::CheckedSubset), ("other", Status::Rejected)] {
+        outcome(
+            single(&format!(
+                "TOPIC T=CLASS Base=kind:CLASS; other:CLASS; path:ATTRIBUTE OF kind; END Base;
+                 CLASS Leaf EXTENDS Base=path (EXTENDED):ATTRIBUTE OF {selector}; END Leaf; END T;"
+            )),
+            status,
+            (status == Status::Rejected).then_some("ILI-ATTRIBUTE-PATH-EXTENSION"),
         );
     }
 }

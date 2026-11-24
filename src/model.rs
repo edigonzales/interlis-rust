@@ -347,7 +347,7 @@ pub enum BoundExpressionKind {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum PathSelection {
     First,
@@ -489,8 +489,14 @@ pub struct ClassValueType {
 
 #[derive(Debug)]
 pub struct AttributePathType {
-    pub viewable: Option<TypeReference>,
+    pub owner: Option<AttributePathOwner>,
     pub(crate) restrictions: Vec<AttributeRestriction>,
+}
+
+#[derive(Debug)]
+pub enum AttributePathOwner {
+    Viewable(TypeReference),
+    ClassAttribute(ExpressionId),
 }
 
 #[derive(Debug, Clone, Copy)]

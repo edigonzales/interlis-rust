@@ -816,6 +816,8 @@ impl<'report> Serialize for TypeOutput<'report> {
             },
             AttributePath {
                 viewable: Option<Reference<'a>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                class_attribute: Option<crate::ExpressionId>,
                 restrictions: Vec<AttributeRestriction<'a>>,
             },
             Collection {
@@ -937,21 +939,28 @@ impl<'report> Serialize for TypeOutput<'report> {
                     .collect(),
             }
             .serialize(serializer),
-            TypeInfo::AttributePath(attribute) => Type::AttributePath {
-                viewable: attribute
-                    .viewable
-                    .as_ref()
-                    .map(|reference| project_reference(reference, self.2)),
-                restrictions: self
-                    .1
-                    .attribute_path_restrictions(attribute)
-                    .map(|(ty, mandatory)| AttributeRestriction {
-                        ty: TypeOutput(ty, self.1, self.2),
-                        mandatory,
-                    })
-                    .collect(),
+            TypeInfo::AttributePath(attribute) => {
+                let (viewable, class_attribute) = match &attribute.owner {
+                    Some(crate::AttributePathOwner::Viewable(reference)) => {
+                        (Some(project_reference(reference, self.2)), None)
+                    }
+                    Some(crate::AttributePathOwner::ClassAttribute(path)) => (None, Some(*path)),
+                    None => (None, None),
+                };
+                Type::AttributePath {
+                    viewable,
+                    class_attribute,
+                    restrictions: self
+                        .1
+                        .attribute_path_restrictions(attribute)
+                        .map(|(ty, mandatory)| AttributeRestriction {
+                            ty: TypeOutput(ty, self.1, self.2),
+                            mandatory,
+                        })
+                        .collect(),
+                }
+                .serialize(serializer)
             }
-            .serialize(serializer),
             TypeInfo::Collection(collection) => Type::Collection {
                 collection_kind: collection.kind,
                 cardinality: &collection.cardinality,
