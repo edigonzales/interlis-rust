@@ -1,4 +1,4 @@
-use crate::{Limits, limits::WorkBudget, model::DecimalInfo};
+use crate::{BinaryOperator, Limits, NumericBounds, limits::WorkBudget, model::DecimalInfo};
 use num_bigint::{BigInt, Sign};
 use std::cmp::Ordering;
 
@@ -102,6 +102,17 @@ pub(crate) fn check_spelling(text: &str, limits: &Limits) -> Result<(), NumberEr
 }
 
 impl DecimalLiteral {
+    pub fn from_info(info: &DecimalInfo, work: &mut WorkBudget) -> Result<Self, NumberError> {
+        work.charge(info.coefficient().len() as u32)
+            .map_err(|_| NumberError::Work)?;
+        let value =
+            BigInt::parse_bytes(info.coefficient().as_bytes(), 10).ok_or(NumberError::Form)?;
+        Ok(Self {
+            info: info.clone(),
+            value,
+        })
+    }
+
     pub fn parse(text: &str, limits: &Limits, work: &mut WorkBudget) -> Result<Self, NumberError> {
         let spelling = inspect(text, limits)?;
         work.charge(spelling.digits)
@@ -132,6 +143,7 @@ impl DecimalLiteral {
                 fractional_digits,
                 exponent,
                 scaled,
+                computed: false,
             },
             value,
         })
@@ -186,6 +198,141 @@ impl DecimalLiteral {
             }
         }
         Ok(rounded.cmp(&base.value))
+    }
+}
+
+const GRID: i64 = 1024;
+const LIMIT: i64 = 2048 * GRID;
+
+struct ArithmeticInterval {
+    lower: i64,
+    upper: i64,
+    integral: bool,
+}
+
+/// Computes only ranges whose operands and results are exact across the
+/// IEEE-754 formats covered by the model's arithmetic profile.
+pub(crate) fn arithmetic_bounds(
+    operator: BinaryOperator,
+    left: (&DecimalInfo, &DecimalInfo),
+    right: (&DecimalInfo, &DecimalInfo),
+    work: &mut WorkBudget,
+) -> Result<Option<NumericBounds>, NumberError> {
+    let Some(x) = arithmetic_interval(left, work)? else {
+        return Ok(None);
+    };
+    let Some(y) = arithmetic_interval(right, work)? else {
+        return Ok(None);
+    };
+    let singleton = x.lower == x.upper && y.lower == y.upper;
+    if !singleton && (!x.integral || !y.integral || operator == BinaryOperator::Divide) {
+        return Ok(None);
+    }
+    let mut minimum = i64::MAX;
+    let mut maximum = i64::MIN;
+    for a in [x.lower, x.upper] {
+        for b in [y.lower, y.upper] {
+            let (numerator, denominator) = match operator {
+                BinaryOperator::Add => (a + b, 1),
+                BinaryOperator::Subtract => (a - b, 1),
+                BinaryOperator::Multiply => (a * b, GRID),
+                BinaryOperator::Divide => (a * GRID, b),
+                _ => unreachable!("only arithmetic operators have numeric bounds"),
+            };
+            if denominator == 0 || numerator % denominator != 0 {
+                return Ok(None);
+            }
+            let value = numerator / denominator;
+            if !exact_grid_value(value) {
+                return Ok(None);
+            }
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+        }
+    }
+    Ok(Some(NumericBounds {
+        lower: grid_decimal(minimum),
+        upper: grid_decimal(maximum),
+    }))
+}
+
+fn arithmetic_interval(
+    (low, high): (&DecimalInfo, &DecimalInfo),
+    work: &mut WorkBudget,
+) -> Result<Option<ArithmeticInterval>, NumberError> {
+    work.charge((low.coefficient().len() + high.coefficient().len()) as u32)
+        .map_err(|_| NumberError::Work)?;
+    let (Some(a), Some(b)) = (on_grid(low), on_grid(high)) else {
+        return Ok(None);
+    };
+    Ok(Some(ArithmeticInterval {
+        lower: a,
+        upper: b,
+        integral: a % GRID == 0
+            && b % GRID == 0
+            && (a == b || low.scale() <= 0 && high.scale() <= 0),
+    }))
+}
+
+fn on_grid(value: &DecimalInfo) -> Option<i64> {
+    let scaled = value
+        .coefficient()
+        .parse::<i128>()
+        .ok()?
+        .checked_mul(i128::from(GRID))?;
+    let power = 10_i128.checked_pow(value.scale().unsigned_abs())?;
+    let number = if value.scale() < 0 {
+        scaled.checked_mul(power)?
+    } else {
+        if scaled % power != 0 {
+            return None;
+        }
+        scaled / power
+    };
+    let grid = i64::try_from(number).ok()?;
+    exact_grid_value(grid).then_some(grid)
+}
+
+fn exact_grid_value(value: i64) -> bool {
+    let magnitude = value.unsigned_abs();
+    magnitude <= LIMIT as u64
+        && (magnitude == 0
+            || magnitude.ilog2() + 1 - magnitude.trailing_zeros() <= 11
+                && grid_coefficient(magnitude).0 <= 9_999_999)
+}
+
+fn grid_coefficient(magnitude: u64) -> (u64, u32) {
+    // 10^10 / 1024. The grid bound keeps this product within u64.
+    let mut coefficient = magnitude * 9_765_625;
+    let mut scale = 10;
+    while scale > 0 && coefficient.is_multiple_of(10) {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    (coefficient, scale)
+}
+
+fn grid_decimal(value: i64) -> DecimalInfo {
+    let (coefficient, scale) = grid_coefficient(value.unsigned_abs());
+    let sign = if value < 0 { "-" } else { "" };
+    let original = if scale == 0 {
+        format!("{sign}{coefficient}")
+    } else {
+        let power = 10_u64.pow(scale);
+        format!(
+            "{sign}{}.{:0width$}",
+            coefficient / power,
+            coefficient % power,
+            width = scale as usize
+        )
+    };
+    DecimalInfo {
+        original,
+        coefficient: format!("{sign}{coefficient}"),
+        fractional_digits: scale,
+        exponent: 0,
+        scaled: false,
+        computed: true,
     }
 }
 

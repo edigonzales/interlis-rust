@@ -310,16 +310,19 @@ impl Serialize for ExpressionsOutput<'_> {
         let expressions = self.0.expressions();
         let mut seq = serializer.serialize_seq(Some(expressions.len()))?;
         for (id, expression) in expressions.iter().enumerate() {
-            let effective_type = if matches!(
-                expression.kind,
-                crate::BoundExpressionKind::ObjectSet { .. }
-            ) {
-                self.0
-                    .expression_declared_type(crate::ExpressionId(id as u32))
-                    .map(|ty| TypeOutput(ty, self.0, self.1))
-            } else {
-                None
-            };
+            let effective_type =
+                if matches!(
+                    expression.kind,
+                    crate::BoundExpressionKind::ObjectSet { .. }
+                ) || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
+                    && expression.value_type == crate::ExpressionType::Numeric
+                {
+                    self.0
+                        .expression_declared_type(crate::ExpressionId(id as u32))
+                        .map(|ty| TypeOutput(ty, self.0, self.1))
+                } else {
+                    None
+                };
             seq.serialize_element(&Expression {
                 value_type: expression.value_type,
                 effective_type,
@@ -664,6 +667,8 @@ impl Serialize for DecimalInfo {
             fractional_digits: u32,
             written_exponent: i32,
             uses_exponent: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            computed: bool,
             scale: i32,
         }
         Decimal {
@@ -672,6 +677,7 @@ impl Serialize for DecimalInfo {
             fractional_digits: self.fractional_digits(),
             written_exponent: self.written_exponent(),
             uses_exponent: self.uses_exponent(),
+            computed: self.is_computed(),
             scale: self.scale(),
         }
         .serialize(serializer)

@@ -1,8 +1,9 @@
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
-    BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ExpressionId,
-    ExpressionType as ValueType, LanguageVersion, RelatedLocation, Span, TypeReference,
-    UnitConstant,
+    BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, DecimalInfo, ExpressionId,
+    ExpressionType as ValueType, LanguageVersion, NumericRange, RelatedLocation, Span,
+    TypeReference, UnitConstant,
+    number::arithmetic_bounds,
     syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
 use std::collections::BTreeMap;
@@ -190,6 +191,11 @@ impl Analyzer<'_, '_> {
                     let right = bound[&right.0];
                     let value_type =
                         self.binary_type(operator.value, left, right, &operator.span)?;
+                    let type_id = if value_type == ValueType::Numeric {
+                        Some(self.arithmetic_type(operator.value, left, right, &operator.span)?)
+                    } else {
+                        None
+                    };
                     (
                         BoundKind::Binary {
                             operator: operator.value,
@@ -197,7 +203,7 @@ impl Analyzer<'_, '_> {
                             right,
                         },
                         value_type,
-                        None,
+                        type_id,
                     )
                 }
                 ExpressionKind::Parenthesized { expression } => {
@@ -244,9 +250,22 @@ impl Analyzer<'_, '_> {
         &mut self,
         kind: BoundKind,
         value_type: ValueType,
-        type_id: Option<usize>,
+        mut type_id: Option<usize>,
         span: &Span,
     ) -> ExpressionId {
+        if type_id.is_none()
+            && value_type == ValueType::Boolean
+            && matches!(
+                kind,
+                BoundKind::Unary { .. } | BoundKind::Binary { .. } | BoundKind::Defined { .. }
+            )
+        {
+            if self.expression_boolean_type.is_none() {
+                self.expression_boolean_type = Some(self.types.len());
+                self.types.push(TypeInfo::Boolean);
+            }
+            type_id = self.expression_boolean_type;
+        }
         let id =
             ExpressionId(u32::try_from(self.expressions.len()).expect("bounded expression count"));
         self.expressions.push(BoundExpression {
@@ -396,14 +415,6 @@ impl Analyzer<'_, '_> {
             return None;
         }
         if a == Numeric && b == Numeric && !logical {
-            if arithmetic
-                && [left, right]
-                    .into_iter()
-                    .any(|operand| numeric_unit(&self.expressions, &self.types, operand).is_some())
-            {
-                self.unsupported_expression(at);
-                return None;
-            }
             return Some(if arithmetic { Numeric } else { Boolean });
         }
         if a == Boolean && b == Boolean && !arithmetic
@@ -418,6 +429,57 @@ impl Analyzer<'_, '_> {
             "The operand types do not support this operator",
         );
         None
+    }
+
+    fn arithmetic_type(
+        &mut self,
+        operator: BinaryOperator,
+        left: ExpressionId,
+        right: ExpressionId,
+        at: &Span,
+    ) -> Option<usize> {
+        let a = numeric_operand(&self.expressions, &self.types, left);
+        let b = numeric_operand(&self.expressions, &self.types, right);
+        let unit = match (a.unit, b.unit) {
+            (None, None) => None,
+            (a_unit, b_unit)
+                if matches!(operator, BinaryOperator::Add | BinaryOperator::Subtract) =>
+            {
+                match (a_unit, b_unit) {
+                    (Some(a), Some(b)) if a.target_name() == b.target_name() => Some(a),
+                    (Some(unit), None) if b.literal => Some(unit),
+                    (None, Some(unit)) if a.literal => Some(unit),
+                    _ => {
+                        self.unsupported_expression(at);
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                self.unsupported_expression(at);
+                return None;
+            }
+        };
+        let unit = unit.cloned();
+        let bounds = match (a.bounds, b.bounds) {
+            (Some(a), Some(b)) => match arithmetic_bounds(operator, a, b, &mut self.work) {
+                Ok(bounds) => bounds,
+                Err(error) => {
+                    self.number_error(error, at);
+                    return None;
+                }
+            },
+            _ => None,
+        };
+        let type_id = self.types.len();
+        self.types.push(TypeInfo::Numeric(NumericRange {
+            bounds,
+            unit,
+            reference_system: None,
+            circular: false,
+            direction: None,
+        }));
+        Some(type_id)
     }
 
     fn enum_comparable(
@@ -500,18 +562,39 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
     }
 }
 
-fn numeric_unit<'a>(
+struct NumericOperand<'a> {
+    bounds: Option<(&'a DecimalInfo, &'a DecimalInfo)>,
+    unit: Option<&'a TypeReference>,
+    literal: bool,
+}
+
+fn numeric_operand<'a>(
     expressions: &'a [BoundExpression],
     types: &'a [TypeInfo],
     id: ExpressionId,
-) -> Option<&'a TypeReference> {
+) -> NumericOperand<'a> {
     let expression = underlying_expression(expressions, id);
     if let Some(TypeInfo::Numeric(range)) = expression.type_id.map(|id| &types[id]) {
-        range.unit.as_ref()
-    } else if let BoundKind::Number { unit, .. } = &expression.kind {
-        unit.as_ref()
+        NumericOperand {
+            bounds: range
+                .bounds
+                .as_ref()
+                .map(|bounds| (&bounds.lower, &bounds.upper)),
+            unit: range.unit.as_ref(),
+            literal: false,
+        }
+    } else if let BoundKind::Number { unit, value } = &expression.kind {
+        NumericOperand {
+            bounds: if let UnitConstant::Decimal(value) = value {
+                Some((value, value))
+            } else {
+                None
+            },
+            unit: unit.as_ref(),
+            literal: true,
+        }
     } else {
-        None
+        unreachable!("a numeric expression must have a numeric type or be a number literal")
     }
 }
 

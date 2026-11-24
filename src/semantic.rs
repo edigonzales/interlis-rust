@@ -129,6 +129,7 @@ struct Analyzer<'a, 'd> {
     states: Vec<State>,
     types: Vec<TypeInfo>,
     expressions: Vec<crate::BoundExpression>,
+    expression_boolean_type: Option<usize>,
     enum_bases: BTreeMap<usize, usize>,
     constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
     role_accesses: BTreeMap<(usize, String), usize>,
@@ -413,6 +414,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             states: vec![],
             types: vec![],
             expressions: vec![],
+            expression_boolean_type: None,
             enum_bases: BTreeMap::new(),
             constraint_blocks: vec![],
             role_accesses: BTreeMap::new(),
@@ -1357,6 +1359,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     fractional_digits: 0,
                     exponent: 0,
                     scaled: false,
+                    computed: false,
                 };
                 TypeInfo::Oid(OidType::Typed(Box::new(TypeInfo::Numeric(
                     model::NumericRange {

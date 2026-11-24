@@ -251,6 +251,7 @@ impl Analyzer<'_, '_> {
                 return None;
             }
             let Some(anchor) = anchor else {
+                self.retain_symbolic_enum(argument);
                 continue;
             };
             if let Some(actual) = value.type_id {
@@ -305,6 +306,8 @@ impl Analyzer<'_, '_> {
     ) -> Option<bool> {
         if self.is_enum_type(target) {
             self.bind_enum_literal(expression, target)?;
+        } else if matches!(self.types[target], TypeInfo::EnumArgument { .. }) {
+            self.retain_symbolic_enum(expression);
         }
         match self.argument_fits(owner, expression, target, mandatory) {
             Ok(Some(result)) => Some(result),
@@ -445,7 +448,8 @@ impl Analyzer<'_, '_> {
                 };
                 let (lower, upper) = if let Some(source) = source {
                     let Some(bounds) = &source.bounds else {
-                        return Ok(Some(false));
+                        return Ok((!matches!(actual.kind, BoundExpressionKind::Binary { .. }))
+                            .then_some(false));
                     };
                     (&bounds.lower, &bounds.upper)
                 } else if let Some((UnitConstant::Decimal(value), _)) = constant {
@@ -453,15 +457,10 @@ impl Analyzer<'_, '_> {
                 } else {
                     return Ok(None);
                 };
-                let fits =
-                    compare_decimal(lower, &target_bounds.lower, self.limits, &mut self.work)?
-                        != Ordering::Less
-                        && compare_decimal(
-                            upper,
-                            &target_bounds.upper,
-                            self.limits,
-                            &mut self.work,
-                        )? != Ordering::Greater;
+                let fits = compare_decimal(lower, &target_bounds.lower, &mut self.work)?
+                    != Ordering::Less
+                    && compare_decimal(upper, &target_bounds.upper, &mut self.work)?
+                        != Ordering::Greater;
                 Ok(Some(fits))
             }
             _ => Ok(None),
@@ -472,11 +471,10 @@ impl Analyzer<'_, '_> {
 fn compare_decimal(
     left: &DecimalInfo,
     right: &DecimalInfo,
-    limits: &crate::Limits,
     work: &mut WorkBudget,
 ) -> Result<Ordering, NumberError> {
-    let left = DecimalLiteral::parse(left.original(), limits, work)?;
-    let right = DecimalLiteral::parse(right.original(), limits, work)?;
+    let left = DecimalLiteral::from_info(left, work)?;
+    let right = DecimalLiteral::from_info(right, work)?;
     left.compare_value(&right, work)
 }
 

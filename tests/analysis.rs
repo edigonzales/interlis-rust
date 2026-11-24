@@ -4637,6 +4637,50 @@ fn enum_functions_bind_polymorphic_arguments_and_check_relation_of_known_types()
 }
 
 #[test]
+fn symbolic_boolean_literals_and_typed_predicates_keep_distinct_enum_meanings() {
+    let report = outcome(
+        single(
+            "FUNCTION accepts(value:ENUMVAL):BOOLEAN;
+             TOPIC T=CLASS Item=flag:BOOLEAN;
+                MANDATORY CONSTRAINT accepts((#true));
+                MANDATORY CONSTRAINT INTERLIS.isEnumSubVal(#true,#false);
+                MANDATORY CONSTRAINT accepts(flag == #false);
+                MANDATORY CONSTRAINT INTERLIS.isEnumSubVal(flag == #false,#true);
+             END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let rules = graph.declaration("M.T.Item").unwrap().constraints();
+    let arguments = |index: usize| {
+        let interlis::BoundExpressionKind::Call { arguments, .. } = &graph
+            .expression(rules[index].expression.unwrap())
+            .unwrap()
+            .kind
+        else {
+            panic!("expected a function call");
+        };
+        arguments
+    };
+    for id in arguments(0).iter().chain(arguments(1)) {
+        assert_eq!(
+            graph.expression(*id).unwrap().value_type,
+            interlis::ExpressionType::Enumeration
+        );
+        assert!(graph.expression_declared_type(*id).is_none());
+    }
+    assert!(matches!(
+        graph.expression_declared_type(arguments(2)[0]),
+        Some(TypeInfo::Boolean)
+    ));
+    assert!(matches!(
+        graph.expression_declared_type(arguments(3)[1]),
+        Some(TypeInfo::Boolean)
+    ));
+}
+
+#[test]
 fn attribute_derivations_keep_bound_values_transience_and_constant_override_finality() {
     for version in ["2.3", "2.4"] {
         let report = outcome(
@@ -4722,6 +4766,52 @@ fn attribute_derivations_reject_wrong_values_and_invalid_transient_overrides() {
             Some(code),
         );
     }
+}
+
+#[test]
+fn bounded_arithmetic_checks_assignments_and_keeps_exact_result_bounds() {
+    let report = outcome(
+        single(
+            "TOPIC T=CLASS Item=
+                a:-2..4; b:-3..5; radius:0..8 [INTERLIS.m];
+                triple:-12..20 := a*b;
+                half:0.0..1.0 := 1/2;
+                shifted:1..9 [INTERLIS.m] := radius+1;
+             END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    for (attribute, low, high, unit) in [
+        ("triple", "-12", "20", None),
+        ("half", "0.5", "0.5", None),
+        ("shifted", "1", "9", Some("INTERLIS.m")),
+    ] {
+        let declaration = graph.declaration(&format!("M.T.Item.{attribute}")).unwrap();
+        let Some(TypeInfo::Numeric(range)) =
+            graph.expression_declared_type(declaration.derivations()[0])
+        else {
+            panic!("expected a checked arithmetic range");
+        };
+        let bounds = range.bounds.as_ref().unwrap();
+        assert_eq!(
+            (bounds.lower.original(), bounds.upper.original()),
+            (low, high)
+        );
+        assert!(bounds.lower.is_computed() && bounds.upper.is_computed());
+        assert_eq!(range.unit.as_ref().map(|unit| unit.target_name()), unit);
+    }
+    outcome(
+        single("TOPIC T=CLASS Item=x:0..10 := 7+9; END Item; END T;"),
+        Status::Rejected,
+        Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+    );
+    outcome(
+        single("TOPIC T=CLASS Item=x:0.00..1.00 := 1/3; END Item; END T;"),
+        Status::Incomplete,
+        Some("ILI-UNSUPPORTED"),
+    );
 }
 
 #[test]

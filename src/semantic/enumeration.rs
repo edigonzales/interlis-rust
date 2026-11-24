@@ -399,11 +399,27 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
-        let value_type = super::expressions::scalar_type(&self.types[ty]);
+        self.set_enum_literal(expression, path, Some(ty));
+        Some(())
+    }
+
+    pub(super) fn retain_symbolic_enum(&mut self, expression: ExpressionId) {
+        let actual = super::expressions::underlying_expression(&self.expressions, expression);
+        if actual.type_id.is_none()
+            && let BoundExpressionKind::Boolean { value } = actual.kind
+        {
+            self.set_enum_literal(expression, vec![value.to_string()], None);
+        }
+    }
+
+    fn set_enum_literal(&mut self, expression: ExpressionId, path: Vec<String>, ty: Option<usize>) {
+        let value_type = ty.map_or(ExpressionType::Enumeration, |id| {
+            super::expressions::scalar_type(&self.types[id])
+        });
         let mut id = expression;
         loop {
             let value = &mut self.expressions[id.0 as usize];
-            value.type_id = Some(ty);
+            value.type_id = ty;
             value.value_type = value_type;
             if let BoundExpressionKind::Group { expression } = value.kind {
                 id = expression;
@@ -415,7 +431,7 @@ impl Analyzer<'_, '_> {
                 } else {
                     value.kind = BoundExpressionKind::Enumeration { path };
                 }
-                return Some(());
+                return;
             }
         }
     }

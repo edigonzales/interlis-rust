@@ -131,6 +131,7 @@ pub struct DecimalInfo {
     pub(crate) fractional_digits: u32,
     pub(crate) exponent: i32,
     pub(crate) scaled: bool,
+    pub(crate) computed: bool,
 }
 impl DecimalInfo {
     pub fn original(&self) -> &str {
@@ -147,6 +148,9 @@ impl DecimalInfo {
     }
     pub fn uses_exponent(&self) -> bool {
         self.scaled
+    }
+    pub fn is_computed(&self) -> bool {
+        self.computed
     }
     pub fn scale(&self) -> i32 {
         i32::try_from(self.fractional_digits).expect("bounded precision") - self.exponent
