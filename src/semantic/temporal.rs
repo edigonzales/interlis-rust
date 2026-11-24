@@ -130,6 +130,31 @@ impl Analyzer<'_, '_> {
         Some(self.models[self.symbols[owner].model].language())
     }
 
+    pub(super) fn preserves_temporal_layout(
+        &mut self,
+        owner: usize,
+        own: usize,
+        base: usize,
+    ) -> Option<bool> {
+        if !temporal_specializes(&self.types[own], &self.types[base]) {
+            return Some(false);
+        }
+        let declaration = &self.symbols[owner].declaration;
+        let explicit = declaration.reference.as_ref().cloned();
+        let inherited = declaration.base_reference.as_ref().cloned();
+        let actual = match (&self.types[own], explicit.as_ref()) {
+            (TypeInfo::TemporalRange(range), _) => range.language,
+            (_, Some(link)) => self.temporal_language(owner, link)?,
+            _ => self.models[self.symbols[owner].model].language(),
+        };
+        let expected = match (&self.types[base], inherited.as_ref()) {
+            (TypeInfo::TemporalRange(range), _) => range.language,
+            (_, Some(link)) => self.temporal_language(owner, link)?,
+            _ => self.models[self.symbols[owner].model].language(),
+        };
+        Some(actual == expected)
+    }
+
     fn temporal_bound(
         &mut self,
         kind: TemporalKind,

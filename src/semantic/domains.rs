@@ -1,7 +1,6 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
-    collections::compare_count, names::predefined_viewable_base, temporal::temporal_specializes,
-    units::unit_extends,
+    collections::compare_count, names::predefined_viewable_base, units::unit_extends,
 };
 use crate::{
     AxisRotation, CollectionKind, CoordinateType, DecimalInfo, LanguageVersion, Limits,
@@ -266,7 +265,7 @@ impl Analyzer<'_, '_> {
             if matches!(leaf, TypeSyntax::Named(_)) {
                 self.check_nominal_domain(owner, leaf.span())?;
             }
-            if temporal_specializes(&self.types[own_id], &self.types[base_id]) {
+            if self.preserves_temporal_layout(owner, own_id, base_id)? {
                 return Some(own);
             }
             self.report_type_override(

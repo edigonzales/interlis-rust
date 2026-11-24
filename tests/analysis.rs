@@ -3341,6 +3341,29 @@ fn formatted_temporal_ranges_check_edition_component_precision_and_inheritance()
         panic!("expected a bound imported format");
     };
     assert_eq!(narrow.language, interlis::LanguageVersion::V23);
+    for (base, extension) in [("2.3", "2.4"), ("2.4", "2.3")] {
+        outcome(
+            request(vec![
+                (
+                    "base",
+                    format!(
+                        r#"INTERLIS {base}; MODEL Base AT "x" VERSION "1" =
+                    DOMAIN Calendar=FORMAT INTERLIS.XMLDate "2010-01-01".."2030-12-31"; END Base."#
+                    ),
+                ),
+                (
+                    "extension",
+                    format!(
+                        r#"INTERLIS {extension}; MODEL Extension AT "x" VERSION "1" =
+                    IMPORTS Base; DOMAIN Narrow EXTENDS Base.Calendar =
+                        FORMAT INTERLIS.XMLDate "2020-01-01".."2025-12-31"; END Extension."#
+                    ),
+                ),
+            ]),
+            Status::Rejected,
+            Some("ILI-FORMAT-EXTENSION"),
+        );
+    }
 }
 
 #[test]
