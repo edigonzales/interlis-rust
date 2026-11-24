@@ -252,6 +252,7 @@ pub enum ExpressionType {
     Undefined,
     Object,
     ObjectSet,
+    Class,
     Enumeration,
     Other,
 }
@@ -302,6 +303,9 @@ pub enum BoundExpressionKind {
     This,
     ObjectSet {
         explicit: bool,
+    },
+    Class {
+        reference: TypeReference,
     },
     Path {
         steps: Vec<BoundPathStep>,

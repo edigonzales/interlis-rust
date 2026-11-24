@@ -244,7 +244,7 @@ impl Analyzer<'_, '_> {
             if matches!(leaf, TypeSyntax::Named(_)) {
                 self.check_nominal_domain(owner, leaf.span())?;
             }
-            if self.class_value_specializes(own_id, base_id, leaf.span())? {
+            if self.class_value_specializes(own_id, base_id, leaf.span(), true)? {
                 return Some(own);
             }
             self.report_type_override(
@@ -399,11 +399,12 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn class_value_specializes(
+    pub(super) fn class_value_specializes(
         &mut self,
         own_id: usize,
         base_id: usize,
         span: &crate::Span,
+        extending_definition: bool,
     ) -> Option<bool> {
         use crate::ClassValueKind::{Class, Structure};
         let (TypeInfo::ClassValue(own), TypeInfo::ClassValue(base)) =
@@ -411,10 +412,12 @@ impl Analyzer<'_, '_> {
         else {
             return Some(false);
         };
-        if own.kind != base.kind {
-            return Some(
-                own.kind == Class && base.kind == Structure && base.restrictions.is_empty(),
-            );
+        if own.kind != base.kind
+            && (own.kind != Class
+                || base.kind != Structure
+                || extending_definition && !base.restrictions.is_empty())
+        {
+            return Some(false);
         }
         if base.restrictions.is_empty() {
             return Some(true);

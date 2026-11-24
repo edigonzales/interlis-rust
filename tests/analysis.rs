@@ -4815,6 +4815,77 @@ fn bounded_arithmetic_checks_assignments_and_keeps_exact_result_bounds() {
 }
 
 #[test]
+fn class_values_and_predefined_functions_keep_target_kind_and_bound_symbol() {
+    for version in ["2.3", "2.4"] {
+        let model = format!(
+            "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+             FUNCTION check(value:CLASS RESTRICTION (M.T.Base)):BOOLEAN;
+             TOPIC T=STRUCTURE Payload=END Payload;
+                CLASS Base=END Base; CLASS Child EXTENDS Base=
+                    data:Payload;
+                    chosen:CLASS RESTRICTION (Base) := >Child;
+                    MANDATORY CONSTRAINT check(>Child);
+                    MANDATORY CONSTRAINT INTERLIS.isOfClass(THIS,>Base);
+                    MANDATORY CONSTRAINT INTERLIS.isSubClass(>Child,>Base);
+                    MANDATORY CONSTRAINT INTERLIS.myClass(data) == >Payload;
+                END Child;
+             END T; END M."
+        );
+        let report = outcome(
+            request(vec![("memory:///classes.ili", model)]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let member = graph.declaration("M.T.Child.chosen").unwrap();
+        let interlis::BoundExpressionKind::Class { reference } =
+            &graph.expression(member.derivations()[0]).unwrap().kind
+        else {
+            panic!("expected a class constant");
+        };
+        assert_eq!(reference.target_name(), "M.T.Child");
+        let owner = graph.declaration("M.T.Child").unwrap();
+        let interlis::BoundExpressionKind::Binary { left, .. } = graph
+            .expression(owner.constraints()[3].expression.unwrap())
+            .unwrap()
+            .kind
+        else {
+            panic!("expected class equality");
+        };
+        let Some(TypeInfo::ClassValue(value)) = graph.expression_declared_type(left) else {
+            panic!("expected class value type");
+        };
+        assert_eq!(value.kind, interlis::ClassValueKind::Structure);
+        assert_eq!(value.restrictions[0].target_name(), "M.T.Payload");
+    }
+}
+
+#[test]
+fn class_value_constraints_reject_wrong_targets_and_comparisons() {
+    for (expression, code) in [
+        ("narrow(>Payload)", "ILI-FUNCTION-ARGUMENT"),
+        ("narrow(>Unrelated)", "ILI-FUNCTION-ARGUMENT"),
+        ("narrow(>Missing)", "ILI-CLASS-CONSTANT"),
+        ("INTERLIS.isOfClass(1,>Item)", "ILI-FUNCTION-ARGUMENT"),
+        ("INTERLIS.isSubClass(THIS,>Item)", "ILI-FUNCTION-ARGUMENT"),
+        (">Item > >Item", "ILI-EXPRESSION-OPERANDS"),
+        (">Item == \"Item\"", "ILI-EXPRESSION-OPERANDS"),
+    ] {
+        outcome(
+            single(&format!(
+                "FUNCTION narrow(value:CLASS RESTRICTION (M.T.Item)):BOOLEAN;
+                 TOPIC T=STRUCTURE Payload=END Payload;
+                    CLASS Unrelated=END Unrelated;
+                    CLASS Item=MANDATORY CONSTRAINT {expression}; END Item;
+                 END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (

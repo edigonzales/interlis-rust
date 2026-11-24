@@ -294,6 +294,10 @@ impl Serialize for ExpressionsOutput<'_> {
                 kind: &'static str,
                 steps: Vec<PathStep<'a>>,
             },
+            Class {
+                kind: &'static str,
+                reference: Reference<'a>,
+            },
             Other(&'a crate::BoundExpressionKind),
         }
         #[derive(Serialize)]
@@ -310,19 +314,19 @@ impl Serialize for ExpressionsOutput<'_> {
         let expressions = self.0.expressions();
         let mut seq = serializer.serialize_seq(Some(expressions.len()))?;
         for (id, expression) in expressions.iter().enumerate() {
-            let effective_type =
-                if matches!(
-                    expression.kind,
-                    crate::BoundExpressionKind::ObjectSet { .. }
-                ) || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
+            let effective_type = if matches!(
+                expression.kind,
+                crate::BoundExpressionKind::ObjectSet { .. }
+            ) || expression.value_type == crate::ExpressionType::Class
+                || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
                     && expression.value_type == crate::ExpressionType::Numeric
-                {
-                    self.0
-                        .expression_declared_type(crate::ExpressionId(id as u32))
-                        .map(|ty| TypeOutput(ty, self.0, self.1))
-                } else {
-                    None
-                };
+            {
+                self.0
+                    .expression_declared_type(crate::ExpressionId(id as u32))
+                    .map(|ty| TypeOutput(ty, self.0, self.1))
+            } else {
+                None
+            };
             seq.serialize_element(&Expression {
                 value_type: expression.value_type,
                 effective_type,
@@ -339,6 +343,10 @@ impl Serialize for ExpressionsOutput<'_> {
                                     .and_then(|span| self.1.location(span)),
                             })
                             .collect(),
+                    },
+                    crate::BoundExpressionKind::Class { reference } => Kind::Class {
+                        kind: "class",
+                        reference: project_reference(reference, self.1),
                     },
                     kind => Kind::Other(kind),
                 },

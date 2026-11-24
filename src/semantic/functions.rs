@@ -1,13 +1,13 @@
 use super::{
     Analyzer, BoundName, Kind, Namespace, QualifiedName, SyntaxDecl, TypeInfo,
-    collections::compare_count,
+    collections::{compare_count, structure_targets},
     expressions::{scalar_type, underlying_expression},
     object_references::object_targets,
     units::unit_extends,
 };
 use crate::{
-    BoundExpressionKind, DecimalInfo, ExpressionId, ExpressionType, FunctionInfo, NumericRange,
-    ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
+    BoundExpressionKind, ClassValueKind, ClassValueType, DecimalInfo, ExpressionId, ExpressionType,
+    FunctionInfo, NumericRange, ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
     limits::WorkBudget,
     number::{DecimalLiteral, NumberError},
     syntax::ArgumentType,
@@ -150,10 +150,10 @@ impl Analyzer<'_, '_> {
         let expected = match target {
             BoundName::Declared(id) => self.symbols[id].declaration.function()?.arguments.len(),
             BoundName::Predefined(
-                "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount",
+                "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount" | "myClass",
                 _,
             ) => 1,
-            BoundName::Predefined("isEnumSubVal", _) => 2,
+            BoundName::Predefined("isEnumSubVal" | "isSubClass" | "isOfClass", _) => 2,
             BoundName::Predefined("inEnumRange", _) => 3,
             BoundName::Predefined(..) => {
                 self.unsupported_expression(span);
@@ -179,6 +179,9 @@ impl Analyzer<'_, '_> {
     ) -> Option<usize> {
         if matches!(name, "isEnumSubVal" | "inEnumRange") {
             return self.bind_enum_builtin(name, arguments);
+        }
+        if matches!(name, "myClass" | "isSubClass" | "isOfClass") {
+            return self.bind_class_builtin(owner, name, arguments);
         }
         let argument = arguments[0];
         let at = self.expressions[argument.0 as usize].span.clone();
@@ -226,6 +229,100 @@ impl Analyzer<'_, '_> {
         } else {
             Some(formal)
         }
+    }
+
+    fn bind_class_builtin(
+        &mut self,
+        owner: usize,
+        name: &str,
+        arguments: &[ExpressionId],
+    ) -> Option<usize> {
+        for (index, &argument) in arguments.iter().enumerate() {
+            let value = &self.expressions[argument.0 as usize];
+            let expected = if index == 0 && name != "isSubClass" {
+                ExpressionType::Object
+            } else {
+                ExpressionType::Class
+            };
+            if value.value_type != expected && value.value_type != ExpressionType::Undefined {
+                self.diagnostics.push(
+                    "ILI-FUNCTION-ARGUMENT",
+                    if expected == ExpressionType::Object {
+                        "This predefined parameter expects a single object or structure"
+                    } else {
+                        "This predefined parameter expects a class or structure value"
+                    },
+                    Some(value.span.clone()),
+                );
+                return None;
+            }
+        }
+        let id = self.types.len();
+        if name != "myClass" {
+            self.types.push(TypeInfo::Boolean);
+            return Some(id);
+        }
+        let value = underlying_expression(&self.expressions, arguments[0]);
+        let path_value = matches!(value.kind, BoundExpressionKind::Path { .. });
+        let (kind, restrictions): (_, Vec<_>) = match value.type_id.map(|id| &self.types[id]) {
+            Some(TypeInfo::Structure(structure)) => (
+                ClassValueKind::Structure,
+                structure_targets(structure).iter().collect(),
+            ),
+            Some(TypeInfo::Reference(reference)) => (
+                ClassValueKind::Class,
+                object_targets(&reference.target).iter().collect(),
+            ),
+            Some(TypeInfo::ObjectSelection(selection)) => {
+                let restrictions = if selection
+                    .targets
+                    .iter()
+                    .any(|target| object_targets(target).is_empty())
+                {
+                    Vec::new()
+                } else {
+                    selection.targets.iter().flat_map(object_targets).collect()
+                };
+                (ClassValueKind::Class, restrictions)
+            }
+            _ => (ClassValueKind::Structure, Vec::new()),
+        };
+        let at = value.span.clone();
+        let bytes: usize = restrictions
+            .iter()
+            .map(|reference| 1 + reference.declared_name().len() + reference.target_name().len())
+            .sum();
+        // No names or declarations change when this budget is charged.
+        if u32::try_from(bytes)
+            .map_err(|_| ())
+            .and_then(|bytes| self.work.charge(bytes))
+            .is_err()
+        {
+            self.diagnostics
+                .limit("Semantic work budget exceeded", Some(at));
+            return None;
+        }
+        let mut restrictions: Vec<_> = restrictions.into_iter().cloned().collect();
+        if path_value && let Some(topic) = self.containing_topic(owner) {
+            for target in &mut restrictions {
+                let Some(&root) = self.names.get(target.target_name()) else {
+                    continue;
+                };
+                let effective = self.contextual_path_scope(topic, root, &at)?;
+                if effective != root {
+                    let bytes = self.symbols[effective].declaration.qualified.len();
+                    if !self.step(bytes, &at) {
+                        return None;
+                    }
+                    target
+                        .target
+                        .clone_from(&self.symbols[effective].declaration.qualified);
+                }
+            }
+        }
+        self.types
+            .push(TypeInfo::ClassValue(ClassValueType { kind, restrictions }));
+        Some(id)
     }
 
     fn bind_enum_builtin(&mut self, name: &str, arguments: &[ExpressionId]) -> Option<usize> {
@@ -353,6 +450,27 @@ impl Analyzer<'_, '_> {
             return Ok(Some(self.enum_argument_fits(argument, *tree_values)));
         }
         let ty = actual.type_id.map(|id| &self.types[id]);
+        if let Some(source) = actual.type_id {
+            let at = actual.span.clone();
+            if matches!(
+                (ty, formal_type),
+                (Some(TypeInfo::ClassValue(_)), TypeInfo::ClassValue(_))
+            ) {
+                return self
+                    .class_value_specializes(source, formal, &at, false)
+                    .map(Some)
+                    .ok_or(NumberError::Work);
+            }
+            if matches!(
+                (ty, formal_type),
+                (Some(TypeInfo::Structure(_)), TypeInfo::Structure(_))
+            ) {
+                return self
+                    .structure_specializes(source, formal, &at)
+                    .map(Some)
+                    .ok_or(NumberError::Work);
+            }
+        }
         if let TypeInfo::ObjectSelection(target) = formal_type {
             let sources = match ty {
                 Some(TypeInfo::Reference(reference)) => std::slice::from_ref(&reference.target),

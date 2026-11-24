@@ -205,8 +205,10 @@ impl Analyzer<'_, '_> {
             _ if self.is_enum_type(actual) && self.is_enum_type(expected) => {
                 return self.enum_existence_compatible(actual, expected, at);
             }
-            (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_))
-            | (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
+            (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_)) => {
+                return self.class_value_specializes(actual, expected, at, false);
+            }
+            (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
                 self.unsupported_expression(at);
                 return None;
             }

@@ -1,8 +1,8 @@
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
-    BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, DecimalInfo, ExpressionId,
-    ExpressionType as ValueType, LanguageVersion, NumericRange, RelatedLocation, Span,
-    TypeReference, UnitConstant,
+    BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ClassValueKind,
+    ClassValueType, DecimalInfo, ExpressionId, ExpressionType as ValueType, LanguageVersion,
+    NumericRange, RelatedLocation, Span, TypeReference, UnitConstant,
     number::arithmetic_bounds,
     syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
@@ -338,6 +338,29 @@ impl Analyzer<'_, '_> {
                 },
                 ValueType::Enumeration,
             ),
+            LiteralSyntax::Class(name) => {
+                let target = self.expression_name(
+                    owner,
+                    name,
+                    &[Kind::Class, Kind::Structure, Kind::Association, Kind::View],
+                    "ILI-CLASS-CONSTANT",
+                )?;
+                let kind = match target {
+                    BoundName::Predefined(_, kind) => kind,
+                    BoundName::Declared(id) => self.symbols[id].declaration.kind,
+                };
+                let reference = self.bound_reference(owner, name, target)?;
+                let ty = self.types.len();
+                self.types.push(TypeInfo::ClassValue(ClassValueType {
+                    kind: if kind == Kind::Structure {
+                        ClassValueKind::Structure
+                    } else {
+                        ClassValueKind::Class
+                    },
+                    restrictions: vec![reference.clone()],
+                }));
+                return Some((BoundKind::Class { reference }, ValueType::Class, Some(ty)));
+            }
             _ => {
                 self.unsupported_expression(span);
                 return None;
@@ -420,6 +443,7 @@ impl Analyzer<'_, '_> {
         if a == Boolean && b == Boolean && !arithmetic
             || a == Text && b == Text && equality
             || a == Object && b == Object && equality
+            || a == Class && b == Class && equality
         {
             return Some(Boolean);
         }
@@ -554,6 +578,7 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::Structure(_) | TypeInfo::Reference(_) => ValueType::Object,
         TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
         TypeInfo::ObjectSelection(_) => ValueType::Object,
+        TypeInfo::ClassValue(_) => ValueType::Class,
         TypeInfo::Enumeration { .. }
         | TypeInfo::EnumTree { .. }
         | TypeInfo::EnumArgument { .. }

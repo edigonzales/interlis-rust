@@ -419,6 +419,7 @@ impl Analyzer<'_, '_> {
                         | BoundExpressionKind::Number { .. }
                         | BoundExpressionKind::Text { .. }
                         | BoundExpressionKind::Enumeration { .. }
+                        | BoundExpressionKind::Class { .. }
                 )
             {
                 symbol.declaration.final_declaration = true;
