@@ -143,11 +143,11 @@ fn supported_type(ty: &TypeSyntax) -> bool {
             _ => true,
         },
         TypeSyntax::Collection { element, .. } => supported_type(element),
-        TypeSyntax::RestrictedStructure { .. } | TypeSyntax::Reference { .. } => true,
+        TypeSyntax::RestrictedStructure { .. }
+        | TypeSyntax::Reference { .. }
+        | TypeSyntax::ClassValue { .. } => true,
         TypeSyntax::Geometry(_) => true,
-        TypeSyntax::Formatted { .. }
-        | TypeSyntax::ClassValue { .. }
-        | TypeSyntax::AttributePathValue { .. } => false,
+        TypeSyntax::Formatted { .. } | TypeSyntax::AttributePathValue { .. } => false,
     }
 }
 
@@ -158,6 +158,7 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
             | TypeSyntax::Numeric(_)
             | TypeSyntax::Coordinate(_)
             | TypeSyntax::Geometry(_)
+            | TypeSyntax::ClassValue { .. }
             | TypeSyntax::Oid { .. }
             | TypeSyntax::Enumeration { .. }
     ) && supported_type(ty)
@@ -1570,9 +1571,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::Geometry(geometry) => {
                 TypeInfo::Geometry(self.geometry_type(owner, geometry)?)
             }
-            TypeSyntax::Formatted { .. }
-            | TypeSyntax::ClassValue { .. }
-            | TypeSyntax::AttributePathValue { .. } => {
+            TypeSyntax::ClassValue {
+                kind, restrictions, ..
+            } => TypeInfo::ClassValue(self.class_value_type(owner, *kind, restrictions)?),
+            TypeSyntax::Formatted { .. } | TypeSyntax::AttributePathValue { .. } => {
                 unreachable!("unsupported type semantics checked before indexing")
             }
         };

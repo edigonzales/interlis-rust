@@ -182,6 +182,7 @@ pub enum TypeInfo {
     Coordinate(CoordinateType),
     Oid(OidType),
     Structure(StructureType),
+    ClassValue(ClassValueType),
     Collection(CollectionType),
     Reference(ReferenceType),
     Geometry(GeometryType),
@@ -232,6 +233,19 @@ pub struct CollectionType {
 #[derive(Debug, Serialize)]
 pub struct StructureType {
     pub target: Option<TypeReference>,
+    pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassValueKind {
+    Class,
+    Structure,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClassValueType {
+    pub kind: ClassValueKind,
     pub restrictions: Vec<TypeReference>,
 }
 

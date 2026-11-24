@@ -332,22 +332,30 @@ impl Serialize for ModelsOutput<'_> {
         seq.end()
     }
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Reference<'a> {
+    declared_name: &'a str,
+    target_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predefined_language: Option<crate::LanguageVersion>,
+    #[serde(flatten)]
+    location: Option<SourceLocation>,
+}
+fn project_reference<'a>(r: &'a crate::TypeReference, sources: &SourceSet) -> Reference<'a> {
+    Reference {
+        declared_name: r.declared_name(),
+        target_name: r.target_name(),
+        predefined_language: r.predefined_language(),
+        location: sources.location(r.source_span()),
+    }
+}
 struct DeclarationsOutput<'a> {
     graph: &'a ModelGraph,
     sources: &'a SourceSet,
 }
 impl Serialize for DeclarationsOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Reference<'a> {
-            declared_name: &'a str,
-            target_name: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            predefined_language: Option<crate::LanguageVersion>,
-            #[serde(flatten)]
-            location: Option<SourceLocation>,
-        }
         #[derive(Serialize)]
         struct Association<'a> {
             cardinality: &'a crate::Cardinality,
@@ -358,17 +366,6 @@ impl Serialize for DeclarationsOutput<'_> {
         struct Context<'a> {
             generic: Reference<'a>,
             alternatives: Vec<Reference<'a>>,
-        }
-        fn project_reference<'a>(
-            r: &'a crate::TypeReference,
-            sources: &SourceSet,
-        ) -> Reference<'a> {
-            Reference {
-                declared_name: r.declared_name(),
-                target_name: r.target_name(),
-                predefined_language: r.predefined_language(),
-                location: sources.location(r.source_span()),
-            }
         }
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -434,7 +431,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 effective_type: declaration
                     .type_id
                     .and_then(|id| self.graph.types.get(id))
-                    .map(|ty| TypeOutput(ty, self.graph)),
+                    .map(|ty| TypeOutput(ty, self.graph, self.sources)),
                 unit: declaration.unit(),
                 oid_rules: declaration.oid_rules(),
                 topic_dependencies: declaration
@@ -511,7 +508,7 @@ impl Serialize for DecimalInfo {
         .serialize(serializer)
     }
 }
-struct TypeOutput<'a>(&'a TypeInfo, &'a ModelGraph);
+struct TypeOutput<'a>(&'a TypeInfo, &'a ModelGraph, &'a SourceSet);
 impl Serialize for TypeOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -593,6 +590,10 @@ impl Serialize for TypeOutput<'_> {
                 target: Option<&'a crate::TypeReference>,
                 restrictions: &'a [crate::TypeReference],
             },
+            ClassValue {
+                value_kind: crate::ClassValueKind,
+                restrictions: Vec<Reference<'a>>,
+            },
             Collection {
                 collection_kind: crate::CollectionKind,
                 cardinality: &'a crate::Cardinality,
@@ -660,7 +661,7 @@ impl Serialize for TypeOutput<'_> {
                     crate::OidType::Unstable => ("unstable", None, None),
                     crate::OidType::Any => ("any", None, None),
                     crate::OidType::Typed(carrier) => {
-                        ("typed", None, Some(TypeOutput(carrier, self.1)))
+                        ("typed", None, Some(TypeOutput(carrier, self.1, self.2)))
                     }
                     crate::OidType::Standard => ("standard", Some(16), None),
                     crate::OidType::Uuid => ("uuid", Some(36), None),
@@ -677,10 +678,19 @@ impl Serialize for TypeOutput<'_> {
                 restrictions: &structure.restrictions,
             }
             .serialize(serializer),
+            TypeInfo::ClassValue(value) => Type::ClassValue {
+                value_kind: value.kind,
+                restrictions: value
+                    .restrictions
+                    .iter()
+                    .map(|reference| project_reference(reference, self.2))
+                    .collect(),
+            }
+            .serialize(serializer),
             TypeInfo::Collection(collection) => Type::Collection {
                 collection_kind: collection.kind,
                 cardinality: &collection.cardinality,
-                element: TypeOutput(&self.1.types[collection.element], self.1),
+                element: TypeOutput(&self.1.types[collection.element], self.1, self.2),
             }
             .serialize(serializer),
             TypeInfo::Reference(reference) => Type::Reference {

@@ -234,6 +234,23 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
+        if matches!(self.types[own_id], TypeInfo::ClassValue(_))
+            || matches!(self.types[base_id], TypeInfo::ClassValue(_))
+        {
+            if matches!(leaf, TypeSyntax::Named(_)) {
+                self.check_nominal_domain(owner, leaf.span())?;
+            }
+            if self.class_value_specializes(own_id, base_id, leaf.span())? {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-CLASS-VALUE-EXTENSION",
+                "The class or structure value must specialize the inherited kind and restrictions",
+                leaf.span(),
+            );
+            return None;
+        }
         if matches!(self.types[own_id], TypeInfo::Geometry(_))
             || matches!(self.types[base_id], TypeInfo::Geometry(_))
         {
@@ -355,6 +372,64 @@ impl Analyzer<'_, '_> {
                 None
             }
         }
+    }
+
+    fn class_value_specializes(
+        &mut self,
+        own_id: usize,
+        base_id: usize,
+        span: &crate::Span,
+    ) -> Option<bool> {
+        use crate::ClassValueKind::{Class, Structure};
+        let (TypeInfo::ClassValue(own), TypeInfo::ClassValue(base)) =
+            (&self.types[own_id], &self.types[base_id])
+        else {
+            return Some(false);
+        };
+        if own.kind != base.kind {
+            return Some(
+                own.kind == Class && base.kind == Structure && base.restrictions.is_empty(),
+            );
+        }
+        if base.restrictions.is_empty() {
+            return Some(true);
+        }
+        let own_len = own.restrictions.len();
+        let base_len = base.restrictions.len();
+        for index in 0..own_len {
+            let mut allowed = false;
+            for base_index in 0..base_len {
+                if !self.step(1, span) {
+                    return None;
+                }
+                let (TypeInfo::ClassValue(own), TypeInfo::ClassValue(base)) =
+                    (&self.types[own_id], &self.types[base_id])
+                else {
+                    unreachable!("class values were checked");
+                };
+                let candidate = &own.restrictions[index];
+                let target = &base.restrictions[base_index];
+                if candidate.target_name() == target.target_name()
+                    && candidate.predefined_language() == target.predefined_language()
+                    || match (
+                        self.names.get(candidate.target_name()),
+                        self.names.get(target.target_name()),
+                    ) {
+                        (Some(&candidate), Some(&target)) => {
+                            self.specializes_symbol(candidate, target, span)?
+                        }
+                        _ => false,
+                    }
+                {
+                    allowed = true;
+                    break;
+                }
+            }
+            if !allowed {
+                return Some(false);
+            }
+        }
+        Some(own_len != 0)
     }
 
     fn check_nominal_domain(&mut self, owner: usize, span: &crate::Span) -> Option<bool> {

@@ -2,7 +2,7 @@
 use super::*;
 pub(crate) use crate::model::NumericDirection as Direction;
 pub(crate) use crate::model::{
-    AlignmentKind, BlackboxKind, CoordinateKind, EnumerationOrder, TemporalKind,
+    AlignmentKind, BlackboxKind, ClassValueKind, CoordinateKind, EnumerationOrder, TemporalKind,
 };
 use crate::{CollectionKind, GeometryKind, UnitOperator};
 
@@ -152,11 +152,6 @@ pub(crate) enum OidSyntax {
     Any(Span),
     Numeric(Box<NumericSyntax>),
     Text(TextSyntax),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClassValueKind {
-    Class,
-    Structure,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -2112,7 +2107,6 @@ mod tests {
             "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
             "OID 0..1 {Systems.R}",
-            "CLASS RESTRICTION (INTERLIS.METAOBJECT)",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",
         ] {
             let body = format!("DOMAIN New={ty};");

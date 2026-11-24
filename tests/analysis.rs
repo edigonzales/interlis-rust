@@ -1200,7 +1200,67 @@ fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
             Status::Incomplete,
             Some("ILI-UNSUPPORTED"),
         );
+        let text = format!(
+            "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S;
+             DOMAIN AnyObject=STRUCTURE; AnyClass EXTENDS AnyObject=CLASS;
+             TOPIC T=CLASS C EXTENDS S=END C; CLASS D EXTENDS C=END D;
+             DOMAIN ClassValues=CLASS RESTRICTION (C; S);
+             Narrow EXTENDS ClassValues=CLASS RESTRICTION (D);
+             END T; DOMAIN StructValues=STRUCTURE RESTRICTION (S; M.T.C); END M."
+        );
+        let report = outcome(
+            request(vec![("class-values", text)]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::ClassValue(value)) = graph.effective_type("M.T.ClassValues") else {
+            panic!("expected a class value");
+        };
+        assert_eq!(value.kind, interlis::ClassValueKind::Class);
+        assert_eq!(
+            value
+                .restrictions
+                .iter()
+                .map(|target| target.target_name())
+                .collect::<Vec<_>>(),
+            ["M.T.C", "M.S"]
+        );
+        let Some(TypeInfo::ClassValue(narrow)) = graph.effective_type("M.T.Narrow") else {
+            panic!("expected a narrowed class value");
+        };
+        assert_eq!(narrow.restrictions[0].target_name(), "M.T.D");
+        let source = &report.sources().files()[0].text();
+        let range = report
+            .sources()
+            .location(narrow.restrictions[0].source_span())
+            .unwrap();
+        assert_eq!(
+            &source[range.start_byte as usize..range.end_byte as usize],
+            "D"
+        );
     }
+    for extension in [
+        "CLASS",
+        "CLASS RESTRICTION (Unrelated)",
+        "STRUCTURE RESTRICTION (C)",
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC T=CLASS C=END C; CLASS Unrelated=END Unrelated;
+             DOMAIN Base=CLASS RESTRICTION (C); Derived EXTENDS Base={extension}; END T;"
+            )),
+            Status::Rejected,
+            Some("ILI-CLASS-VALUE-EXTENSION"),
+        );
+    }
+    outcome(
+        single(
+            "STRUCTURE S=END S; DOMAIN Base=STRUCTURE RESTRICTION (S); Derived EXTENDS Base=CLASS RESTRICTION (S);",
+        ),
+        Status::Rejected,
+        Some("ILI-CLASS-VALUE-EXTENSION"),
+    );
 }
 
 #[test]

@@ -1642,7 +1642,7 @@ mod reference_and_type_start_regressions {
         .unwrap()
     }
     #[test]
-    fn value_types_remain_outside_the_partial_semantics() {
+    fn value_type_semantics_distinguish_supported_declaration_positions() {
         for version in ["2.3", "2.4"] {
             for ty in [
                 "CLASS",
@@ -1652,20 +1652,25 @@ mod reference_and_type_start_regressions {
                 "STRUCTURE RESTRICTION (INTERLIS.AXIS)",
                 "ATTRIBUTE OF a->b",
             ] {
-                for body in [
-                    format!("DOMAIN D={ty};"),
-                    format!("STRUCTURE S=x:{ty}; END S;"),
-                    format!("STRUCTURE S=PARAMETER p:{ty}; END S;"),
-                    format!("PARAMETER p:{ty};"),
+                for (body, parameter_section) in [
+                    (format!("DOMAIN D={ty};"), false),
+                    (format!("STRUCTURE S=x:{ty}; END S;"), false),
+                    (format!("STRUCTURE S=PARAMETER p:{ty}; END S;"), true),
+                    (format!("PARAMETER p:{ty};"), false),
                 ] {
                     let report = run(&body, version);
+                    let checked = !parameter_section && !ty.starts_with("ATTRIBUTE");
                     assert_eq!(
                         report.status(),
-                        AnalysisStatus::Incomplete,
+                        if checked {
+                            AnalysisStatus::CheckedSubset
+                        } else {
+                            AnalysisStatus::Incomplete
+                        },
                         "{version}: {body}: {:?}",
                         report.diagnostics()
                     );
-                    assert!(report.graph().is_none());
+                    assert_eq!(report.graph().is_some(), checked);
                     assert!(!report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
                 }
             }

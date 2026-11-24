@@ -14,7 +14,43 @@ const VIEWABLE: &[Kind] = &[Kind::Class, Kind::Structure, Kind::Association, Kin
 const ROLE_TARGET: &[Kind] = &[Kind::Class, Kind::Association];
 const OBJECTS_TARGET: &[Kind] = &[Kind::Class, Kind::Association, Kind::View];
 
+fn class_value_kinds(kind: ClassValueKind) -> &'static [Kind] {
+    match kind {
+        ClassValueKind::Class => VIEWABLE,
+        ClassValueKind::Structure => CLASS_BASE,
+    }
+}
+
 impl Analyzer<'_, '_> {
+    pub(super) fn class_value_type(
+        &mut self,
+        owner: usize,
+        kind: ClassValueKind,
+        sources: &[QualifiedName],
+    ) -> Option<crate::ClassValueType> {
+        let kinds = class_value_kinds(kind);
+        let mut restrictions = Vec::with_capacity(sources.len());
+        for name in sources {
+            match self.lookup_name(owner, &name.segments, &name.span, kinds) {
+                Ok(target) => restrictions.push(self.bound_reference(owner, name, target)?),
+                Err(LookupError::Limit) => return None,
+                Err(LookupError::Deferred) => {
+                    self.diagnostics.push(
+                        "ILI-UNSUPPORTED",
+                        "The class-value restriction requires its target's full declaration",
+                        Some(name.span.clone()),
+                    );
+                    return None;
+                }
+                Err(_) => {
+                    self.require_name(owner, name, kinds);
+                    return None;
+                }
+            }
+        }
+        Some(crate::ClassValueType { kind, restrictions })
+    }
+
     pub(super) fn check_direct_references(&mut self) {
         for owner in 0..self.symbols.len() {
             if self.diagnostics.limited {
@@ -213,12 +249,8 @@ impl Analyzer<'_, '_> {
             Some(TypeSyntax::ClassValue {
                 kind, restrictions, ..
             }) => {
-                let kinds = match kind {
-                    ClassValueKind::Class => VIEWABLE,
-                    ClassValueKind::Structure => CLASS_BASE,
-                };
                 for name in restrictions {
-                    self.require_name(owner, name, kinds);
+                    self.require_name(owner, name, class_value_kinds(*kind));
                 }
             }
             Some(TypeSyntax::Reference { target, .. }) => {
