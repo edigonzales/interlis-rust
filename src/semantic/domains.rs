@@ -166,7 +166,7 @@ impl Analyzer<'_, '_> {
         syntax: &TypeSyntax,
     ) -> Option<Effective> {
         let mut own = if matches!(syntax, TypeSyntax::Formatted { .. }) {
-            self.temporal_format(owner, syntax, Some(base), None)?
+            self.formatted_type(owner, syntax, Some(base), None)?
         } else {
             self.concrete_type(owner, syntax)?
         };
@@ -210,6 +210,20 @@ impl Analyzer<'_, '_> {
             }
             _ => (own.ty, base.ty, syntax),
         };
+        if matches!(self.types[own_id], TypeInfo::Formatted(_))
+            || matches!(self.types[base_id], TypeInfo::Formatted(_))
+        {
+            if self.format_extends(own_id, base_id, leaf.span())? {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-FORMAT-INHERITANCE",
+                "The format must retain the inherited layout and bounds",
+                leaf.span(),
+            );
+            return None;
+        }
         if matches!(self.types[own_id], TypeInfo::Structure(_))
             || matches!(self.types[base_id], TypeInfo::Structure(_))
         {

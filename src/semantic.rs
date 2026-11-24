@@ -7,6 +7,7 @@ mod domains;
 mod enumeration;
 mod existence;
 mod expressions;
+mod formats;
 mod functions;
 mod geometry;
 mod model_header;
@@ -171,7 +172,18 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Reference { .. }
         | TypeSyntax::ClassValue { .. } => true,
         TypeSyntax::Geometry(_) => true,
-        TypeSyntax::Formatted { base, .. } => !matches!(base, syntax::FormatBase::Structure { .. }),
+        TypeSyntax::Formatted { base, .. } => match base {
+            syntax::FormatBase::Structure { format, .. } => format.parts.iter().all(|part| {
+                !matches!(
+                    part,
+                    syntax::FormatPart::Attribute {
+                        attribute: syntax::FormatAttribute::Formatted { .. },
+                        ..
+                    }
+                )
+            }),
+            _ => true,
+        },
         TypeSyntax::AttributePathValue {
             of, restrictions, ..
         } => {
@@ -1659,7 +1671,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 kind, restrictions, ..
             } => TypeInfo::ClassValue(self.class_value_type(owner, *kind, restrictions)?),
             TypeSyntax::Formatted { .. } => {
-                return self.temporal_format(owner, syntax, None, None);
+                return self.formatted_type(owner, syntax, None, None);
             }
             TypeSyntax::AttributePathValue {
                 of, restrictions, ..
@@ -1851,7 +1863,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     },
                 ) = self.symbols[id].syntax
             {
-                result = result.and_then(|value| self.temporal_format(id, ty, None, Some(value)));
+                result = result.and_then(|value| self.formatted_type(id, ty, None, Some(value)));
             } else if self.symbols[id].base.is_some()
                 && let Some(TypeSyntax::Enumeration {
                     enumeration, order, ..
@@ -2010,6 +2022,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
             .collect();
         viewables.extend(self.bind_views(&expressions)?);
+        self.validate_formatted_types()?;
         self.validate_reference_types(&viewables)?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;

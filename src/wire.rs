@@ -782,6 +782,26 @@ impl<'report> Serialize for TypeOutput<'report> {
             location: Option<SourceLocation>,
         }
         #[derive(Serialize)]
+        struct FormattedBound<'a> {
+            original: &'a str,
+            components: &'a [DecimalInfo],
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum FormatPart<'a> {
+            Literal {
+                value: &'a str,
+                #[serde(flatten)]
+                location: Option<SourceLocation>,
+            },
+            Numeric {
+                attribute: Reference<'a>,
+                width: Option<&'a str>,
+            },
+        }
+        #[derive(Serialize)]
         struct ObjectTarget<'a> {
             target: Option<Reference<'a>>,
             restrictions: Vec<Reference<'a>>,
@@ -833,6 +853,12 @@ impl<'report> Serialize for TypeOutput<'report> {
                 base: &'a Reference<'a>,
                 lower: &'a TemporalBound<'a>,
                 upper: &'a TemporalBound<'a>,
+            },
+            Formatted {
+                structure: Reference<'a>,
+                parts: Vec<FormatPart<'a>>,
+                lower: Option<FormattedBound<'a>>,
+                upper: Option<FormattedBound<'a>>,
             },
             Blackbox {
                 encoding: crate::BlackboxKind,
@@ -931,6 +957,35 @@ impl<'report> Serialize for TypeOutput<'report> {
                     base: &project_reference(&range.base, self.2),
                     lower: &bound(&range.lower),
                     upper: &bound(&range.upper),
+                }
+                .serialize(serializer)
+            }
+            TypeInfo::Formatted(format) => {
+                let bound = |bound: &'report crate::FormattedBound| FormattedBound {
+                    original: &bound.original,
+                    components: &bound.components,
+                    location: self.2.location(bound.source_span()),
+                };
+                Type::Formatted {
+                    structure: project_reference(&format.structure, self.2),
+                    parts: format
+                        .parts
+                        .iter()
+                        .map(|part| match part {
+                            crate::FormattedPart::Literal { value, span } => FormatPart::Literal {
+                                value,
+                                location: self.2.location(span),
+                            },
+                            crate::FormattedPart::Numeric { attribute, width } => {
+                                FormatPart::Numeric {
+                                    attribute: project_reference(attribute, self.2),
+                                    width: width.as_deref(),
+                                }
+                            }
+                        })
+                        .collect(),
+                    lower: format.bounds.as_ref().map(|(lower, _)| bound(lower)),
+                    upper: format.bounds.as_ref().map(|(_, upper)| bound(upper)),
                 }
                 .serialize(serializer)
             }

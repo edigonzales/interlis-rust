@@ -8,21 +8,27 @@ use crate::{
 };
 
 impl Analyzer<'_, '_> {
-    pub(super) fn temporal_format(
+    pub(super) fn formatted_type(
         &mut self,
         owner: usize,
         syntax: &TypeSyntax,
         inherited: Option<Effective>,
         resolved: Option<Effective>,
     ) -> Option<Effective> {
-        let TypeSyntax::Formatted {
-            base,
-            range: Some(range),
-            span,
-        } = syntax
-        else {
-            unreachable!("a temporal format has bound literals");
+        let TypeSyntax::Formatted { base, range, span } = syntax else {
+            unreachable!("format syntax required");
         };
+        if let FormatBase::Structure { reference, format } = base {
+            return self.structure_format(
+                owner,
+                reference,
+                format,
+                range.as_ref(),
+                inherited,
+                span,
+            );
+        }
+        let range = range.as_ref().expect("range syntax requires two bounds");
         let (base, value) = match base {
             FormatBase::Domain(name) => {
                 let value = if let Some(value) = resolved {
@@ -54,8 +60,11 @@ impl Analyzer<'_, '_> {
                     value,
                 )
             }
-            FormatBase::Structure { .. } => unreachable!("structure formats are gated"),
+            FormatBase::Structure { .. } => unreachable!("structure format was handled above"),
         };
+        if matches!(self.types[value.ty], TypeInfo::Formatted(_)) {
+            return self.restrict_format(value, range, span);
+        }
         let Some((kind, language)) = self.temporal_profile(value.ty) else {
             return self.invalid_format_base(&base.span);
         };

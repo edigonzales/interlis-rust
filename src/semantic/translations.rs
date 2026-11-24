@@ -1,6 +1,7 @@
 use super::{
     Analyzer, Kind, SyntaxDecl,
     expressions::{numeric_operand, underlying_expression},
+    formats::compare_components,
     functions::compare_decimal,
     paths::equivalent_selector,
 };
@@ -1031,6 +1032,49 @@ impl Comparison<'_> {
                     && a.lower.components == b.lower.components
                     && a.upper.components == b.upper.components
                     && self.reference(Some(&a.base), Some(&b.base))?
+            }
+            (Formatted(a), Formatted(b)) => {
+                if a.parts.len() != b.parts.len()
+                    || !self.reference(Some(&a.structure), Some(&b.structure))?
+                {
+                    return Ok(Some(false));
+                }
+                for (a, b) in a.parts.iter().zip(&b.parts) {
+                    self.work.charge(1)?;
+                    use crate::FormattedPart::{Literal, Numeric};
+                    let matches = match (a, b) {
+                        (Literal { value: a, .. }, Literal { value: b, .. }) => {
+                            self.work.charge((a.len() + b.len()) as u32)?;
+                            a == b
+                        }
+                        (
+                            Numeric {
+                                attribute: a,
+                                width: aw,
+                            },
+                            Numeric {
+                                attribute: b,
+                                width: bw,
+                            },
+                        ) => aw == bw && self.reference(Some(a), Some(b))?,
+                        _ => false,
+                    };
+                    if !matches {
+                        return Ok(Some(false));
+                    }
+                }
+                match (&a.bounds, &b.bounds) {
+                    (Some((al, au)), Some((bl, bu))) => {
+                        compare_components(&al.components, &bl.components, self.work)
+                            .map_err(|_| ())?
+                            == Ordering::Equal
+                            && compare_components(&au.components, &bu.components, self.work)
+                                .map_err(|_| ())?
+                                == Ordering::Equal
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
             }
             (Numeric(a), Numeric(b)) => self.numeric(a, b)?,
             (Coordinate(a), Coordinate(b)) => {

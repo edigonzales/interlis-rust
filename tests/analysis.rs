@@ -1912,6 +1912,55 @@ fn inspections_bind_the_nested_structure_and_its_immediate_parent() {
 }
 
 #[test]
+fn formats_bind_numeric_components_widths_and_inherited_exact_ranges() {
+    for version in ["2.3", "2.4"] {
+        let input = |lower: &str, field: &str| {
+            request(vec![(
+            "formats", format!(
+                "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                 STRUCTURE Pair=major:0..23; minor:0..59; label:TEXT*4; END Pair;
+                 STRUCTURE Extended EXTENDS Pair = seconds:0.0..59.9; END Extended;
+                 DOMAIN Clock=FORMAT BASED ON Pair (\"t\" major/2 \":\" {field}/2) \"t01:00\" .. \"t22:59\";
+                     Seconds EXTENDS Clock=FORMAT BASED ON Extended (INHERITANCE \":\" seconds/2)
+                        \"t01:00:00.0\" .. \"t22:59:59.9\";
+                     Narrow=FORMAT Clock \"{lower}\" .. \"t05:05\";
+                 END M."
+            )
+        )])
+        };
+        let report = outcome(input("t02:03", "minor"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Formatted(format)) = graph.effective_type("M.Seconds") else {
+            panic!("expected a formed type");
+        };
+        assert_eq!(format.structure.target_name(), "M.Extended");
+        let interlis::FormattedPart::Numeric { attribute, width } = &format.parts[1] else {
+            panic!("expected numeric part");
+        };
+        assert_eq!(attribute.target_name(), "M.Pair.major");
+        assert_eq!(width.as_deref(), Some("2"));
+        let (lower, upper) = format.bounds.as_ref().unwrap();
+        assert_eq!(lower.original, "t01:00:00.0");
+        assert_eq!(upper.components[2].original(), "59.9");
+        outcome(
+            input("t00:00", "minor"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+        outcome(
+            input("t2:03", "minor"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+        outcome(
+            input("t02:03", "label"),
+            Status::Rejected,
+            Some("ILI-FORMAT-ATTRIBUTE"),
+        );
+    }
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(

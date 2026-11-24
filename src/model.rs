@@ -175,6 +175,7 @@ pub enum TypeInfo {
     Alignment(AlignmentKind),
     Temporal(TemporalKind),
     TemporalRange(TemporalRange),
+    Formatted(Box<FormattedType>),
     Blackbox(BlackboxKind),
     Enumeration {
         values: Enumeration,
@@ -198,6 +199,40 @@ pub enum TypeInfo {
     Reference(ReferenceType),
     ObjectSelection(ObjectSelection),
     Geometry(GeometryType),
+}
+
+#[derive(Clone, Debug)]
+pub enum FormattedPart {
+    Literal {
+        value: String,
+        span: Span,
+    },
+    Numeric {
+        attribute: TypeReference,
+        width: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+pub struct FormattedBound {
+    pub original: String,
+    pub components: Vec<DecimalInfo>,
+    pub(crate) span: Span,
+}
+
+impl FormattedBound {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Debug)]
+pub struct FormattedType {
+    pub structure: TypeReference,
+    pub parts: Vec<FormattedPart>,
+    pub bounds: Option<(FormattedBound, FormattedBound)>,
+    pub(crate) base: Option<usize>,
+    pub(crate) span: Span,
 }
 
 impl TypeInfo {
