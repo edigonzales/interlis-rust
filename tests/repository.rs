@@ -319,6 +319,64 @@ fn a_new_file_can_make_an_already_selected_root_ambiguous() {
 }
 
 #[test]
+fn an_indexed_checksum_mismatch_has_the_same_status_when_a_file_is_already_loaded() {
+    let repository = tempfile::tempdir().unwrap();
+    let dir = repository.path();
+    write(
+        dir,
+        "ilimodels.xml",
+        index(&[
+            model_entry("First", "4", "shared.ili", "1", ""),
+            model_entry(
+                "Absent",
+                "4",
+                "shared.ili",
+                "1",
+                "<md5>00000000000000000000000000000000</md5>",
+            ),
+        ]),
+    );
+    write(dir, "shared.ili", ili("2.4", "First", "1", ""));
+    for roots in [
+        &["--root", "Absent"][..],
+        &["--root", "First", "--root", "Absent"],
+    ] {
+        let bad = report(
+            cli().args(["compile", "--repository"]).arg(dir).args(roots),
+            1,
+        );
+        assert_eq!(bad["diagnostics"][0]["code"], "ILI-RES-CHECKSUM");
+        assert!(
+            bad["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("shared.ili")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_site_symlink_to_the_same_repository_ends_the_search() {
+    let repository = tempfile::tempdir().unwrap();
+    let dir = repository.path();
+    write(dir, "ilimodels.xml", index(&[]));
+    write(
+        dir,
+        "ilisite.xml",
+        "<Site><parentSite><RepositoryLocation_><value>again/</value></RepositoryLocation_></parentSite></Site>",
+    );
+    std::os::unix::fs::symlink(".", dir.join("again")).unwrap();
+    let missing = report(
+        cli()
+            .args(["check", "--root", "Missing", "--repository"])
+            .arg(dir),
+        1,
+    );
+    assert_eq!(missing["diagnostics"][0]["code"], "ILI-ROOT-NOT-FOUND");
+}
+
+#[test]
 fn site_graph_is_ordered_and_selected_sources_fail_without_fallback() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path();

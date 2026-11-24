@@ -455,29 +455,15 @@ impl Resolver {
                     self.sources[file].source.text.as_bytes(),
                     entry.md5.as_deref(),
                 )
-                .map_err(SearchError::Load)?;
+                .map_err(|error| self.model_load_error(need, &entry.uri, error))?;
                 file
             }
             None => {
-                let payload = match self
+                let payload = self
                     .search
                     .loader
                     .get(&entry.uri, entry.md5.as_deref(), true)
-                {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        self.say(
-                            load_code(error),
-                            format!("Model {} at {}: {error}", need.name, safe_uri(&entry.uri)),
-                            need.place,
-                            technical(error),
-                            false,
-                        );
-                        // The located error is already in the report. No other
-                        // repository may replace the selected entry.
-                        return Err(SearchError::Reported);
-                    }
-                };
+                    .map_err(|error| self.model_load_error(need, &entry.uri, error))?;
                 self.fetched_source(
                     entry.uri.clone(),
                     payload.text,
@@ -547,6 +533,17 @@ impl Resolver {
             false,
         );
         Err(SearchError::Reported)
+    }
+
+    fn model_load_error(&mut self, need: &Need, uri: &Url, error: FetchError) -> SearchError {
+        self.say(
+            load_code(error),
+            format!("Model {} at {}: {error}", need.name, safe_uri(uri)),
+            need.place,
+            technical(error),
+            false,
+        );
+        SearchError::Reported
     }
 
     fn unresolved(&mut self, need: &Need, error: SearchError) {

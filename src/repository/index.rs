@@ -50,6 +50,15 @@ impl Repository {
         let index = base.join(INDEX).map_err(|_| ())?;
         Ok(Self { base, index })
     }
+
+    fn site_identity(&self) -> Url {
+        self.base
+            .to_file_path()
+            .ok()
+            .and_then(|path| path.canonicalize().ok())
+            .and_then(|path| Url::from_directory_path(path).ok())
+            .unwrap_or_else(|| self.base.clone())
+    }
 }
 
 pub(super) fn valid_uri(uri: &Url) -> bool {
@@ -341,7 +350,7 @@ impl Search {
         let mut indexes = HashSet::new();
         for repo in self.configured.clone() {
             self.charge(1)?;
-            if visits.bases.insert(repo.base.clone()) {
+            if visits.bases.insert(repo.site_identity()) {
                 configured.push(repo.clone());
             }
             if indexes.insert(repo.index.clone())
@@ -362,7 +371,7 @@ impl Search {
                 break;
             };
             self.charge(1)?;
-            if visits.bases.insert(next.base.clone()) {
+            if visits.bases.insert(next.site_identity()) {
                 if let Some(model) = self.visit(&next, query, &mut visits)? {
                     return Ok(model);
                 }
