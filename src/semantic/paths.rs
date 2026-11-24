@@ -23,7 +23,7 @@ pub(super) enum PathContext {
 }
 
 #[derive(Clone, Copy)]
-enum RestrictionMatch {
+pub(super) enum RestrictionMatch {
     Fits,
     Outside,
     Unchecked,
@@ -349,7 +349,7 @@ impl Analyzer<'_, '_> {
         Some(all)
     }
 
-    fn attribute_type_match(
+    pub(super) fn attribute_type_match(
         &mut self,
         owner: usize,
         source: usize,
@@ -528,19 +528,31 @@ impl Analyzer<'_, '_> {
                     );
                 };
                 scope = self.names[inspection.parent.target_name()];
+                let parent_type = inspection.parent_type;
                 let name = Name {
                     value: "PARENT".into(),
                     span: special.span.clone(),
                 };
                 let reference = self.reference_to_symbol(owner, scope, &name)?;
                 if position + 1 == elements.len() {
-                    let ty = self.object_selection_type(
-                        false,
-                        crate::ObjectTarget {
+                    let ty = if let Some(ty) = parent_type {
+                        ty
+                    } else if self.symbols[scope].declaration.kind == Kind::Structure {
+                        let ty = self.types.len();
+                        self.types.push(TypeInfo::Structure(crate::StructureType {
                             target: Some(reference.clone()),
                             restrictions: Vec::new(),
-                        },
-                    );
+                        }));
+                        ty
+                    } else {
+                        self.object_selection_type(
+                            false,
+                            crate::ObjectTarget {
+                                target: Some(reference.clone()),
+                                restrictions: Vec::new(),
+                            },
+                        )
+                    };
                     steps.push(BoundPathStep {
                         reference,
                         selection: None,

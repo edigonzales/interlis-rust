@@ -929,6 +929,7 @@ pub struct InspectionInfo {
     pub path: ExpressionId,
     pub element: TypeReference,
     pub parent: TypeReference,
+    pub(crate) parent_type: Option<usize>,
 }
 
 #[derive(Debug)]

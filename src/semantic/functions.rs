@@ -3,6 +3,7 @@ use super::{
     collections::{compare_count, structure_targets},
     expressions::{scalar_type, underlying_expression},
     object_references::object_targets,
+    paths::RestrictionMatch,
     units::unit_extends,
 };
 use crate::{
@@ -475,6 +476,23 @@ impl Analyzer<'_, '_> {
                     Some(expression),
                 );
             }
+        }
+        let actual = underlying_expression(&self.expressions, expression);
+        if let Some(source) = actual.type_id
+            && matches!(
+                (&self.types[source], &self.types[target]),
+                (TypeInfo::Collection(_), TypeInfo::Collection(_))
+            )
+        {
+            let at = actual.span.clone();
+            return match self.attribute_type_match(owner, source, target, &at, Some(expression))? {
+                RestrictionMatch::Fits => Some(true),
+                RestrictionMatch::Outside => Some(false),
+                RestrictionMatch::Unchecked => {
+                    self.unsupported_expression(&at);
+                    None
+                }
+            };
         }
         match self.argument_fits(owner, expression, target, mandatory, context) {
             Ok(Some(result)) => Some(result),

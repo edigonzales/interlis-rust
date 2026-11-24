@@ -1730,13 +1730,15 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
             request(vec![(
                 "views",
                 format!(
-                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                 FUNCTION combine(left:MANDATORY 0..10; right:MANDATORY 0..10):0..10;
                  TOPIC T =
                     CLASS A=number:0..10; END A;
                     CLASS B=index:0..10; END B;
                     VIEW U UNION OF a0~A,b0~B; = {attributes} END U;
                     VIEW Grouped AGGREGATION OF a0~A EQUAL(a0->number);
-                        = MANDATORY CONSTRAINT INTERLIS.elementCount(AGGREGATES) > 0;
+                        = rows:BAG OF ANYSTRUCTURE := AGGREGATES;
+                          MANDATORY CONSTRAINT INTERLIS.elementCount(AGGREGATES) > 0;
                     END Grouped;
                  END T; END M."
                 ),
@@ -1768,12 +1770,22 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
             panic!("expected a bag of source rows");
         };
         assert_eq!(row.target.as_ref().unwrap().target_name(), "M.T.A");
-        assert!(
+        assert_eq!(
             graph
                 .effective_attributes("M.T.Grouped")
                 .unwrap()
-                .next()
-                .is_none()
+                .map(|member| member.name())
+                .collect::<Vec<_>>(),
+            ["rows"]
+        );
+        assert_eq!(
+            graph
+                .declaration("M.T.Grouped.AGGREGATES")
+                .unwrap()
+                .derived_from()
+                .unwrap()
+                .target_name(),
+            "M.T.Grouped.a0"
         );
         outcome(
             input("key:MANDATORY 0..10 := a0->number;"),
@@ -1787,6 +1799,18 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
         );
         outcome(
             input("key:0..10 := a0->number;"),
+            Status::CheckedSubset,
+            None,
+        );
+        outcome(
+            input("key:MANDATORY 0..10 := combine(a0->number,b0->index);"),
+            Status::Rejected,
+            Some("ILI-VIEW-UNION-ATTRIBUTE"),
+        );
+        outcome(
+            input(
+                "key:MANDATORY 0..10 := combine(a0->number,a0->number),combine(b0->index,b0->index);",
+            ),
             Status::CheckedSubset,
             None,
         );
@@ -1824,6 +1848,8 @@ fn inspections_bind_the_nested_structure_and_its_immediate_parent() {
                     CLASS Root=groups:BAG OF Group; END Root;
                     VIEW Inspected {area} INSPECTION OF point~Root->groups->points;
                         = ALL OF point; parentCode:TEXT*10 := {selected}->code;
+                          row:Point := point;
+                          container:Group := PARENT;
                     END Inspected;
                  END T; END M."
                 ),
@@ -1841,6 +1867,17 @@ fn inspections_bind_the_nested_structure_and_its_immediate_parent() {
             .unwrap();
         assert_eq!(inspection.parent.target_name(), "M.T.Group");
         assert_eq!(inspection.element.target_name(), "M.T.Point");
+        for (reference, name) in [
+            (&inspection.parent, "Group"),
+            (&inspection.element, "Point"),
+        ] {
+            let location = report.sources().location(reference.source_span()).unwrap();
+            let text = report.sources().files()[0].text();
+            assert_eq!(
+                &text[location.start_byte as usize..location.end_byte as usize],
+                name
+            );
+        }
         let interlis::BoundExpressionKind::Path { steps } =
             &graph.expression(inspection.path).unwrap().kind
         else {
@@ -1853,6 +1890,14 @@ fn inspections_bind_the_nested_structure_and_its_immediate_parent() {
             copy.derived_from().unwrap().target_name(),
             "M.T.Point.label"
         );
+        let parent_value = graph
+            .declaration("M.T.Inspected.container")
+            .unwrap()
+            .derivations()[0];
+        let Some(TypeInfo::Structure(parent)) = graph.expression_declared_type(parent_value) else {
+            panic!("expected the enclosing structure type");
+        };
+        assert_eq!(parent.target.as_ref().unwrap().target_name(), "M.T.Group");
         outcome(
             input("AREA", "PARENT"),
             Status::Rejected,
