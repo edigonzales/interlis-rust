@@ -3456,7 +3456,7 @@ fn numeric_subdivisions_reject_wrong_types_units_and_periods() {
             Some(code),
         );
     }
-    outcome(
+    let override_report = outcome(
         request(vec![("inherited-subdivision", r#"INTERLIS 2.3; MODEL M AT "x" VERSION "1" =
              STRUCTURE Clock=hours:0..23 [INTERLIS.h]; SUBDIVISION minutes:0..59 [INTERLIS.min]; END Clock;
              STRUCTURE Fraction EXTENDS Clock=hours (EXTENDED):0.0..23.0 [INTERLIS.h]; END Fraction;
@@ -3464,15 +3464,60 @@ fn numeric_subdivisions_reject_wrong_types_units_and_periods() {
         Status::Rejected,
         Some("ILI-SUBDIVISION-INTEGER"),
     );
-    outcome(
-        single(
-            "UNIT Opaque=FUNCTION // dependency on an external measurement // [INTERLIS.s];
+    let location = override_report
+        .sources()
+        .location(override_report.diagnostics()[0].primary.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(location.start_line, 3);
+    for body in [
+        "UNIT Opaque=FUNCTION // dependency on an external measurement // [INTERLIS.s];
              STRUCTURE Clock=coarse:0..23 [Opaque];
                 CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [INTERLIS.s]; END Clock;",
-        ),
-        Status::CheckedSubset,
-        None,
+        "UNIT First; Second;
+             STRUCTURE Clock=coarse:0..23 [First];
+                CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [Second]; END Clock;",
+        "UNIT First;
+             STRUCTURE Clock=coarse:0..23 [First];
+                CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [INTERLIS.s]; END Clock;",
+        "UNIT Count EXTENDS INTERLIS.DIMENSIONLESS; Quotient=(INTERLIS.m/INTERLIS.m);
+             STRUCTURE Clock=coarse:0..23 [Count];
+                CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [Quotient]; END Clock;",
+    ] {
+        outcome(single(body), Status::CheckedSubset, None);
+    }
+    for units in [
+        "UNIT Opaque; Coarse=(Opaque*INTERLIS.h); Fine=(Opaque*INTERLIS.m);",
+        "UNIT First (ABSTRACT); Second (ABSTRACT); Coarse EXTENDS First; Fine EXTENDS Second;",
+    ] {
+        let body = format!(
+            "{units} STRUCTURE Clock=coarse:0..23 [Coarse];
+                CONTINUOUS SUBDIVISION fine:0..59 CIRCULAR [Fine]; END Clock;"
+        );
+        outcome(
+            single(&body),
+            Status::Rejected,
+            Some("ILI-SUBDIVISION-FACTOR"),
+        );
+    }
+}
+
+#[test]
+fn equivalent_unit_factors_cancel_before_large_products_are_evaluated() {
+    use std::fmt::Write;
+    let mut body = String::from("UNIT First0=1.005 [INTERLIS.s]; Second0=1.0050 [INTERLIS.s];");
+    for index in 1..=21 {
+        let prior = index - 1;
+        write!(
+            body,
+            " First{index}=(First{prior}*First{prior}); Second{index}=(Second{prior}*Second{prior});"
+        )
+        .unwrap();
+    }
+    body.push_str(
+        " STRUCTURE Clock=coarse:0..23 [First21];
+            CONTINUOUS SUBDIVISION fine:0..0 CIRCULAR [Second21]; END Clock;",
     );
+    outcome(single(&body), Status::CheckedSubset, None);
 }
 
 #[test]

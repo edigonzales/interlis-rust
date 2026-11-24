@@ -31,6 +31,7 @@ impl Analyzer<'_, '_> {
                 }
                 if checked.insert((attribute, preceding)) {
                     self.validate_subdivision(
+                        owner,
                         attribute,
                         preceding,
                         &marker.span,
@@ -48,6 +49,7 @@ impl Analyzer<'_, '_> {
 
     fn validate_subdivision(
         &mut self,
+        owner: usize,
         attribute: usize,
         predecessor: Option<usize>,
         span: &Span,
@@ -111,13 +113,21 @@ impl Analyzer<'_, '_> {
             )),
         };
         if let Some((code, message)) = error {
+            let preceding = &self.symbols[predecessor];
+            let inherited = self.symbols[attribute].declaration.parent != Some(owner);
+            let changed_predecessor = inherited && preceding.base_scope.is_some();
+            let (primary, related, related_message) = if changed_predecessor {
+                (&preceding.name_span, span, "Inherited subdivision")
+            } else {
+                (span, &preceding.name_span, "Preceding effective attribute")
+            };
             self.diagnostics.push_related(
                 code,
                 message,
-                Some(span.clone()),
+                Some(primary.clone()),
                 vec![RelatedLocation {
-                    span: self.symbols[predecessor].name_span.clone(),
-                    message: "Preceding effective attribute".into(),
+                    span: related.clone(),
+                    message: related_message.into(),
                 }],
             );
             return None;

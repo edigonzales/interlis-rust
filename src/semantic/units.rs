@@ -458,7 +458,8 @@ fn unit_product<'a>(
             (Some(UnitDefinition::Derived { target, .. }), _) => Some(target.target_name()),
             (Some(UnitDefinition::Fundamental), ProductKind::Dimension) => unit
                 .and_then(|unit| unit.base.as_ref())
-                .map(TypeReference::target_name),
+                .map(TypeReference::target_name)
+                .filter(|&parent| parent != "INTERLIS.ANYUNIT"),
             (None, ProductKind::Dimension) => {
                 predefined_parent(name).filter(|&parent| parent != "INTERLIS.ANYUNIT")
             }
@@ -476,7 +477,10 @@ fn unit_product<'a>(
             continue;
         }
         let mut product = Product::new();
-        if alias.is_none() && terms.is_empty() {
+        if alias.is_none()
+            && terms.is_empty()
+            && !(kind == ProductKind::Dimension && name == "INTERLIS.DIMENSIONLESS")
+        {
             product.insert(Factor::Unit(name), BigInt::from(1));
         }
         if kind == ProductKind::Ratio {
@@ -488,7 +492,10 @@ fn unit_product<'a>(
                 for factor in factors {
                     let key = match &factor.value {
                         UnitConstant::Decimal(value) => {
-                            Factor::Decimal(value.scale(), value.coefficient())
+                            match decimal_factor(value.coefficient(), value.scale()) {
+                                Some(key) => key,
+                                None => continue,
+                            }
                         }
                         UnitConstant::Pi => Factor::Pi,
                         UnitConstant::LnBase => Factor::LnBase,
@@ -496,8 +503,8 @@ fn unit_product<'a>(
                     add_power(&mut product, key, &BigInt::from(1), factor.operator, work)?;
                 }
             }
-            if let Some(value) = predefined_scale {
-                product.insert(Factor::Decimal(0, value), BigInt::from(1));
+            if let Some(key) = predefined_scale.and_then(|value| decimal_factor(value, 0)) {
+                product.insert(key, BigInt::from(1));
             }
         }
         for (operator, target) in alias
@@ -519,6 +526,13 @@ fn unit_product<'a>(
     Ok(resolved
         .remove(root)
         .expect("every reachable conversion root was resolved"))
+}
+
+fn decimal_factor(coefficient: &str, scale: i32) -> Option<Factor<'_>> {
+    let digits = coefficient.trim_end_matches('0');
+    let zeros = i32::try_from(coefficient.len() - digits.len()).expect("bounded precision");
+    let scale = scale - zeros;
+    (digits != "1" || scale != 0).then_some(Factor::Decimal(scale, digits))
 }
 
 fn add_power<'a>(
@@ -553,11 +567,25 @@ fn unit_period_matches(
     }
     ratio.retain(|_, power| power.bits() != 0);
     if ratio.keys().any(|factor| matches!(factor, Factor::Unit(_))) {
-        let coarse = unit_product(symbols, names, coarse, ProductKind::Dimension, work)?;
-        let fine = unit_product(symbols, names, fine, ProductKind::Dimension, work)?;
-        let unknown = coarse.contains_key(&Factor::Unit("INTERLIS.ANYUNIT"))
-            || fine.contains_key(&Factor::Unit("INTERLIS.ANYUNIT"));
-        return Ok(unknown || coarse == fine);
+        let mut dimensions = unit_product(symbols, names, coarse, ProductKind::Dimension, work)?;
+        for (factor, exponent) in unit_product(symbols, names, fine, ProductKind::Dimension, work)?
+        {
+            add_power(
+                &mut dimensions,
+                factor,
+                &exponent,
+                UnitOperator::Divide,
+                work,
+            )?;
+        }
+        dimensions.retain(|_, power| power.bits() != 0);
+        return Ok(dimensions.is_empty()
+            || dimensions.keys().any(|factor| {
+                matches!(factor, Factor::Unit(name)
+                    if *name == "INTERLIS.ANYUNIT"
+                        || !name.starts_with("INTERLIS.")
+                            && declared_unit(symbols, names, name).is_some_and(|unit| !unit.abstract_unit))
+            }));
     }
     let symbolic = usize::from(ratio.contains_key(&Factor::Pi))
         + usize::from(ratio.contains_key(&Factor::LnBase));
