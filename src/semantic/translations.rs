@@ -1,5 +1,7 @@
 use super::{
-    Analyzer, Kind, SyntaxDecl, expressions::underlying_expression, functions::compare_decimal,
+    Analyzer, Kind, SyntaxDecl,
+    expressions::{numeric_operand, underlying_expression},
+    functions::compare_decimal,
     paths::equivalent_selector,
 };
 use crate::{
@@ -582,31 +584,24 @@ impl Comparison<'_> {
     ) -> ComparisonResult {
         use BoundExpressionKind::*;
         let mut complete = true;
-        while let Some((a, b)) = pending.pop() {
+        while let Some((left, right)) = pending.pop() {
             self.work.charge(1)?;
-            let a = underlying_expression(self.expressions, a);
-            let b = underlying_expression(self.expressions, b);
+            let a = underlying_expression(self.expressions, left);
+            let b = underlying_expression(self.expressions, right);
             let equal = match (&a.kind, &b.kind) {
                 (Undefined, Undefined) | (This, This) => true,
                 (Boolean { value: a }, Boolean { value: b }) => a == b,
-                (
-                    Number {
-                        value: av,
-                        unit: au,
-                    },
-                    Number {
-                        value: bv,
-                        unit: bu,
-                    },
-                ) => {
+                (Number { value: av, .. }, Number { value: bv, .. }) => {
                     if !self.constant(av, bv)? {
                         return Ok(Some(false));
                     }
+                    let au = numeric_operand(self.expressions, self.types, left).unit;
+                    let bu = numeric_operand(self.expressions, self.types, right).unit;
                     if au.is_some() != bu.is_some() {
                         complete = false;
                         continue;
                     }
-                    self.reference(au.as_ref(), bu.as_ref())?
+                    self.reference(au, bu)?
                 }
                 (Text { value: a, .. }, Text { value: b, .. }) => {
                     self.work.charge((a.len() + b.len()) as u32)?;

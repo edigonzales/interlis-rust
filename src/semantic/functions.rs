@@ -445,6 +445,14 @@ impl Analyzer<'_, '_> {
             self.bind_enum_literal(expression, target)?;
         } else if matches!(self.types[target], TypeInfo::EnumArgument { .. }) {
             self.retain_symbolic_enum(expression);
+        } else if let TypeInfo::Numeric(range) = &self.types[target] {
+            if let Some(unit) = range
+                .unit
+                .as_ref()
+                .filter(|unit| !self.unit_is_abstract(unit))
+            {
+                self.bind_numeric_literal_unit(expression, unit.clone())?;
+            }
         } else {
             self.bind_temporal_literal(expression, target)?;
         }
@@ -648,8 +656,11 @@ impl Analyzer<'_, '_> {
                 };
                 let (lower, upper) = if let Some(source) = source {
                     let Some(bounds) = &source.bounds else {
-                        return Ok((!matches!(actual.kind, BoundExpressionKind::Binary { .. }))
-                            .then_some(false));
+                        return Ok((!matches!(
+                            actual.kind,
+                            BoundExpressionKind::Binary { .. } | BoundExpressionKind::Number { .. }
+                        ))
+                        .then_some(false));
                     };
                     (&bounds.lower, &bounds.upper)
                 } else if let Some((UnitConstant::Decimal(value), _)) = constant {

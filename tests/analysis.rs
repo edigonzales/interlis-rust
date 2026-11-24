@@ -1396,6 +1396,50 @@ fn translations_compare_bound_expressions_after_renaming_members_and_enum_values
 }
 
 #[test]
+fn translated_number_literals_use_the_effective_contextual_unit() {
+    for version in ["2.3", "2.4"] {
+        let input = |unit: &str| {
+            request(vec![
+                ("original", format!(
+                    "INTERLIS {version}; MODEL Original AT \"x\" VERSION \"1\" =
+                    STRUCTURE Part=distance:0..10 [INTERLIS.m];
+                        measured:0..10 [INTERLIS.m] := 3 [INTERLIS.m];
+                        MANDATORY CONSTRAINT distance > 3 [INTERLIS.m];
+                    END Part; END Original."
+                )),
+                ("translated", format!(
+                    "INTERLIS {version}; MODEL French AT \"x\" VERSION \"1\" TRANSLATION OF Original [\"1\"] =
+                    STRUCTURE Partie=longueur:0..10 [INTERLIS.m];
+                        mesure:0..10 [INTERLIS.m] := 3 {unit};
+                        MANDATORY CONSTRAINT longueur > (3);
+                    END Partie; END French."
+                )),
+            ])
+        };
+        let report = outcome(input(""), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let id = graph
+            .declaration("French.Partie.mesure")
+            .unwrap()
+            .derivations()[0];
+        assert!(matches!(
+            graph.expression(id).unwrap().kind,
+            interlis::BoundExpressionKind::Number { unit: None, .. }
+        ));
+        let Some(TypeInfo::Numeric(numeric)) = graph.expression_declared_type(id) else {
+            panic!("expected a bound measured type");
+        };
+        assert_eq!(numeric.unit.as_ref().unwrap().target_name(), "INTERLIS.m");
+        assert_eq!(numeric.bounds.as_ref().unwrap().lower.original(), "3");
+        outcome(
+            input("[INTERLIS.s]"),
+            Status::Rejected,
+            Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+        );
+    }
+}
+
+#[test]
 fn translations_compare_geometry_units_and_association_roles() {
     for version in ["2.3", "2.4"] {
         let input = |factor: &str, direction: &str, cardinality: &str| {

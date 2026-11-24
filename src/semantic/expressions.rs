@@ -2,7 +2,7 @@ use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
     BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ClassValueKind,
     ClassValueType, DecimalInfo, ExpressionId, ExpressionType as ValueType, LanguageVersion,
-    NumericRange, RelatedLocation, Span, TypeReference, UnitConstant,
+    NumericBounds, NumericRange, RelatedLocation, Span, TypeReference, UnitConstant,
     number::arithmetic_bounds,
     syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
@@ -451,6 +451,14 @@ impl Analyzer<'_, '_> {
             return None;
         }
         if a == Numeric && b == Numeric && !logical {
+            if !matches!(operator, Multiply | Divide) {
+                for (typed, literal) in [(left, right), (right, left)] {
+                    if let Some(unit) = numeric_operand(&self.expressions, &self.types, typed).unit
+                    {
+                        self.bind_numeric_literal_unit(literal, unit.clone())?;
+                    }
+                }
+            }
             return Some(if arithmetic { Numeric } else { Boolean });
         }
         if equality
@@ -486,6 +494,53 @@ impl Analyzer<'_, '_> {
         None
     }
 
+    pub(super) fn bind_numeric_literal_unit(
+        &mut self,
+        expression: ExpressionId,
+        unit: TypeReference,
+    ) -> Option<()> {
+        let actual = underlying_expression(&self.expressions, expression);
+        let BoundKind::Number { unit: None, .. } = &actual.kind else {
+            return Some(());
+        };
+        if actual.type_id.is_some() {
+            return Some(());
+        }
+        let span = actual.span.clone();
+        let (_, start, end) = span.sort_key();
+        if !self.step((end - start) as usize + unit.target_name().len(), &span) {
+            return None;
+        }
+        let bounds = match &underlying_expression(&self.expressions, expression).kind {
+            BoundKind::Number {
+                value: UnitConstant::Decimal(value),
+                ..
+            } => Some(NumericBounds {
+                lower: value.clone(),
+                upper: value.clone(),
+            }),
+            _ => None,
+        };
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Numeric(NumericRange {
+            bounds,
+            unit: Some(unit),
+            reference_system: None,
+            circular: false,
+            direction: None,
+        }));
+        let mut id = expression;
+        loop {
+            let bound = &mut self.expressions[id.0 as usize];
+            bound.type_id = Some(ty);
+            if let BoundKind::Group { expression } = bound.kind {
+                id = expression;
+            } else {
+                return Some(());
+            }
+        }
+    }
+
     fn arithmetic_type(
         &mut self,
         operator: BinaryOperator,
@@ -502,8 +557,6 @@ impl Analyzer<'_, '_> {
             {
                 match (a_unit, b_unit) {
                     (Some(a), Some(b)) if a.target_name() == b.target_name() => Some(a),
-                    (Some(unit), None) if b.literal => Some(unit),
-                    (None, Some(unit)) if a.literal => Some(unit),
                     _ => {
                         self.unsupported_expression(at);
                         return None;
@@ -623,13 +676,12 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
     }
 }
 
-struct NumericOperand<'a> {
+pub(super) struct NumericOperand<'a> {
     bounds: Option<(&'a DecimalInfo, &'a DecimalInfo)>,
-    unit: Option<&'a TypeReference>,
-    literal: bool,
+    pub(super) unit: Option<&'a TypeReference>,
 }
 
-fn numeric_operand<'a>(
+pub(super) fn numeric_operand<'a>(
     expressions: &'a [BoundExpression],
     types: &'a [TypeInfo],
     id: ExpressionId,
@@ -642,7 +694,6 @@ fn numeric_operand<'a>(
                 .as_ref()
                 .map(|bounds| (&bounds.lower, &bounds.upper)),
             unit: range.unit.as_ref(),
-            literal: false,
         }
     } else if let BoundKind::Number { unit, value } = &expression.kind {
         NumericOperand {
@@ -652,7 +703,6 @@ fn numeric_operand<'a>(
                 None
             },
             unit: unit.as_ref(),
-            literal: true,
         }
     } else {
         unreachable!("a numeric expression must have a numeric type or be a number literal")
