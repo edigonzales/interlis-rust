@@ -4068,6 +4068,74 @@ fn unique_checks_distinguish_invalid_scopes_filters_and_paths() {
 }
 
 #[test]
+fn local_uniqueness_can_select_23_geometry_line_attributes() {
+    let report = outcome(
+        request(vec![("line-attributes", r#"INTERLIS 2.3; MODEL M AT "issuer" VERSION "1" =
+            TOPIC T=
+                DOMAIN Point=COORD 0.00..10.00,0.00..10.00;
+                STRUCTURE Boundary=key:TEXT*8; END Boundary;
+                CLASS C=border:SURFACE WITH (STRAIGHTS) VERTEX Point WITHOUT OVERLAPS > 0.01 LINE ATTRIBUTES Boundary;
+                    UNIQUE (LOCAL) border:key;
+                END C;
+            END T; END M."#.into())]),
+        Status::CheckedSubset, None,
+    );
+    let graph = report.graph().unwrap();
+    let rule = &graph.declaration("M.T.C").unwrap().constraints()[0].rule;
+    let interlis::ConstraintRule::Unique { keys, .. } = rule else {
+        panic!("expected a local unique key");
+    };
+    let interlis::BoundExpressionKind::Path { steps } = &graph.expression(keys[0]).unwrap().kind
+    else {
+        panic!("expected a key path");
+    };
+    assert_eq!(steps[0].reference.target_name(), "M.T.Boundary.key");
+}
+
+#[test]
+fn role_paths_distinguish_link_endpoints_from_collections_of_related_objects() {
+    let declarations = "CLASS Parent=ready:BOOLEAN; END Parent;
+         CLASS Child=active:BOOLEAN; END Child;
+         ASSOCIATION Link=parent -- {0..1} Parent; children -- {0..*} Child;
+            UNIQUE children->active;
+            MANDATORY CONSTRAINT parent->ready AND children->active;
+         END Link;";
+    let report = outcome(
+        single(&format!(
+            "TOPIC T={declarations} CONSTRAINTS OF Child=
+                MANDATORY CONSTRAINT parent->ready; END; END T;"
+        )),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let predicate = graph.declaration("M.T.Child").unwrap().constraints()[0]
+        .expression
+        .unwrap();
+    let interlis::BoundExpressionKind::Path { steps } = &graph.expression(predicate).unwrap().kind
+    else {
+        panic!("expected a path across the association");
+    };
+    assert_eq!(steps[0].reference.target_name(), "M.T.Link.parent");
+    assert_eq!(steps[1].reference.target_name(), "M.T.Parent.ready");
+    outcome(
+        single(&format!(
+            "TOPIC T={declarations} CONSTRAINTS OF Parent=
+                MANDATORY CONSTRAINT children->active; END; END T;"
+        )),
+        Status::Rejected,
+        Some("ILI-PATH-MULTIPLICITY"),
+    );
+    outcome(
+        single(&format!(
+            "TOPIC T={declarations} CONSTRAINTS OF Parent=UNIQUE children; END; END T;"
+        )),
+        Status::Rejected,
+        Some("ILI-UNIQUE-KEY"),
+    );
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;

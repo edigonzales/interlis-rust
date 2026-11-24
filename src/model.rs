@@ -186,6 +186,7 @@ pub enum TypeInfo {
     ClassValue(ClassValueType),
     Collection(CollectionType),
     Reference(ReferenceType),
+    ObjectSelection(ObjectSelection),
     Geometry(GeometryType),
 }
 
@@ -242,6 +243,7 @@ pub enum ExpressionType {
     Text,
     Undefined,
     Object,
+    ObjectSet,
     Other,
 }
 
@@ -462,10 +464,16 @@ impl TemporalBound {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ObjectTarget {
     pub target: Option<TypeReference>,
     pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ObjectSelection {
+    pub plural: bool,
+    pub targets: Vec<ObjectTarget>,
 }
 
 #[derive(Debug, Serialize)]

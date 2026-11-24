@@ -510,29 +510,25 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
-    pub(super) fn has_role_access(
+    pub(super) fn visible_role(
         &mut self,
         mut owner: usize,
         name: &str,
         at: &Span,
-    ) -> Option<bool> {
-        if self
-            .visible_name(owner, name, Some(&[Kind::Role]), at)
-            .ok()?
-            .is_some()
-        {
-            return Some(true);
+    ) -> Result<Option<usize>, super::LookupError> {
+        if let Some(role) = self.visible_name(owner, name, Some(&[Kind::Role]), at)? {
+            return Ok(Some(role));
         }
         let mut key = (owner, name.to_owned());
         loop {
             if !self.step(1, at) {
-                return None;
+                return Err(super::LookupError::Limit);
             }
-            if self.role_accesses.contains_key(&key) {
-                return Some(true);
+            if let Some(&role) = self.role_accesses.get(&key) {
+                return Ok(Some(role));
             }
             let Some(base) = self.symbols[owner].base_scope else {
-                return Some(false);
+                return Ok(None);
             };
             owner = base;
             key.0 = base;

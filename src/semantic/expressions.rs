@@ -305,7 +305,7 @@ impl Analyzer<'_, '_> {
         if equality && (a == Undefined || b == Undefined) {
             return Some(Boolean);
         }
-        if a == Other || b == Other || a == Object && b == Object {
+        if a == Other || b == Other {
             self.unsupported_expression(at);
             return None;
         }
@@ -320,7 +320,10 @@ impl Analyzer<'_, '_> {
             }
             return Some(if arithmetic { Numeric } else { Boolean });
         }
-        if a == Boolean && b == Boolean && !arithmetic || a == Text && b == Text && equality {
+        if a == Boolean && b == Boolean && !arithmetic
+            || a == Text && b == Text && equality
+            || a == Object && b == Object && equality
+        {
             return Some(Boolean);
         }
         self.invalid_operands(
@@ -364,6 +367,8 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         | TypeInfo::UnboundedText
         | TypeInfo::MultilineText { .. } => ValueType::Text,
         TypeInfo::Structure(_) | TypeInfo::Reference(_) => ValueType::Object,
+        TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
+        TypeInfo::ObjectSelection(_) => ValueType::Object,
         _ => ValueType::Other,
     }
 }

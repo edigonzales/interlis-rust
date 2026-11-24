@@ -299,6 +299,7 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
                 let topic = self.containing_topic(owner);
+                let language = self.models[self.symbols[owner].model].language();
                 let mut scope = owner;
                 let mut steps = Vec::with_capacity(prefix.len());
                 let mut prefix_type = None;
@@ -312,7 +313,12 @@ impl Analyzer<'_, '_> {
                         selection_span: None,
                     });
                     prefix_type = Some(ty);
-                    scope = self.path_scope(ty, topic, PathContext::UniquePrefix, &name.span)?;
+                    scope = self.path_scope(
+                        ty,
+                        topic,
+                        PathContext::UniquePrefix(language),
+                        &name.span,
+                    )?;
                 }
                 let value_type = scalar_type(&self.types[prefix_type?]);
                 let path = self.record_expression(
@@ -362,7 +368,7 @@ impl Analyzer<'_, '_> {
             matches!(
                 self.types[ty],
                 TypeInfo::Structure(_) | TypeInfo::Collection(_)
-            )
+            ) || matches!(&self.types[ty], TypeInfo::ObjectSelection(selection) if selection.plural)
         }) {
             self.diagnostics.push(
                 "ILI-UNIQUE-KEY",

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     BoundExpressionKind, BoundPathStep, CollectionKind, CoordinateKind, ExpressionType,
-    PathSelection, Span,
+    LanguageVersion, ObjectSelection, PathSelection, Span, TypeReference,
     syntax::{ObjectPath, PathElement, PathSelector, SpecialPath},
 };
 use std::cmp::Ordering;
@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum PathContext {
     Object,
-    UniquePrefix,
+    UniquePrefix(LanguageVersion),
 }
 
 impl Analyzer<'_, '_> {
@@ -54,8 +54,27 @@ impl Analyzer<'_, '_> {
                 self.unsupported_expression(&association.span);
                 return None;
             }
-            let member = self.path_attribute(scope, name)?;
-            let member_type = self.symbols[member].declaration.type_id?;
+            let member =
+                match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
+                    Ok(Some(member)) => member,
+                    Err(LookupError::Limit) => return None,
+                    _ => match self.visible_role(scope, &name.value, &name.span) {
+                        Ok(Some(role)) => role,
+                        Err(LookupError::Limit) => return None,
+                        _ => {
+                            return self.path_error(
+                                "ILI-PATH-NAME",
+                                "The attribute or role is absent from this object context",
+                                &name.span,
+                            );
+                        }
+                    },
+                };
+            let member_type = if self.symbols[member].declaration.kind == Kind::Role {
+                self.role_value_type(scope, member, &name.span)?
+            } else {
+                self.symbols[member].declaration.type_id?
+            };
             let reference = self.reference_to_symbol(owner, member, name)?;
             let (value, selection, selection_span) = match selector {
                 Some(selector) => {
@@ -86,16 +105,38 @@ impl Analyzer<'_, '_> {
         match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
             Ok(Some(member)) => Some(member),
             Err(LookupError::Limit) => None,
-            _ if self.has_role_access(scope, &name.value, &name.span)? => {
-                self.unsupported_expression(&name.span);
-                None
-            }
             _ => self.path_error(
                 "ILI-PATH-NAME",
                 "The attribute is absent from this object context",
                 &name.span,
             ),
         }
+    }
+
+    fn role_value_type(&mut self, scope: usize, role: usize, at: &Span) -> Option<usize> {
+        let info = self.symbols[role].declaration.role()?;
+        let plural = self.symbols[scope].declaration.kind != Kind::Association
+            && info
+                .cardinality
+                .upper
+                .as_deref()
+                .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater);
+        let bytes = info
+            .targets
+            .iter()
+            .flat_map(|target| target.target.iter().chain(&target.restrictions))
+            .map(|target| 1 + target.declared_name().len() + target.target_name().len())
+            .sum();
+        if !self.step(bytes, at) {
+            return None;
+        }
+        let id = self.types.len();
+        let targets = self.symbols[role].declaration.role()?.targets.clone();
+        self.types.push(TypeInfo::ObjectSelection(ObjectSelection {
+            plural,
+            targets,
+        }));
+        Some(id)
     }
 
     fn select_path_value(
@@ -214,16 +255,44 @@ impl Analyzer<'_, '_> {
                 return None;
             }
         }
-        let targets = match &self.types[ty] {
-            TypeInfo::Structure(structure) => structure_targets(structure),
-            _ if context == PathContext::UniquePrefix => {
+        let roots = match &self.types[ty] {
+            TypeInfo::Structure(structure) => {
+                self.path_targets(structure_targets(structure).iter())
+            }
+            TypeInfo::Geometry(geometry)
+                if context == PathContext::UniquePrefix(LanguageVersion::V23)
+                    && geometry.line_attributes.is_some() =>
+            {
+                self.path_targets(geometry.line_attributes.iter())
+            }
+            _ if matches!(context, PathContext::UniquePrefix(_)) => {
                 return self.path_error(
                     "ILI-UNIQUE-PREFIX",
                     "A LOCAL key prefix must use structure attributes",
                     at,
                 );
             }
-            TypeInfo::Reference(reference) => object_targets(&reference.target),
+            TypeInfo::Reference(reference) => {
+                self.path_targets(object_targets(&reference.target).iter())
+            }
+            TypeInfo::ObjectSelection(selection) => {
+                if selection.plural {
+                    return self.path_error(
+                        "ILI-PATH-MULTIPLICITY",
+                        "A path through a role requires a single related object",
+                        at,
+                    );
+                }
+                if selection
+                    .targets
+                    .iter()
+                    .any(|target| object_targets(target).is_empty())
+                {
+                    self.unsupported_expression(at);
+                    return None;
+                }
+                self.path_targets(selection.targets.iter().flat_map(object_targets))
+            }
             _ => {
                 return self.path_error(
                     "ILI-PATH-TRAVERSAL",
@@ -232,10 +301,6 @@ impl Analyzer<'_, '_> {
                 );
             }
         };
-        let roots: Option<Vec<_>> = targets
-            .iter()
-            .map(|target| self.names.get(target.target_name()).copied())
-            .collect();
         let Some(mut roots) = roots.filter(|roots| !roots.is_empty()) else {
             self.unsupported_expression(at);
             return None;
@@ -267,6 +332,15 @@ impl Analyzer<'_, '_> {
             "The possible objects have no common declared scope for this path",
             at,
         )
+    }
+
+    fn path_targets<'a>(
+        &self,
+        targets: impl Iterator<Item = &'a TypeReference>,
+    ) -> Option<Vec<usize>> {
+        targets
+            .map(|target| self.names.get(target.target_name()).copied())
+            .collect()
     }
 
     fn contextual_path_scope(&mut self, topic: usize, root: usize, at: &Span) -> Option<usize> {

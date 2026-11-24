@@ -734,6 +734,10 @@ impl<'report> Serialize for TypeOutput<'report> {
                 external: bool,
                 target: &'a crate::ObjectTarget,
             },
+            ObjectSelection {
+                plural: bool,
+                targets: &'a [crate::ObjectTarget],
+            },
             Geometry {
                 #[serde(flatten)]
                 geometry: &'a crate::GeometryType,
@@ -842,6 +846,11 @@ impl<'report> Serialize for TypeOutput<'report> {
             TypeInfo::Reference(reference) => Type::Reference {
                 external: reference.external,
                 target: &reference.target,
+            }
+            .serialize(serializer),
+            TypeInfo::ObjectSelection(selection) => Type::ObjectSelection {
+                plural: selection.plural,
+                targets: &selection.targets,
             }
             .serialize(serializer),
             TypeInfo::Geometry(geometry) => Type::Geometry { geometry }.serialize(serializer),
