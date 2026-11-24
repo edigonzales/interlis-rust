@@ -1987,11 +1987,13 @@ fn formatted_bounds_accept_abstract_values_and_padded_exponents() {
                 format!(
                     "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
                  STRUCTURE Proto (ABSTRACT)=n(ABSTRACT):NUMERIC; END Proto;
-                 STRUCTURE Mixed (ABSTRACT) EXTENDS Proto=m:0.00..99.99; END Mixed;
+                 STRUCTURE Mixed (ABSTRACT) EXTENDS Proto=m:0.00..99.99; integer:0..99999; END Mixed;
                  STRUCTURE Concrete=n:0.10e1..0.99e3; END Concrete;
                  DOMAIN ProtoValue {property}=FORMAT BASED ON Proto (n/2) \"01\"..\"20\";
                      Dotted (ABSTRACT) EXTENDS ProtoValue=FORMAT BASED ON Mixed (INHERITANCE \".\" m/2)
                         \"01.02.03\"..\"20.25.26\";
+                     Codes (ABSTRACT) EXTENDS ProtoValue=FORMAT BASED ON Mixed (INHERITANCE \"e\" integer/5)
+                        \"01e10001\"..\"20e10002\";
                      Scaled=FORMAT BASED ON Concrete (n/2) \"00.12e2\"..\"00.90e3\";
                  END M."
                 ),
@@ -2036,6 +2038,7 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
                 format!(
                     "INTERLIS {version}; {contract} MODEL M AT \"x\" VERSION \"1\" =
                  STRUCTURE Segment {base}=weight:0..10; END Segment;
+                 STRUCTURE ArcHolder=arc:INTERLIS.ArcSegment; END ArcHolder;
                  LINE FORM Custom:Segment;
                  DOMAIN Vertex2=COORD 0.0..100.0,0.0..100.0;
                      Path=POLYLINE WITH (STRAIGHTS,Custom) VERTEX Vertex2;
@@ -2060,6 +2063,18 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
             "INTERLIS.LineSegment.SegmentEndPoint"
         );
         assert!(members[0].is_predefined());
+        assert!(
+            report
+                .sources()
+                .location(members[0].source_span())
+                .is_none()
+        );
+        assert!(
+            report
+                .sources()
+                .location(members[0].type_reference().unwrap().source_span())
+                .is_none()
+        );
         assert_eq!(members[0].mandatory(), Some(true));
         assert_eq!(members[1].qualified_name(), "M.Segment.weight");
         let TypeInfo::Geometry(geometry) = graph.effective_type("M.Path").unwrap() else {
@@ -2069,6 +2084,13 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
             panic!("expected a named line form");
         };
         assert_eq!(named.target_name(), "M.Custom");
+        let Some(TypeInfo::Structure(arc)) = graph.effective_type("M.ArcHolder.arc") else {
+            panic!("expected a predefined structure value");
+        };
+        assert_eq!(
+            arc.target.as_ref().unwrap().target_name(),
+            "INTERLIS.ArcSegment"
+        );
         outcome(
             input("", contract),
             Status::Rejected,

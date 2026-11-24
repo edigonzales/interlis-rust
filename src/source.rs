@@ -135,6 +135,14 @@ pub struct SourceLocation {
 }
 
 impl Span {
+    pub(crate) fn predefined() -> Self {
+        Self {
+            source: u32::MAX,
+            start: 0,
+            end: 0,
+        }
+    }
+
     pub(crate) fn sort_key(&self) -> (u32, u32, u32) {
         (self.source, self.start, self.end)
     }

@@ -730,9 +730,7 @@ impl Serialize for DeclarationsOutput<'_> {
                     .iter()
                     .map(|reference| project_reference(reference, self.sources))
                     .collect(),
-                location: (!declaration.is_predefined())
-                    .then(|| self.sources.location(declaration.source_span()))
-                    .flatten(),
+                location: self.sources.location(declaration.source_span()),
             })?;
         }
         seq.end()

@@ -878,6 +878,9 @@ impl Comparison<'_> {
 
     fn target<'a>(&mut self, name: &'a str, translated: bool) -> Result<OriginalTarget<'a>, ()> {
         self.work.charge(name.len() as u32)?;
+        if name == "INTERLIS" || name.starts_with("INTERLIS.") {
+            return Ok(OriginalTarget::Predefined(name));
+        }
         let Some(&id) = self.names.get(name) else {
             return Ok(OriginalTarget::Predefined(name));
         };

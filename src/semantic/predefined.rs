@@ -23,19 +23,26 @@ impl Analyzer<'_, '_> {
             None
         };
         let model = self.symbols[owner].model;
-        let namespace = self.predefined_namespace(model, at)?;
+        let namespace = self.predefined_namespace(model)?;
         let declared = Name {
             value: name.into(),
-            span: at.clone(),
+            span: Span::predefined(),
         };
-        let id = self.add(Kind::Structure, &declared, at, Some(namespace), model, None)?;
+        let id = self.add(
+            Kind::Structure,
+            &declared,
+            &declared.span,
+            Some(namespace),
+            model,
+            None,
+        )?;
         self.symbols[id].declaration.predefined = true;
         self.symbols[id].declaration.abstract_declaration = base.is_none();
         self.symbols[id].declaration.final_declaration = is_final;
         let mut members = if let Some(base) = base {
             let name = Name {
                 value: "INTERLIS.LineSegment".into(),
-                span: at.clone(),
+                span: Span::predefined(),
             };
             let reference = self.reference_to_symbol(owner, base, &name)?;
             self.symbols[id].base_scope = Some(base);
@@ -48,43 +55,36 @@ impl Analyzer<'_, '_> {
                 .to_vec()
         } else {
             let ty = self.predefined_type(owner, "LineCoord", at)?.ty;
-            let reference = self.predefined_reference(owner, "LineCoord", at);
-            vec![self.predefined_attribute(id, "SegmentEndPoint", ty, true, Some(reference), at)?]
+            let reference = self.predefined_reference(owner, "LineCoord");
+            vec![self.predefined_attribute(id, "SegmentEndPoint", ty, true, Some(reference))?]
         };
         if name == "ArcSegment" {
             let ty = self.predefined_type(owner, "LineCoord", at)?.ty;
-            let reference = self.predefined_reference(owner, "LineCoord", at);
-            members.push(self.predefined_attribute(
-                id,
-                "ArcPoint",
-                ty,
-                true,
-                Some(reference),
-                at,
-            )?);
+            let reference = self.predefined_reference(owner, "LineCoord");
+            members.push(self.predefined_attribute(id, "ArcPoint", ty, true, Some(reference))?);
             let radius = self.types.len();
             self.types.push(TypeInfo::Numeric(NumericRange {
                 bounds: None,
-                unit: Some(self.predefined_reference(owner, "LENGTH", at)),
+                unit: Some(self.predefined_reference(owner, "LENGTH")),
                 reference_system: None,
                 circular: false,
                 direction: None,
             }));
-            members.push(self.predefined_attribute(id, "Radius", radius, false, None, at)?);
+            members.push(self.predefined_attribute(id, "Radius", radius, false, None)?);
         }
         self.symbols[id].declaration.effective_attributes = Some(members.into_boxed_slice());
         Some(id)
     }
 
-    fn predefined_namespace(&mut self, model: usize, at: &Span) -> Option<usize> {
+    fn predefined_namespace(&mut self, model: usize) -> Option<usize> {
         if let Some(&id) = self.names.get("INTERLIS") {
             return Some(id);
         }
         let name = Name {
             value: "INTERLIS".into(),
-            span: at.clone(),
+            span: Span::predefined(),
         };
-        let id = self.add(Kind::Model, &name, at, None, model, None)?;
+        let id = self.add(Kind::Model, &name, &name.span, None, model, None)?;
         self.symbols[id].declaration.predefined = true;
         Some(id)
     }
@@ -96,16 +96,15 @@ impl Analyzer<'_, '_> {
         ty: usize,
         mandatory: bool,
         reference: Option<TypeReference>,
-        at: &Span,
     ) -> Option<usize> {
         let name = Name {
             value: name.into(),
-            span: at.clone(),
+            span: Span::predefined(),
         };
         let id = self.add(
             Kind::Attribute,
             &name,
-            at,
+            &name.span,
             Some(owner),
             self.symbols[owner].model,
             Some(mandatory),
@@ -118,12 +117,12 @@ impl Analyzer<'_, '_> {
         Some(id)
     }
 
-    fn predefined_reference(&self, owner: usize, name: &str, at: &Span) -> TypeReference {
+    fn predefined_reference(&self, owner: usize, name: &str) -> TypeReference {
         TypeReference {
             declared: name.into(),
             target: format!("INTERLIS.{name}"),
             predefined_language: Some(self.models[self.symbols[owner].model].language()),
-            span: at.clone(),
+            span: Span::predefined(),
         }
     }
 

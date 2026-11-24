@@ -408,6 +408,7 @@ fn parse_value<'a>(
         value: None,
     }];
     let mut values = Vec::new();
+    let mut over_limit = false;
     while let Some(visit) = pending.pop() {
         work.charge(1).map_err(|_| NumberError::Work)?;
         values.truncate(visit.prefix_len);
@@ -459,6 +460,10 @@ fn parse_value<'a>(
                     ) {
                         Ok(value) => value.info,
                         Err(NumberError::Form) => continue,
+                        Err(NumberError::Limit) => {
+                            over_limit = true;
+                            continue;
+                        }
                         Err(error) => return Err(error),
                     };
                     if let Some(bounds) = &range.bounds
@@ -477,7 +482,11 @@ fn parse_value<'a>(
             }
         }
     }
-    Ok(None)
+    if over_limit {
+        Err(NumberError::Limit)
+    } else {
+        Ok(None)
+    }
 }
 
 fn component_prefixes(

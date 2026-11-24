@@ -1306,15 +1306,19 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 };
                 (target, declaration.qualified.clone(), None)
             }
-            Ok(BoundName::Predefined(name, kind)) => (
-                if kind == Kind::Domain {
-                    Target::Predefined(name)
+            Ok(bound @ BoundName::Predefined(builtin, kind)) => {
+                let target = if kind == Kind::Domain {
+                    Target::Predefined(builtin)
                 } else {
+                    self.bound_structure(owner, bound, &name.span)?;
                     Target::Structure
-                },
-                format!("INTERLIS.{name}"),
-                Some(self.models[self.symbols[owner].model].language),
-            ),
+                };
+                (
+                    target,
+                    format!("INTERLIS.{builtin}"),
+                    Some(self.models[self.symbols[owner].model].language),
+                )
+            }
             Err(LookupError::Ambiguous(candidates)) => {
                 self.ambiguous_type(name, candidates);
                 return None;
@@ -1622,14 +1626,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         .reference
                         .as_ref()
                         .expect("bound structure reference");
-                    if link.predefined_language().is_some() {
-                        self.diagnostics.push(
-                            "ILI-UNSUPPORTED",
-                            "This predefined structure value requires its full declaration",
-                            Some(name.span.clone()),
-                        );
-                        return None;
-                    }
                     let bytes = link.declared.len() + link.target.len();
                     if !self.step(bytes, &name.span) {
                         return None;
