@@ -10,6 +10,7 @@ mod expressions;
 mod formats;
 mod functions;
 mod geometry;
+mod metadata;
 mod model_header;
 mod names;
 mod object_references;
@@ -87,7 +88,7 @@ impl<'a> Symbol<'a> {
                 self.base_scope.is_none()
                     && (a.base.is_some() || a.derived_from.is_some() || extended(&a.properties))
             }
-            Some(SyntaxDecl::MetadataBasket(b)) => b.base.is_some(),
+            Some(SyntaxDecl::MetadataBasket(b)) => self.base_scope.is_none() && b.base.is_some(),
             Some(SyntaxDecl::Graphic(g)) => g.base.is_some() || extended(&g.properties),
             Some(SyntaxDecl::View(view)) => {
                 self.base_scope.is_none()
@@ -369,7 +370,7 @@ fn ensure_supported_semantics(
                         })
                 }
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
-                SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
+                SyntaxDecl::MetadataBasket(_) => None,
                 SyntaxDecl::RuntimeParameter { type_use, span, .. } => match &type_use.ty {
                     Some(ty) if supported_type(ty) => None,
                     Some(ty) => Some(ty.span()),
@@ -386,23 +387,26 @@ fn ensure_supported_semantics(
         if !charge(work, diagnostics, &model.span) {
             return false;
         }
-        let kind_supported = model.kind == syntax::ModelKind::Data
-            || model.kind == syntax::ModelKind::Type
-                && model.declarations.iter().all(|d| match d {
-                    SyntaxDecl::Domain { .. }
-                    | SyntaxDecl::Unit(_)
-                    | SyntaxDecl::Context(_)
-                    | SyntaxDecl::Function(_) => true,
-                    SyntaxDecl::Container {
-                        kind, properties, ..
-                    } => {
-                        *kind == syntax::ContainerKind::Structure
-                            || properties
-                                .iter()
-                                .any(|property| property.value == syntax::Property::Abstract)
-                    }
-                    _ => false,
-                });
+        let kind_supported = model.kind != syntax::ModelKind::Type
+            || model.declarations.iter().all(|d| match d {
+                SyntaxDecl::Domain { .. }
+                | SyntaxDecl::Unit(_)
+                | SyntaxDecl::Context(_)
+                | SyntaxDecl::Function(_)
+                | SyntaxDecl::LineForm(_) => true,
+                SyntaxDecl::MetadataBasket(basket) => {
+                    basket.kind.value == crate::MetadataBasketKind::ReferenceSystem
+                }
+                SyntaxDecl::Container {
+                    kind, properties, ..
+                } => {
+                    *kind == syntax::ContainerKind::Structure
+                        || properties
+                            .iter()
+                            .any(|property| property.value == syntax::Property::Abstract)
+                }
+                _ => false,
+            });
         let span = if !kind_supported {
             Some(&model.span)
         } else {
@@ -572,6 +576,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 nullable_view_base: false,
                 derived_from: None,
                 predefined: false,
+                metadata_kind: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1183,6 +1188,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         None,
                     ) {
+                        self.index_abstract_final(id, &basket.properties);
                         for name in basket.groups.iter().flat_map(|group| &group.objects) {
                             self.add(Kind::MetaObject, name, &name.span, Some(id), model, None);
                         }
@@ -1964,11 +1970,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         }
         let mut viewables = self.bind_viewable_bases()?;
         self.bind_line_forms()?;
+        self.bind_metadata_baskets()?;
         self.check_topic_members()?;
         self.check_abstract_topics(&topics)?;
         self.bind_units()?;
         for symbol in &self.symbols {
             if symbol.declaration.kind == Kind::Class
+                && !symbol.declaration.is_predefined()
                 && !symbol.declaration.is_abstract()
                 && symbol
                     .declaration

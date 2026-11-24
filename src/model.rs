@@ -19,6 +19,12 @@ pub enum ModelKind {
     RefSystem,
     Symbology,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataBasketKind {
+    Sign,
+    ReferenceSystem,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclarationKind {
@@ -194,6 +200,7 @@ pub enum TypeInfo {
     Oid(OidType),
     Structure(StructureType),
     ClassValue(ClassValueType),
+    MetaObject(TypeReference),
     AttributePath(AttributePathType),
     Collection(CollectionType),
     Reference(ReferenceType),
@@ -948,6 +955,7 @@ pub struct Declaration {
     pub(crate) nullable_view_base: bool,
     pub(crate) derived_from: Option<TypeReference>,
     pub(crate) predefined: bool,
+    pub(crate) metadata_kind: Option<MetadataBasketKind>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1037,6 +1045,9 @@ impl Declaration {
     pub fn is_predefined(&self) -> bool {
         self.predefined
     }
+    pub fn metadata_basket_kind(&self) -> Option<MetadataBasketKind> {
+        self.metadata_kind
+    }
     pub fn derivations(&self) -> &[ExpressionId] {
         self.derivations.as_deref().unwrap_or_default()
     }
@@ -1088,6 +1099,13 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn metadata_objects(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        let &id = self.names.get(name)?;
+        self.declarations[id].metadata_basket_kind()?;
+        Some(self.declarations.iter().filter(move |decl| {
+            decl.kind == DeclarationKind::MetaObject && decl.parent == Some(id)
+        }))
+    }
     pub fn formatted_base(&self, format: &FormattedType) -> Option<&FormattedType> {
         let TypeInfo::Formatted(base) = self.types.get(format.base?)? else {
             return None;

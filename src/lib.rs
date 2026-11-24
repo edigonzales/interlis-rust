@@ -23,12 +23,13 @@ pub use model::{
     DecimalInfo, Declaration, DeclarationKind, DomainReferenceSystem, Enumeration,
     EnumerationElement, EnumerationOrder, ExistenceTarget, ExpressionId, ExpressionType,
     FixedTextFormat, FormattedBound, FormattedPart, FormattedType, FunctionInfo, GeometryKind,
-    GeometryType, InspectionInfo, LanguageVersion, LineForm, ModelGraph, ModelInfo, ModelKind,
-    NumericBounds, NumericDirection, NumericRange, ObjectSelection, ObjectTarget, OidKind, OidRule,
-    OidRules, OidType, OverlapTolerance, PathSelection, PlausibilityDirection, ReferenceType,
-    RoleInfo, RoleStrength, StructureType, TemporalBound, TemporalKind, TemporalRange,
-    TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator, UnitConstant, UnitDefinition,
-    UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm, ViewFormation, ViewInfo,
+    GeometryType, InspectionInfo, LanguageVersion, LineForm, MetadataBasketKind, ModelGraph,
+    ModelInfo, ModelKind, NumericBounds, NumericDirection, NumericRange, ObjectSelection,
+    ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance, PathSelection,
+    PlausibilityDirection, ReferenceType, RoleInfo, RoleStrength, StructureType, TemporalBound,
+    TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator,
+    UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
+    ViewFormation, ViewInfo,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

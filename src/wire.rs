@@ -543,6 +543,8 @@ impl Serialize for DeclarationsOutput<'_> {
             abstract_declaration: bool,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             predefined: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            metadata_kind: Option<crate::MetadataBasketKind>,
             type_reference: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
@@ -609,6 +611,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 final_declaration: declaration.is_final(),
                 abstract_declaration: declaration.is_abstract(),
                 predefined: declaration.is_predefined(),
+                metadata_kind: declaration.metadata_basket_kind(),
                 type_reference: reference,
                 base_reference: declaration
                     .base_reference()
@@ -902,6 +905,9 @@ impl<'report> Serialize for TypeOutput<'report> {
                 value_kind: crate::ClassValueKind,
                 restrictions: Vec<Reference<'a>>,
             },
+            MetaObject {
+                target: Reference<'a>,
+            },
             AttributePath {
                 viewable: Option<Reference<'a>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -1054,6 +1060,10 @@ impl<'report> Serialize for TypeOutput<'report> {
                     .iter()
                     .map(|reference| project_reference(reference, self.2))
                     .collect(),
+            }
+            .serialize(serializer),
+            TypeInfo::MetaObject(target) => Type::MetaObject {
+                target: project_reference(target, self.2),
             }
             .serialize(serializer),
             TypeInfo::AttributePath(attribute) => {

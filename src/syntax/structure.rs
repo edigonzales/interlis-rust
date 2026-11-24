@@ -1351,8 +1351,15 @@ mod tests {
                 limits: Limits::default(),
             })
             .unwrap();
-            assert_eq!(report.status(), AnalysisStatus::Incomplete);
-            assert!(report.graph().is_none());
+            assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+            assert_eq!(
+                report.graph().unwrap().models()[0].kind(),
+                if header == "REFSYSTEM MODEL" {
+                    crate::ModelKind::RefSystem
+                } else {
+                    crate::ModelKind::Symbology
+                }
+            );
         }
     }
 }
@@ -1525,8 +1532,8 @@ mod review_regressions {
                 AnalysisStatus::CheckedSubset,
             ),
             ("LINE FORM curve:Segment;", AnalysisStatus::CheckedSubset),
-            ("SIGN BASKET B~S;", AnalysisStatus::Incomplete),
-            ("REFSYSTEM BASKET B~S;", AnalysisStatus::Incomplete),
+            ("SIGN BASKET B~S;", AnalysisStatus::CheckedSubset),
+            ("REFSYSTEM BASKET B~S;", AnalysisStatus::CheckedSubset),
         ] {
             let report = analyze(CompileRequest {
                 sources: vec![SourceInput {

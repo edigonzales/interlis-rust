@@ -1109,8 +1109,8 @@ fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
         ),
         (
             "IMPORTS Definitions; REFSYSTEM BASKET B ~ Definitions.T;",
-            Status::Incomplete,
-            Some("ILI-UNSUPPORTED"),
+            Status::CheckedSubset,
+            None,
         ),
         (
             "REFSYSTEM BASKET B ~ Definitions.T;",
@@ -1125,6 +1125,13 @@ fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
             code,
         );
         if let Some(graph) = report.graph() {
+            if let Some(basket) = graph.declaration("Use.B") {
+                assert_eq!(
+                    basket.type_reference().unwrap().target_name(),
+                    "Definitions.T"
+                );
+                continue;
+            }
             let Some(TypeInfo::Numeric(range)) = graph.effective_type("Use.D") else {
                 panic!("expected a bound range");
             };
@@ -2108,6 +2115,95 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
                 Some("ILI-LINE-FORM-CONTRACTED"),
             );
         }
+    }
+}
+
+#[test]
+fn metadata_baskets_bind_the_topic_class_and_ordered_external_object_names() {
+    for version in ["2.3", "2.4"] {
+        let input = |kind: &str, finality: &str, topic: &str| {
+            request(vec![
+                (
+                    "systems",
+                    format!(
+                        "INTERLIS {version}; REFSYSTEM MODEL Systems AT \"x\" VERSION \"1\" =
+                   TOPIC Frames=CLASS Frame EXTENDS INTERLIS.COORDSYSTEM=END Frame; END Frames;
+                   TOPIC Regional EXTENDS Frames=END Regional;
+                   TOPIC Unrelated=END Unrelated;
+                 END Systems."
+                    ),
+                ),
+                (
+                    "use",
+                    format!(
+                        "INTERLIS {version}; MODEL Use AT \"x\" VERSION \"1\" = IMPORTS Systems;
+                   REFSYSTEM BASKET National {finality} ~ Systems.Frames
+                     OBJECTS OF Frame: Metro, Survey;
+                   {kind} BASKET Local EXTENDS National ~ Systems.{topic} OBJECTS OF Frame: Project;
+                 END Use."
+                    ),
+                ),
+            ])
+        };
+        let report = outcome(
+            input("REFSYSTEM", "", "Regional"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let local = graph.declaration("Use.Local").unwrap();
+        assert_eq!(
+            local.metadata_basket_kind(),
+            Some(interlis::MetadataBasketKind::ReferenceSystem)
+        );
+        assert_eq!(
+            local.base_reference().unwrap().target_name(),
+            "Use.National"
+        );
+        assert_eq!(
+            local.type_reference().unwrap().target_name(),
+            "Systems.Regional"
+        );
+        let national = graph
+            .metadata_objects("Use.National")
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            national
+                .iter()
+                .map(|object| object.name())
+                .collect::<Vec<_>>(),
+            ["Metro", "Survey"]
+        );
+        assert_eq!(
+            national[1].type_reference().unwrap().target_name(),
+            "Systems.Frames.Frame"
+        );
+        assert_eq!(graph.metadata_objects("Use.Local").unwrap().count(), 1);
+        let fields = graph
+            .effective_attributes("Systems.Frames.Frame")
+            .unwrap()
+            .map(|member| member.qualified_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            ["INTERLIS.METAOBJECT.Name", "INTERLIS.COORDSYSTEM.Axis"]
+        );
+        outcome(
+            input("SIGN", "", "Regional"),
+            Status::Rejected,
+            Some("ILI-METADATA-BASKET-KIND"),
+        );
+        outcome(
+            input("REFSYSTEM", "(FINAL)", "Regional"),
+            Status::Rejected,
+            Some("ILI-METADATA-BASKET-FINAL"),
+        );
+        outcome(
+            input("REFSYSTEM", "", "Unrelated"),
+            Status::Rejected,
+            Some("ILI-METADATA-BASKET-TOPIC"),
+        );
     }
 }
 

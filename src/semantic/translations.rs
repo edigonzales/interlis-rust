@@ -317,6 +317,8 @@ impl Analyzer<'_, '_> {
             || !comparison.reference(a.base_reference(), b.base_reference())?
             || !comparison.reference(a.derived_from(), b.derived_from())?
             || a.is_nullable_view_base() != b.is_nullable_view_base()
+            || a.metadata_basket_kind() != b.metadata_basket_kind()
+            || a.kind == Kind::MetaObject && a.name() != b.name()
             || !comparison.unordered_references(
                 a.declared_topic_dependencies(),
                 b.declared_topic_dependencies(),
@@ -388,6 +390,8 @@ impl Analyzer<'_, '_> {
                 | Kind::View
                 | Kind::ViewBase
                 | Kind::LineForm
+                | Kind::MetadataBasket
+                | Kind::MetaObject
         ) {
             return Ok(None);
         }
@@ -1169,6 +1173,7 @@ impl Comparison<'_> {
                 return self.types(a.element, b.element);
             }
             (Geometry(a), Geometry(b)) => self.geometry(a, b)?,
+            (MetaObject(a), MetaObject(b)) => self.reference(Some(a), Some(b))?,
             _ => false,
         }))
     }

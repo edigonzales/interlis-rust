@@ -1,5 +1,6 @@
 //! View, metadata basket and graphic productions with unresolved model references.
 use super::*;
+use crate::MetadataBasketKind;
 
 const VIEW_PROPERTIES: &[Property] = &[
     Property::Abstract,
@@ -87,12 +88,6 @@ pub(crate) enum ViewAttribute {
         value: ExprId,
         span: Span,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MetadataBasketKind {
-    Sign,
-    ReferenceSystem,
 }
 
 #[derive(Debug)]

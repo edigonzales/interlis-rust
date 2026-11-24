@@ -125,6 +125,19 @@ impl Analyzer<'_, '_> {
                 let id = self.bound_structure(owner, bound, &name.span)?;
                 Some((id, self.bound_reference(owner, name, bound)?))
             }
+            Ok(bound @ BoundName::Predefined(builtin, Kind::Class)) if kind == Kind::Class => {
+                if let Some(id) = self.predefined_metadata(owner, builtin, &name.span) {
+                    return Some((id, self.bound_reference(owner, name, bound)?));
+                }
+                if !self.diagnostics.limited {
+                    self.diagnostics.push(
+                        "ILI-UNSUPPORTED",
+                        "This predefined class requires its full declaration",
+                        Some(name.span.clone()),
+                    );
+                }
+                None
+            }
             Ok(BoundName::Predefined(..)) => {
                 self.diagnostics.push(
                     "ILI-UNSUPPORTED",

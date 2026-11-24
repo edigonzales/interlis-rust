@@ -1,5 +1,9 @@
 use super::{Analyzer, BoundName, Kind, Name};
-use crate::{NumericRange, Span, TypeInfo, TypeReference};
+use crate::{
+    BoundConstraint, BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind,
+    CollectionType, ConstraintRule, ExpressionType, NumericRange, Span, StructureType, TypeInfo,
+    TypeReference,
+};
 
 impl Analyzer<'_, '_> {
     pub(super) fn predefined_segment(
@@ -97,12 +101,24 @@ impl Analyzer<'_, '_> {
         mandatory: bool,
         reference: Option<TypeReference>,
     ) -> Option<usize> {
+        self.predefined_member(owner, Kind::Attribute, name, ty, mandatory, reference)
+    }
+
+    fn predefined_member(
+        &mut self,
+        owner: usize,
+        kind: Kind,
+        name: &str,
+        ty: usize,
+        mandatory: bool,
+        reference: Option<TypeReference>,
+    ) -> Option<usize> {
         let name = Name {
             value: name.into(),
             span: Span::predefined(),
         };
         let id = self.add(
-            Kind::Attribute,
+            kind,
             &name,
             &name.span,
             Some(owner),
@@ -114,6 +130,145 @@ impl Analyzer<'_, '_> {
         decl.type_id = Some(ty);
         decl.effective_mandatory = Some(mandatory);
         decl.reference = reference;
+        Some(id)
+    }
+
+    pub(super) fn predefined_metadata(
+        &mut self,
+        owner: usize,
+        name: &str,
+        at: &Span,
+    ) -> Option<usize> {
+        let (kind, base, abstract_declaration) = match name {
+            "AXIS" => (Kind::Structure, None, false),
+            "METAOBJECT" => (Kind::Class, None, true),
+            "METAOBJECT_TRANSLATION" => (Kind::Class, None, false),
+            "REFSYSTEM" | "SIGN" => (Kind::Class, Some("METAOBJECT"), true),
+            "COORDSYSTEM" | "SCALSYSTEM" => (Kind::Class, Some("REFSYSTEM"), true),
+            _ => return None,
+        };
+        let qualified = format!("INTERLIS.{name}");
+        if let Some(&id) = self.names.get(&qualified) {
+            return Some(id);
+        }
+        let parent = if let Some(base) = base {
+            Some((
+                self.predefined_metadata(owner, base, at)?,
+                self.predefined_reference(owner, base),
+            ))
+        } else {
+            None
+        };
+        let model = self.symbols[owner].model;
+        let namespace = self.predefined_namespace(model)?;
+        let declaration = Name {
+            value: name.into(),
+            span: Span::predefined(),
+        };
+        let id = self.add(
+            kind,
+            &declaration,
+            &declaration.span,
+            Some(namespace),
+            model,
+            None,
+        )?;
+        self.symbols[id].declaration.predefined = true;
+        self.symbols[id].declaration.abstract_declaration = abstract_declaration;
+        let mut members = Vec::new();
+        if let Some((parent, reference)) = parent {
+            self.symbols[id].base_scope = Some(parent);
+            self.symbols[id].declaration.base_reference = Some(reference);
+            members.extend_from_slice(
+                self.symbols[parent]
+                    .declaration
+                    .effective_attributes
+                    .as_deref()
+                    .unwrap_or_default(),
+            );
+        }
+        match name {
+            "METAOBJECT" | "METAOBJECT_TRANSLATION" => {
+                let ty = self.predefined_type(owner, "NAME", at)?.ty;
+                let attributes = if name == "METAOBJECT" {
+                    &["Name"][..]
+                } else {
+                    &["Name", "NameInBaseLanguage"][..]
+                };
+                let mut constraints = Vec::new();
+                for &attribute in attributes {
+                    let reference = self.predefined_reference(owner, "NAME");
+                    let member =
+                        self.predefined_attribute(id, attribute, ty, true, Some(reference))?;
+                    let name = Name {
+                        value: attribute.into(),
+                        span: Span::predefined(),
+                    };
+                    let reference = self.reference_to_symbol(owner, member, &name)?;
+                    let expr = self.record_expression(
+                        BoundExpressionKind::Path {
+                            steps: vec![BoundPathStep {
+                                reference,
+                                selection: None,
+                                selection_span: None,
+                            }],
+                        },
+                        ExpressionType::Text,
+                        Some(ty),
+                        &name.span,
+                    );
+                    constraints.push(BoundConstraint {
+                        name: None,
+                        expression: None,
+                        span: name.span,
+                        rule: ConstraintRule::Unique {
+                            basket: false,
+                            local_prefix: None,
+                            keys: vec![expr],
+                        },
+                    });
+                    members.push(member);
+                }
+                self.symbols[id].declaration.constraints = Some(constraints.into_boxed_slice());
+            }
+            "COORDSYSTEM" => {
+                self.predefined_metadata(owner, "AXIS", at)?;
+                let element = self.types.len();
+                self.types.push(TypeInfo::Structure(StructureType {
+                    target: Some(self.predefined_reference(owner, "AXIS")),
+                    restrictions: Vec::new(),
+                }));
+                let ty = self.types.len();
+                self.types.push(TypeInfo::Collection(CollectionType {
+                    kind: CollectionKind::List,
+                    cardinality: Cardinality {
+                        lower: "1".into(),
+                        upper: Some("3".into()),
+                    },
+                    element,
+                }));
+                members.push(self.predefined_attribute(id, "Axis", ty, false, None)?);
+            }
+            "AXIS" | "SCALSYSTEM" => {
+                let ty = self.types.len();
+                self.types.push(TypeInfo::Numeric(NumericRange {
+                    bounds: None,
+                    unit: Some(self.predefined_reference(owner, "ANYUNIT")),
+                    reference_system: None,
+                    circular: false,
+                    direction: None,
+                }));
+                self.predefined_member(id, Kind::Parameter, "Unit", ty, false, None)?;
+            }
+            "SIGN" => {
+                let ty = self.types.len();
+                let reference = self.predefined_reference(owner, "METAOBJECT");
+                self.types.push(TypeInfo::MetaObject(reference.clone()));
+                self.predefined_member(id, Kind::Parameter, "Sign", ty, false, Some(reference))?;
+            }
+            _ => {}
+        }
+        self.symbols[id].declaration.effective_attributes = Some(members.into_boxed_slice());
         Some(id)
     }
 
@@ -135,7 +290,10 @@ impl Analyzer<'_, '_> {
         match bound {
             BoundName::Declared(id) => Some(id),
             BoundName::Predefined(name, Kind::Structure) => {
-                if let Some(id) = self.predefined_segment(owner, name, at) {
+                if let Some(id) = self
+                    .predefined_segment(owner, name, at)
+                    .or_else(|| self.predefined_metadata(owner, name, at))
+                {
                     Some(id)
                 } else {
                     if !self.diagnostics.limited {
