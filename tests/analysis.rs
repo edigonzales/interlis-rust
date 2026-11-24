@@ -1243,6 +1243,96 @@ fn translations_bind_renamed_declarations_and_imported_counterparts() {
 }
 
 #[test]
+fn translations_preserve_the_original_namespace_and_ignore_dependency_order() {
+    let input =
+        |xml: &str| {
+            request(vec![
+        (
+            "a-final",
+            "INTERLIS 2.4; MODEL Italian AT \"x\" VERSION \"3\" TRANSLATION OF French [\"2\"] =
+             TOPIC Il=END Il; TOPIC Fa=END Fa; TOPIC Le=DEPENDS ON Il,Fa; END Le;
+             END Italian.".into(),
+        ),
+        (
+            "b-original",
+            "INTERLIS 2.4; MODEL Original AT \"x\" VERSION \"1\" =
+             XMLNS \"urn:test:original\";
+             TOPIC First=END First; TOPIC Second=END Second;
+             TOPIC Last=DEPENDS ON First,Second; END Last;
+             END Original.".into(),
+        ),
+        (
+            "c-french",
+            format!(
+                "INTERLIS 2.4; MODEL French AT \"x\" VERSION \"2\" TRANSLATION OF Original [\"1\"] =
+                 {xml} TOPIC Un=END Un; TOPIC Deux=END Deux;
+                 TOPIC Fin=DEPENDS ON Deux,Un; END Fin;
+                 END French."
+            ),
+        ),
+    ])
+        };
+    let report = outcome(input(""), Status::CheckedSubset, None);
+    assert!(
+        report
+            .graph()
+            .unwrap()
+            .models()
+            .iter()
+            .all(|model| model.effective_xml_namespace() == "urn:test:original")
+    );
+    let report = outcome(
+        input("XMLNS \"urn:test:different\";"),
+        Status::Rejected,
+        Some("ILI-TRANSLATION-XMLNS"),
+    );
+    let location = report
+        .sources()
+        .location(report.diagnostics()[0].primary.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(location.source, "c-french");
+}
+
+#[test]
+fn translation_imports_match_exact_models_before_other_localizations() {
+    let input = |imports: &str, counter: &str| {
+        request(vec![(
+            "model.ili",
+            format!(
+                "INTERLIS 2.3;
+             TYPE MODEL Lib AT \"x\" VERSION \"1\" = DOMAIN Number=1.23..9.87; END Lib.
+             TYPE MODEL LibFr AT \"x\" VERSION \"1\" TRANSLATION OF Lib [\"1\"] =
+                DOMAIN Nombre=0.123E1..0.987E1; END LibFr.
+             TYPE MODEL LibIt AT \"x\" VERSION \"1\" TRANSLATION OF Lib [\"1\"] =
+                DOMAIN Numero=1.23..9.87; END LibIt.
+             MODEL Original AT \"x\" VERSION \"1\" = IMPORTS Lib,LibFr;
+                STRUCTURE Part=value:Lib.Number; subtitle:LibFr.Nombre; END Part;
+             END Original.
+             MODEL Translated AT \"x\" VERSION \"1\" TRANSLATION OF Original [\"1\"] =
+                IMPORTS {imports};
+                STRUCTURE Parte=valore:{counter}; legenda:LibFr.Nombre; END Parte;
+             END Translated."
+            ),
+        )])
+    };
+    outcome(
+        input("LibFr,Lib", "Lib.Number"),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        input("LibIt,LibFr", "LibIt.Numero"),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        input("LibFr,Lib", "LibFr.Nombre"),
+        Status::Rejected,
+        Some("ILI-TRANSLATION-DEFINITION"),
+    );
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(

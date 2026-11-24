@@ -3,7 +3,7 @@ use crate::{
     DecimalInfo, Enumeration, LanguageVersion, NumericRange, OidRule, OidType, RelatedLocation,
     TypeInfo, TypeReference, limits::WorkBudget,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_translations(&mut self) -> Option<()> {
@@ -21,7 +21,7 @@ impl Analyzer<'_, '_> {
             }
         }
         let mut originals: Vec<_> = (0..self.symbols.len()).collect();
-        let mut pairs = Vec::new();
+        let mut groups = Vec::new();
         for model in 0..self.selected_models.len() {
             let Some(translation) = &self.selected_models[model].translation else {
                 continue;
@@ -29,6 +29,7 @@ impl Analyzer<'_, '_> {
             let translated = self.names[&self.models[model].name];
             let original = self.names[&translation.original.value];
             let mut pending = vec![(original, translated)];
+            let mut pairs = Vec::new();
             while let Some((original, translated)) = pending.pop() {
                 let at = self.symbols[translated].name_span.clone();
                 if !self.step(1 + children[translated].len(), &at) {
@@ -53,16 +54,64 @@ impl Analyzer<'_, '_> {
                         .rev(),
                 );
             }
+            groups.push((original, translated, pairs));
         }
         if self.diagnostics.rejected {
             return Some(());
         }
-        for (original, translated) in pairs {
+        self.bind_translation_namespaces(&originals)?;
+        let symbol_models: Vec<_> = self.symbols.iter().map(|symbol| symbol.model).collect();
+        for (original_model, translated_model, pairs) in groups {
+            let imports = match self.translation_imports(
+                symbol_models[original_model],
+                symbol_models[translated_model],
+                &originals,
+            ) {
+                Ok(Some(imports)) => imports,
+                Ok(None) => {
+                    self.translation_error(
+                        original_model,
+                        translated_model,
+                        "ILI-TRANSLATION-IMPORTS",
+                        "The imports must correspond uniquely to the original model's imports",
+                    );
+                    continue;
+                }
+                Err(()) => {
+                    self.diagnostics.limit(
+                        "Semantic work budget exceeded",
+                        Some(self.symbols[translated_model].name_span.clone()),
+                    );
+                    return None;
+                }
+            };
+            self.bind_translation_group(&pairs, &originals, &symbol_models, &imports)?;
+        }
+        Some(())
+    }
+
+    fn bind_translation_group(
+        &mut self,
+        pairs: &[(usize, usize)],
+        originals: &[usize],
+        symbol_models: &[usize],
+        imports: &BTreeMap<usize, usize>,
+    ) -> Option<()> {
+        for &(original, translated) in pairs {
             let at = self.symbols[translated].name_span.clone();
             let result = if self.symbols[translated].declaration.kind == Kind::Model {
-                self.compare_translation_models(original, translated, &originals)
+                Ok(Some(self.translation_profile_matches(
+                    symbol_models[original],
+                    symbol_models[translated],
+                )))
             } else {
-                self.compare_translation_declarations(original, translated, &originals)
+                self.compare_translation_declarations(
+                    original,
+                    translated,
+                    originals,
+                    symbol_models,
+                    imports,
+                )
             };
             match result {
                 Ok(Some(true)) => {
@@ -99,41 +148,116 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
-    fn compare_translation_models(
+    fn bind_translation_namespaces(&mut self, originals: &[usize]) -> Option<()> {
+        for model in 0..self.models.len() {
+            if self.selected_models[model].translation.is_none() {
+                continue;
+            }
+            let declaration = self.names[self.models[model].name()];
+            let at = self.symbols[declaration].name_span.clone();
+            let original = match original_root(declaration, originals, &mut self.work) {
+                Ok(original) => self.symbols[original].model,
+                Err(()) => {
+                    self.diagnostics
+                        .limit("Semantic work budget exceeded", Some(at));
+                    return None;
+                }
+            };
+            let namespace = self.models[original].effective_xml_namespace();
+            if self.models[model]
+                .xml_namespace()
+                .is_some_and(|declared| declared != namespace)
+            {
+                self.diagnostics.push_related(
+                    "ILI-TRANSLATION-XMLNS",
+                    "A translated XMLNS must match the original transfer namespace",
+                    self.models[model].xml_namespace_span().cloned(),
+                    vec![RelatedLocation {
+                        span: self.models[original]
+                            .xml_namespace_span()
+                            .unwrap_or(&self.models[original].span)
+                            .clone(),
+                        message: "Original transfer namespace".into(),
+                    }],
+                );
+                continue;
+            }
+            if !self.step(namespace.len(), &at) {
+                return None;
+            }
+            let namespace = self.models[original].effective_xml_namespace().to_owned();
+            self.models[model].effective_xml_namespace = namespace;
+        }
+        Some(())
+    }
+
+    fn translation_profile_matches(&self, original: usize, translated: usize) -> bool {
+        let source = &self.models[original];
+        let target = &self.models[translated];
+        source.kind() == target.kind()
+            && (source.language() != LanguageVersion::V23
+                || source.is_contracted() == target.is_contracted())
+            && source.no_incremental_transfer() == target.no_incremental_transfer()
+            && source.charset() == target.charset()
+    }
+
+    fn translation_imports(
         &mut self,
         original: usize,
         translated: usize,
         originals: &[usize],
-    ) -> ComparisonResult {
-        let a = self.symbols[original].model;
-        let b = self.symbols[translated].model;
-        let source = &self.models[a];
-        let target = &self.models[b];
-        if source.kind() != target.kind()
-            || source.language() == LanguageVersion::V23
-                && source.is_contracted() != target.is_contracted()
-            || source.no_incremental_transfer() != target.no_incremental_transfer()
-            || source.charset() != target.charset()
-            || self.bound_imports[a].len() != self.bound_imports[b].len()
-        {
-            return Ok(Some(false));
-        }
-        let mut import_roots = |id: usize| -> Result<Option<BTreeMap<Option<usize>, bool>>, ()> {
-            let mut imports = BTreeMap::new();
-            for (&name, &unqualified) in &self.bound_imports[id] {
-                self.work.charge(1)?;
-                let root = if name == "INTERLIS" {
-                    None
-                } else {
-                    Some(original_root(self.names[name], originals, &mut self.work)?)
-                };
-                if imports.insert(root, unqualified).is_some() {
+    ) -> Result<Option<BTreeMap<usize, usize>>, ()> {
+        let mut correspondence = BTreeMap::new();
+        let mut used_originals = BTreeSet::new();
+        let mut pending = vec![(original, translated)];
+        while let Some((a, b)) = pending.pop() {
+            self.work.charge(1)?;
+            if let Some(previous) = correspondence.insert(b, a) {
+                if previous != a {
                     return Ok(None);
                 }
+                continue;
             }
-            Ok(Some(imports))
-        };
-        Ok(import_roots(a)?.zip(import_roots(b)?).map(|(a, b)| a == b))
+            if !used_originals.insert(a)
+                || self.bound_imports[a].len() != self.bound_imports[b].len()
+            {
+                return Ok(None);
+            }
+            let mut unmatched = [BTreeMap::new(), BTreeMap::new()];
+            for (side, (model, other)) in [(a, b), (b, a)].into_iter().enumerate() {
+                for (&name, &unqualified) in &self.bound_imports[model] {
+                    self.work.charge(1)?;
+                    if self.bound_imports[other].get(name) == Some(&unqualified) {
+                        if side == 0 && name != "INTERLIS" {
+                            let imported = self.model_names[name];
+                            pending.push((imported, imported));
+                        }
+                        continue;
+                    }
+                    if name == "INTERLIS" {
+                        return Ok(None);
+                    }
+                    let root = original_root(self.names[name], originals, &mut self.work)?;
+                    if unmatched[side]
+                        .insert((root, unqualified), self.model_names[name])
+                        .is_some()
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+            let [source, target] = unmatched;
+            if source.len() != target.len() {
+                return Ok(None);
+            }
+            for ((source_key, source), (target_key, target)) in source.into_iter().zip(target) {
+                if source_key != target_key {
+                    return Ok(None);
+                }
+                pending.push((source, target));
+            }
+        }
+        Ok(Some(correspondence))
     }
 
     fn compare_translation_declarations(
@@ -141,6 +265,8 @@ impl Analyzer<'_, '_> {
         original: usize,
         translated: usize,
         originals: &[usize],
+        symbol_models: &[usize],
+        imports: &BTreeMap<usize, usize>,
     ) -> ComparisonResult {
         let a = &self.symbols[original].declaration;
         let b = &self.symbols[translated].declaration;
@@ -174,12 +300,14 @@ impl Analyzer<'_, '_> {
             types: &self.types,
             names: &self.names,
             originals,
+            symbol_models,
+            imports,
             temporal_languages: &self.temporal_languages,
             work: &mut self.work,
         };
         if !comparison.reference(a.reference.as_ref(), b.reference.as_ref())?
             || !comparison.reference(a.base_reference(), b.base_reference())?
-            || !comparison.references(
+            || !comparison.unordered_references(
                 a.declared_topic_dependencies(),
                 b.declared_topic_dependencies(),
             )?
@@ -250,8 +378,17 @@ struct Comparison<'a> {
     types: &'a [TypeInfo],
     names: &'a BTreeMap<String, usize>,
     originals: &'a [usize],
+    symbol_models: &'a [usize],
+    imports: &'a BTreeMap<usize, usize>,
     temporal_languages: &'a BTreeMap<usize, LanguageVersion>,
     work: &'a mut WorkBudget,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum OriginalTarget<'a> {
+    Declared(usize, usize),
+    Unmatched(usize),
+    Predefined(&'a str),
 }
 
 fn original_root(mut id: usize, originals: &[usize], work: &mut WorkBudget) -> Result<usize, ()> {
@@ -264,12 +401,46 @@ fn original_root(mut id: usize, originals: &[usize], work: &mut WorkBudget) -> R
 
 impl Comparison<'_> {
     fn name(&mut self, a: &str, b: &str) -> Result<bool, ()> {
-        self.work.charge((a.len() + b.len()) as u32)?;
-        match (self.names.get(a), self.names.get(b)) {
-            (Some(&a), Some(&b)) => Ok(original_root(a, self.originals, self.work)?
-                == original_root(b, self.originals, self.work)?),
-            _ => Ok(a == b),
+        Ok(self.target(a, false)? == self.target(b, true)?)
+    }
+
+    fn target<'a>(&mut self, name: &'a str, translated: bool) -> Result<OriginalTarget<'a>, ()> {
+        self.work.charge(name.len() as u32)?;
+        let Some(&id) = self.names.get(name) else {
+            return Ok(OriginalTarget::Predefined(name));
+        };
+        let model = self.symbol_models[id];
+        let original_model = if translated {
+            let Some(&model) = self.imports.get(&model) else {
+                return Ok(OriginalTarget::Unmatched(id));
+            };
+            model
+        } else {
+            model
+        };
+        let declaration = original_root(id, self.originals, self.work)?;
+        Ok(OriginalTarget::Declared(original_model, declaration))
+    }
+
+    fn unordered_references(
+        &mut self,
+        a: &[TypeReference],
+        b: &[TypeReference],
+    ) -> Result<bool, ()> {
+        if a.len() != b.len() {
+            return Ok(false);
         }
+        let mut a = a
+            .iter()
+            .map(|reference| self.target(reference.target_name(), false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut b = b
+            .iter()
+            .map(|reference| self.target(reference.target_name(), true))
+            .collect::<Result<Vec<_>, _>>()?;
+        a.sort_unstable();
+        b.sort_unstable();
+        Ok(a == b)
     }
 
     fn reference(
@@ -309,9 +480,7 @@ impl Comparison<'_> {
     fn decimal(&mut self, a: &DecimalInfo, b: &DecimalInfo) -> Result<bool, ()> {
         self.work
             .charge((a.coefficient().len() + b.coefficient().len()) as u32)?;
-        Ok(a.coefficient() == b.coefficient()
-            && a.fractional_digits() == b.fractional_digits()
-            && a.written_exponent() == b.written_exponent())
+        Ok(a.coefficient() == b.coefficient() && a.scale() == b.scale())
     }
 
     fn numeric(&mut self, a: &NumericRange, b: &NumericRange) -> Result<bool, ()> {
