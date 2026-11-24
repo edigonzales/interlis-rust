@@ -11,6 +11,17 @@ pub(crate) struct Diagnostics {
     cap: usize,
 }
 impl Diagnostics {
+    pub fn absorb(&mut self, other: Self) {
+        self.limited |= other.limited;
+        self.incomplete |= other.incomplete;
+        self.syntax_invalid |= other.syntax_invalid;
+        self.unsupported_version |= other.unsupported_version;
+        self.rejected |= other.rejected;
+        for entry in other.entries {
+            self.push_related(&entry.code, &entry.message, entry.primary, entry.related);
+        }
+    }
+
     pub fn new(limits: &Limits) -> Self {
         Self {
             entries: vec![],

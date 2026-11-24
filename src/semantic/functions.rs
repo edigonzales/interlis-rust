@@ -3,7 +3,7 @@ use super::{
     collections::{compare_count, structure_targets},
     expressions::{scalar_type, underlying_expression},
     object_references::object_targets,
-    units::{unit_extends, units_convertible},
+    units::{rational_conversion, unit_extends, units_convertible},
 };
 use crate::{
     AttributePathOwner, AttributePathType, BoundExpressionKind, ClassValueKind, ClassValueType,
@@ -726,7 +726,9 @@ impl Analyzer<'_, '_> {
         mandatory: bool,
         context: AssignmentContext,
     ) -> Option<bool> {
-        self.contextual_convert_unit(expression, target)?;
+        if self.contextual_convert_unit(expression, target, mandatory)? {
+            return Some(true);
+        }
         if self.is_enum_type(target) {
             self.bind_enum_literal(expression, target)?;
         } else if matches!(self.types[target], TypeInfo::EnumArgument { .. }) {
@@ -812,71 +814,137 @@ impl Analyzer<'_, '_> {
         result
     }
 
-    fn contextual_convert_unit(&mut self, expression: ExpressionId, target: usize) -> Option<()> {
+    fn contextual_convert_unit(
+        &mut self,
+        expression: ExpressionId,
+        target: usize,
+        mandatory: bool,
+    ) -> Option<bool> {
         let TypeInfo::Numeric(destination) = &self.types[target] else {
-            return Some(());
+            return Some(false);
         };
-        if destination.unit.is_none() && destination.bounds.is_none() {
-            return Some(());
-        }
         let actual = underlying_expression(&self.expressions, expression);
         let BoundExpressionKind::Call {
             function,
             arguments,
         } = &actual.kind
         else {
-            return Some(());
+            return Some(false);
         };
         if function.target_name() != "INTERLIS.convertUnit" {
-            return Some(());
+            return Some(false);
         }
         let argument = arguments[0];
         let at = actual.span.clone();
         let operand = underlying_expression(&self.expressions, argument);
-        let origin = if operand.value_type == ExpressionType::Numeric {
-            super::expressions::numeric_operand(&self.expressions, &self.types, argument).unit
-        } else {
-            None
-        };
-        let compatible = match (origin, destination.unit.as_ref()) {
-            _ if operand.value_type == ExpressionType::Undefined => Ok(true),
-            (Some(origin), Some(destination)) => units_convertible(
-                &self.symbols,
-                &self.names,
-                origin,
-                destination,
-                &mut self.work,
-            ),
-            (None, None) => Ok(true),
-            _ => Ok(false),
-        };
-        match compatible {
-            Ok(true) => {
-                let mut id = expression;
-                loop {
-                    let value = &mut self.expressions[id.0 as usize];
-                    value.type_id = Some(target);
-                    if let BoundExpressionKind::Group { expression } = value.kind {
-                        id = expression;
-                    } else {
-                        break;
-                    }
-                }
-                Some(())
-            }
-            Ok(false) => {
+        if operand.value_type == ExpressionType::Undefined {
+            if mandatory {
                 self.diagnostics.push(
-                    "ILI-CONVERT-UNIT",
-                    "The source and destination must share a conversion unit",
+                    "ILI-CONVERT-UNIT-UNDEFINED",
+                    "An undefined conversion cannot supply a mandatory value",
                     Some(at),
                 );
-                None
+                return None;
             }
+            return Some(true);
+        }
+        if destination.unit.is_none() && destination.bounds.is_none() {
+            return Some(false);
+        }
+        let origin = super::expressions::numeric_operand(&self.expressions, &self.types, argument);
+        let checked = (|| {
+            use num_bigint::BigInt;
+            let ratio = match (origin.unit, destination.unit.as_ref()) {
+                (Some(origin), Some(destination)) => {
+                    if !units_convertible(
+                        &self.symbols,
+                        &self.names,
+                        origin,
+                        destination,
+                        &mut self.work,
+                    )? {
+                        return Ok(Some("ILI-CONVERT-UNIT"));
+                    }
+                    if self.types[target].has_unbounded_range() {
+                        return Ok(None);
+                    }
+                    rational_conversion(
+                        &self.symbols,
+                        &self.names,
+                        origin,
+                        destination,
+                        &mut self.work,
+                    )?
+                }
+                (None, None) => Some((BigInt::from(1), BigInt::from(1))),
+                _ => return Ok(Some("ILI-CONVERT-UNIT")),
+            };
+            if let Some(destination) = &destination.bounds {
+                let (Some((lower, upper)), Some((numerator, denominator))) = (origin.bounds, ratio)
+                else {
+                    return Ok(Some("ILI-UNSUPPORTED"));
+                };
+                let (lower, upper) = if numerator.sign() == num_bigint::Sign::Minus {
+                    (upper, lower)
+                } else {
+                    (lower, upper)
+                };
+                if compare_converted(
+                    lower,
+                    &destination.lower,
+                    &numerator,
+                    &denominator,
+                    &mut self.work,
+                )? == Ordering::Less
+                    || compare_converted(
+                        upper,
+                        &destination.upper,
+                        &numerator,
+                        &denominator,
+                        &mut self.work,
+                    )? == Ordering::Greater
+                {
+                    return Ok(Some("ILI-CONVERT-UNIT-RANGE"));
+                }
+            }
+            Ok(None)
+        })();
+        let checked = match checked {
+            Ok(result) => result,
             Err(error) => {
                 self.number_error(error, &at);
-                None
+                return None;
+            }
+        };
+        if let Some(code) = checked {
+            let message = match code {
+                "ILI-CONVERT-UNIT" => "The source and destination must share a conversion unit",
+                "ILI-CONVERT-UNIT-RANGE" => {
+                    "The converted value can fall outside its destination range"
+                }
+                _ => "The converted range cannot be established exactly",
+            };
+            self.diagnostics.push(code, message, Some(at));
+            return None;
+        }
+        if actual.type_id == operand.type_id
+            || operand.type_id.is_none()
+                && actual
+                    .type_id
+                    .is_some_and(|ty| self.types[ty].has_unbounded_range())
+        {
+            let mut id = expression;
+            loop {
+                let value = &mut self.expressions[id.0 as usize];
+                value.type_id = Some(target);
+                if let BoundExpressionKind::Group { expression } = value.kind {
+                    id = expression;
+                } else {
+                    break;
+                }
             }
         }
+        Some(true)
     }
 
     fn argument_fits(
@@ -1067,6 +1135,36 @@ pub(super) fn compare_decimal(
     let left = DecimalLiteral::from_info(left, work)?;
     let right = DecimalLiteral::from_info(right, work)?;
     left.compare_value(&right, work)
+}
+
+fn compare_converted(
+    source: &DecimalInfo,
+    target: &DecimalInfo,
+    numerator: &num_bigint::BigInt,
+    denominator: &num_bigint::BigInt,
+    work: &mut WorkBudget,
+) -> Result<Ordering, NumberError> {
+    use num_bigint::BigInt;
+    let places = source.scale().abs_diff(target.scale());
+    let bytes = u64::from(places)
+        + numerator.bits().max(denominator.bits()).div_ceil(8)
+        + (source.coefficient().len() + target.coefficient().len()) as u64;
+    work.charge(u32::try_from(bytes).map_err(|_| NumberError::Limit)?)
+        .map_err(|_| NumberError::Work)?;
+    let coefficient = |number: &DecimalInfo| {
+        BigInt::parse_bytes(number.coefficient().as_bytes(), 10).ok_or(NumberError::Form)
+    };
+    let mut left = coefficient(source)? * numerator;
+    let mut right = coefficient(target)? * denominator;
+    if places > 0 {
+        let scale = BigInt::from(10).pow(places);
+        if source.scale() < target.scale() {
+            left *= scale;
+        } else {
+            right *= scale;
+        }
+    }
+    Ok(left.cmp(&right))
 }
 
 fn text_argument_fits(

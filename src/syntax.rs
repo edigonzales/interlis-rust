@@ -784,9 +784,53 @@ pub(crate) fn parse(
     budget: &mut SyntaxBudget,
     diagnostics: &mut Diagnostics,
 ) -> Option<Document> {
-    let lexed = lexer::lex(sources, file, limits, budget, diagnostics);
+    parse_source(sources, file, limits, budget, diagnostics, None)
+}
+
+pub(crate) fn parse_source(
+    sources: &SourceSet,
+    file: usize,
+    limits: &Limits,
+    budget: &mut SyntaxBudget,
+    diagnostics: &mut Diagnostics,
+    catalog: Option<&mut Vec<(String, Option<String>)>>,
+) -> Option<Document> {
+    let lexed = if catalog.is_some() {
+        lexer::lex_source(sources, file, limits, budget, diagnostics, true)
+    } else {
+        lexer::lex(sources, file, limits, budget, diagnostics)
+    };
     if diagnostics.limited {
         return None;
+    }
+    if let Some(catalog) = catalog {
+        if !budget.work(u32::try_from(lexed.tokens.len()).unwrap_or(u32::MAX)) {
+            diagnostics.limit("Syntax work budget exceeded", None);
+            return None;
+        }
+        let source = sources.files()[file].text();
+        let tokens = &lexed.tokens;
+        let text = |token: &Token| &source[token.range.clone()];
+        for (position, token) in tokens.iter().enumerate() {
+            if token.kind == Kind::Word
+                && text(token) == "MODEL"
+                && let Some(name) = tokens
+                    .get(position + 1)
+                    .filter(|name| name.kind == Kind::Word)
+            {
+                catalog.push((text(name).to_owned(), None));
+            } else if token.kind == Kind::Word
+                && text(token) == "VERSION"
+                && let Some((_, version)) =
+                    catalog.last_mut().filter(|(_, version)| version.is_none())
+                && let Some(Token {
+                    kind: Kind::String(value),
+                    ..
+                }) = tokens.get(position + 1)
+            {
+                *version = Some(value.clone());
+            }
+        }
     }
     let mut parser = Parser {
         sources,

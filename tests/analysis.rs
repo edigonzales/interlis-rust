@@ -7740,3 +7740,140 @@ fn compile_only_exposes_a_schema_for_a_successfully_checked_closure() {
         );
     }
 }
+
+#[test]
+fn compile_scopes_syntax_errors_to_selected_models_and_versioned_originals() {
+    use interlis::{CompilationStatus, compile};
+    let selected = r#"INTERLIS 2.4; MODEL Selected AT "x" VERSION "1" = END Selected."#;
+    let unrelated = r#"INTERLIS 2.4; MODEL Other AT "x" VERSION "1" = DOMAIN Foo=; END Other."#;
+    let foreign = "INTERLIS 2.5; MODEL Old = ? END Old.";
+    let report = compile(
+        request(vec![
+            ("selected.ili", selected.into()),
+            ("unrelated.ili", unrelated.into()),
+            ("foreign.ili", foreign.into()),
+        ]),
+        Some(&["Selected".into()]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.status(),
+        CompilationStatus::Compiled,
+        "{:?}",
+        report.diagnostics()
+    );
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.sources().files().len(), 3);
+    let report = compile(
+        request(vec![(
+            "together.ili",
+            format!("{selected}\n{}", unrelated.split_once(';').unwrap().1),
+        )]),
+        Some(&["Selected".into()]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.status(),
+        CompilationStatus::Compiled,
+        "{:?}",
+        report.diagnostics()
+    );
+    let report = compile(
+        request(vec![
+            ("selected.ili", selected.into()),
+            ("foreign.ili", foreign.into()),
+        ]),
+        Some(&["Old".into()]),
+    )
+    .unwrap();
+    assert_eq!(report.status(), CompilationStatus::Rejected);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ILI-VERSION")
+    );
+
+    let original =
+        r#"INTERLIS 2.4; MODEL Original AT "x" VERSION "1" = DOMAIN N=BOOLEAN; END Original."#;
+    let wrong_version =
+        r#"INTERLIS 2.4; MODEL Original AT "x" VERSION "2" = DOMAIN Bad=; END Original."#;
+    let translated = r#"INTERLIS 2.4; MODEL Local AT "x" VERSION "1" TRANSLATION OF Original ["1"] =
+        DOMAIN Value=BOOLEAN; END Local."#;
+    let report = compile(
+        request(vec![
+            ("new.ili", wrong_version.into()),
+            ("old.ili", original.into()),
+            ("translated.ili", translated.into()),
+        ]),
+        Some(&["Local".into()]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.status(),
+        CompilationStatus::Compiled,
+        "{:?}",
+        report.diagnostics()
+    );
+    assert_eq!(report.schema().unwrap().graph().models().len(), 2);
+
+    let requiring = selected.replace("= END Selected", "= IMPORTS Other; END Selected");
+    let report = compile(
+        request(vec![
+            ("selected.ili", requiring),
+            ("unrelated.ili", unrelated.into()),
+        ]),
+        Some(&["Selected".into()]),
+    )
+    .unwrap();
+    assert_eq!(report.status(), CompilationStatus::Rejected);
+    assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
+    let at = report
+        .sources()
+        .location(report.diagnostics()[0].primary.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(at.source, "unrelated.ili");
+}
+
+#[test]
+fn convert_unit_checks_exact_converted_bounds_and_mandatory_values() {
+    for version in ["2.3", "2.4"] {
+        let input = |value: &str| {
+            request(vec![(
+                "conversion.ili",
+                format!(
+                    r#"INTERLIS {version}; MODEL M AT "x" VERSION "1" =
+               UNIT Centimeter=0.01[INTERLIS.m];
+               TOPIC T=CLASS Item=
+                  amount:MANDATORY 0..10 [Centimeter] := INTERLIS.convertUnit({value});
+               END Item; END T; END M."#
+                ),
+            )])
+        };
+        let report = outcome(input("0.10 [INTERLIS.m]"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let expr = graph.declaration("M.T.Item.amount").unwrap().derivations()[0];
+        let TypeInfo::Numeric(converted) = graph.expression_declared_type(expr).unwrap() else {
+            panic!("expected the converted numeric type");
+        };
+        assert_eq!(
+            converted.unit.as_ref().unwrap().target_name(),
+            "M.Centimeter"
+        );
+        outcome(
+            input("0.11 [INTERLIS.m]"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT-RANGE"),
+        );
+        outcome(
+            input("UNDEFINED"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT-UNDEFINED"),
+        );
+        outcome(
+            input("0.10 [INTERLIS.s]"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT"),
+        );
+    }
+}

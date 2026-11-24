@@ -32,6 +32,10 @@ fn operational(error: impl std::fmt::Display) -> CliError {
     }
 }
 
+fn input_error(path: &Path, error: impl std::fmt::Display) -> CliError {
+    operational(format!("{}: {error}", path.display()))
+}
+
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1)) {
         Ok(code) => ExitCode::from(code),
@@ -43,25 +47,32 @@ fn main() -> ExitCode {
 }
 
 fn read_bounded(path: &PathBuf) -> Result<String, CliError> {
-    if !std::fs::metadata(path).map_err(operational)?.is_file() {
-        return Err(operational("Expected a regular input file"));
+    if !std::fs::metadata(path)
+        .map_err(|error| input_error(path, error))?
+        .is_file()
+    {
+        return Err(input_error(path, "Expected a regular input file"));
     }
-    let file = std::fs::File::open(path).map_err(operational)?;
-    read_file_bounded(&file)
+    let file = std::fs::File::open(path).map_err(|error| input_error(path, error))?;
+    read_file_bounded(&file, path)
 }
 
-fn read_file_bounded(file: &std::fs::File) -> Result<String, CliError> {
-    if !file.metadata().map_err(operational)?.is_file() {
-        return Err(operational("Expected a regular input file"));
+fn read_file_bounded(file: &std::fs::File, path: &Path) -> Result<String, CliError> {
+    if !file
+        .metadata()
+        .map_err(|error| input_error(path, error))?
+        .is_file()
+    {
+        return Err(input_error(path, "Expected a regular input file"));
     }
     let mut bytes = Vec::new();
     file.take(MAX_HOST_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(operational)?;
+        .map_err(|error| input_error(path, error))?;
     if bytes.len() as u64 > MAX_HOST_BYTES {
-        return Err(operational("File exceeds 32 MiB host read limit"));
+        return Err(input_error(path, "File exceeds 32 MiB host read limit"));
     }
-    String::from_utf8(bytes).map_err(|_| operational("File is not valid UTF-8"))
+    String::from_utf8(bytes).map_err(|_| input_error(path, "File is not valid UTF-8"))
 }
 
 fn logical_source_name(path: &Path, ordinal: usize) -> Result<String, CliError> {
@@ -102,7 +113,7 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
         .map(|path| {
             std::fs::canonicalize(path)
                 .map(|canonical| (canonical, path))
-                .map_err(operational)
+                .map_err(|error| input_error(path, error))
         })
         .collect::<Result<Vec<_>, _>>()?;
     ordered_paths.sort_by(|a, b| a.0.cmp(&b.0));
@@ -113,14 +124,18 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
         let name = logical_source_name(path, index + 1)?;
         // Keep the open identity through this read set: symlinks and hardlinks
         // are duplicates too. Host paths never become logical source names.
-        if !std::fs::metadata(canonical).map_err(operational)?.is_file() {
-            return Err(operational("Expected a regular source file"));
+        if !std::fs::metadata(canonical)
+            .map_err(|error| input_error(path, error))?
+            .is_file()
+        {
+            return Err(input_error(path, "Expected a regular source file"));
         }
-        let handle = same_file::Handle::from_path(canonical).map_err(operational)?;
+        let handle =
+            same_file::Handle::from_path(canonical).map_err(|error| input_error(path, error))?;
         if identities.contains(&handle) {
             return Err(usage("Duplicate physical source file"));
         }
-        let text = read_file_bounded(handle.as_file())?;
+        let text = read_file_bounded(handle.as_file(), path)?;
         identities.insert(handle);
         total += text.len() as u64;
         if total > MAX_HOST_BYTES {

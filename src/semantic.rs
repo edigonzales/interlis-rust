@@ -146,6 +146,8 @@ struct Analyzer<'a, 'd> {
     constraint_topic: Option<usize>,
     associations_by_role: BTreeMap<String, Vec<usize>>,
     generic_types: BTreeMap<usize, usize>,
+    failed_models: BTreeMap<String, Vec<(usize, Option<String>)>>,
+    failed_sources: Vec<Option<Diagnostics>>,
 }
 fn supported_type(ty: &TypeSyntax) -> bool {
     match ty {
@@ -432,6 +434,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             constraint_topic: None,
             associations_by_role: BTreeMap::new(),
             generic_types: BTreeMap::new(),
+            failed_models: BTreeMap::new(),
+            failed_sources: Vec::new(),
         }
     }
 
@@ -573,6 +577,25 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         });
         Some(id)
     }
+    fn merge_source_diagnostics(&mut self, name: &str, version: Option<&str>) -> bool {
+        let Some(sources) = self.failed_models.get(name) else {
+            return false;
+        };
+        let mut matches = false;
+        for (index, declared_version) in sources {
+            if let (Some(required), Some(declared)) = (version, declared_version)
+                && required != declared
+            {
+                continue;
+            }
+            matches = true;
+            if let Some(diagnostics) = self.failed_sources[*index].take() {
+                self.diagnostics.absorb(diagnostics);
+            }
+        }
+        matches
+    }
+
     fn collect_models(&mut self, requested: Option<&[String]>) {
         let mut candidates = Vec::new();
         let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
@@ -592,6 +615,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         let mut pending = Vec::new();
         if let Some(requested) = requested {
             for name in requested {
+                if self.merge_source_diagnostics(name, None) {
+                    continue;
+                }
                 if let Some(indices) = by_name.get(name.as_str()) {
                     if let &[first, second, ..] = indices.as_slice() {
                         self.diagnostics.push_related(
@@ -633,6 +659,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             let ast = candidates[index].1;
             if requested.is_some() {
                 for import in &ast.imports {
+                    if import.name.value != "INTERLIS"
+                        && self.merge_source_diagnostics(&import.name.value, None)
+                    {
+                        continue;
+                    }
                     let targets = by_name
                         .get(import.name.value.as_str())
                         .map_or(&[][..], Vec::as_slice);
@@ -675,6 +706,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             let Some(translation) = &ast.translation else {
                 continue;
             };
+            if self.merge_source_diagnostics(
+                &translation.original.value,
+                Some(&translation.version.value),
+            ) {
+                continue;
+            }
             let mut matching = None;
             let mut ambiguous = false;
             if let Some(indices) = by_name.get(translation.original.value.as_str()) {
@@ -730,7 +767,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return;
             }
         }
-        if self.diagnostics.rejected {
+        if self.diagnostics.rejected || self.diagnostics.incomplete {
             return;
         }
         for ((language, ast), present) in candidates.into_iter().zip(selected) {
@@ -1926,7 +1963,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
     }
     fn run(mut self, requested: Option<&[String]>) -> Option<ModelGraph> {
         self.collect_models(requested);
-        if self.diagnostics.limited || self.diagnostics.rejected {
+        if self.diagnostics.limited || self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }
         self.bind_imports();
@@ -2064,8 +2101,21 @@ pub(crate) fn analyze(
     requested: Option<&[String]>,
     limits: &Limits,
     diagnostics: &mut Diagnostics,
+    failures: Vec<crate::FailedSource>,
 ) -> Option<ModelGraph> {
-    Analyzer::new(documents, limits, diagnostics).run(requested)
+    let mut analyzer = Analyzer::new(documents, limits, diagnostics);
+    for failure in failures {
+        let index = analyzer.failed_sources.len();
+        for (name, version) in failure.models {
+            analyzer
+                .failed_models
+                .entry(name)
+                .or_default()
+                .push((index, version));
+        }
+        analyzer.failed_sources.push(Some(failure.diagnostics));
+    }
+    analyzer.run(requested)
 }
 
 #[cfg(test)]

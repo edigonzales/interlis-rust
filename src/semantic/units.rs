@@ -408,6 +408,72 @@ pub(super) fn units_convertible(
     Ok(actual == expected)
 }
 
+pub(super) fn rational_conversion(
+    symbols: &[Symbol<'_>],
+    names: &BTreeMap<String, usize>,
+    actual: &TypeReference,
+    expected: &TypeReference,
+    work: &mut WorkBudget,
+) -> Result<Option<(BigInt, BigInt)>, NumberError> {
+    let mut ratio = unit_product(
+        symbols,
+        names,
+        actual.target_name(),
+        ProductKind::Ratio,
+        work,
+    )?;
+    for (factor, power) in unit_product(
+        symbols,
+        names,
+        expected.target_name(),
+        ProductKind::Ratio,
+        work,
+    )? {
+        add_power(&mut ratio, factor, &power, UnitOperator::Divide, work)?;
+    }
+    let mut numerator = BigInt::from(1);
+    let mut denominator = BigInt::from(1);
+    let mut scale = 0_i64;
+    for (factor, exponent) in ratio {
+        if exponent.bits() == 0 {
+            continue;
+        }
+        let Factor::Decimal(decimal_scale, coefficient) = factor else {
+            return Ok(None);
+        };
+        let exponent = i32::try_from(exponent).map_err(|_| NumberError::Limit)?;
+        let power = exponent.unsigned_abs();
+        charge_product_work(
+            (coefficient.len() as u64).saturating_mul(u64::from(power)),
+            work,
+        )?;
+        let value = BigInt::parse_bytes(coefficient.as_bytes(), 10)
+            .ok_or(NumberError::Form)?
+            .pow(power);
+        if exponent < 0 {
+            denominator *= value;
+        } else {
+            numerator *= value;
+        }
+        scale = scale
+            .checked_add(i64::from(decimal_scale) * i64::from(exponent))
+            .ok_or(NumberError::Limit)?;
+    }
+    charge_product_work(scale.unsigned_abs(), work)?;
+    let power = u32::try_from(scale.unsigned_abs()).map_err(|_| NumberError::Limit)?;
+    let place = BigInt::from(10).pow(power);
+    if scale < 0 {
+        numerator *= place;
+    } else {
+        denominator *= place;
+    }
+    if denominator.sign() == num_bigint::Sign::Minus {
+        numerator = -numerator;
+        denominator = -denominator;
+    }
+    Ok(Some((numerator, denominator)))
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProductKind {
     Roots,

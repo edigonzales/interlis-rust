@@ -760,7 +760,7 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
 }
 
 pub(super) struct NumericOperand<'a> {
-    bounds: Option<(&'a DecimalInfo, &'a DecimalInfo)>,
+    pub(super) bounds: Option<(&'a DecimalInfo, &'a DecimalInfo)>,
     pub(super) unit: Option<&'a TypeReference>,
 }
 

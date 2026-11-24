@@ -228,6 +228,41 @@ struct Frontend {
     sources: SourceSet,
     documents: Vec<syntax::Document>,
     diagnostics: diagnostic::Diagnostics,
+    failed_sources: Vec<FailedSource>,
+}
+
+struct FailedSource {
+    models: Vec<(String, Option<String>)>,
+    diagnostics: diagnostic::Diagnostics,
+}
+
+fn retain_unaffected_models(
+    document: &mut syntax::Document,
+    diagnostics: &diagnostic::Diagnostics,
+) -> Option<Vec<(String, Option<String>)>> {
+    let mut affected = std::collections::BTreeSet::new();
+    for diagnostic in &diagnostics.entries {
+        let (_, at, end) = diagnostic.primary.as_ref()?.sort_key();
+        let index = document
+            .models
+            .partition_point(|model| model.span.sort_key().2 <= at);
+        let (_, start, stop) = document.models.get(index)?.span.sort_key();
+        if at < start || end > stop {
+            return None;
+        }
+        affected.insert(index);
+    }
+    let mut failures = Vec::new();
+    let mut position = 0;
+    document.models.retain(|model| {
+        let failed = affected.contains(&position);
+        position += 1;
+        if failed {
+            failures.push((model.name.value.clone(), Some(model.version.value.clone())));
+        }
+        !failed
+    });
+    Some(failures)
 }
 
 impl Frontend {
@@ -244,11 +279,16 @@ impl Frontend {
     }
 }
 
-fn frontend(inputs: Vec<SourceInput>, limits: &Limits) -> Result<Frontend, RequestError> {
+fn frontend(
+    inputs: Vec<SourceInput>,
+    limits: &Limits,
+    scoped: bool,
+) -> Result<Frontend, RequestError> {
     limits.validate()?;
     let mut sources = SourceSet::new(inputs)?;
     let mut diagnostics = diagnostic::Diagnostics::new(limits);
     let mut documents = Vec::new();
+    let mut failed_sources = Vec::new();
     let mut total = Some(0_u64);
     let mut over = false;
     for file in sources.files() {
@@ -264,7 +304,38 @@ fn frontend(inputs: Vec<SourceInput>, limits: &Limits) -> Result<Frontend, Reque
         sources.index_lines();
         let mut remaining = limits::SyntaxBudget::new(limits);
         for file in 0..sources.files().len() {
-            if let Some(document) =
+            if scoped {
+                let mut local = diagnostic::Diagnostics::new(limits);
+                let mut model_headers = Vec::new();
+                let mut document = syntax::parse_source(
+                    &sources,
+                    file,
+                    limits,
+                    &mut remaining,
+                    &mut local,
+                    Some(&mut model_headers),
+                );
+                if local.limited {
+                    diagnostics.absorb(local);
+                } else if local.syntax_invalid || local.unsupported_version {
+                    if !local.unsupported_version
+                        && let Some(mut partially_parsed) = document.take()
+                        && let Some(affected) =
+                            retain_unaffected_models(&mut partially_parsed, &local)
+                    {
+                        model_headers = affected;
+                        documents.push(partially_parsed);
+                    }
+                    model_headers.sort_unstable();
+                    model_headers.dedup();
+                    failed_sources.push(FailedSource {
+                        models: model_headers,
+                        diagnostics: local,
+                    });
+                } else if let Some(document) = document {
+                    documents.push(document);
+                }
+            } else if let Some(document) =
                 syntax::parse(&sources, file, limits, &mut remaining, &mut diagnostics)
             {
                 documents.push(document);
@@ -278,12 +349,13 @@ fn frontend(inputs: Vec<SourceInput>, limits: &Limits) -> Result<Frontend, Reque
         sources,
         documents,
         diagnostics,
+        failed_sources,
     })
 }
 
 /// Parses the supplied sources as INTERLIS 2.3 or 2.4. Model validity is unchecked.
 pub fn parse(request: CompileRequest) -> Result<SyntaxReport, RequestError> {
-    let frontend = frontend(request.sources, &request.limits)?;
+    let frontend = frontend(request.sources, &request.limits, false)?;
     let status = frontend.status();
     Ok(SyntaxReport {
         status,
@@ -296,7 +368,7 @@ pub fn parse(request: CompileRequest) -> Result<SyntaxReport, RequestError> {
 /// Checks the declared syntax/semantic subset with deterministic budgets.
 /// Returns a provisional graph for the probe contract. No host I/O.
 pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
-    analyze_models(request, None)
+    analyze_models(request, None, false)
 }
 
 /// Analyzes the specified models and their transitive imports. Every supplied
@@ -305,12 +377,12 @@ pub fn analyze_roots(
     request: CompileRequest,
     roots: &[String],
 ) -> Result<AnalysisReport, RequestError> {
-    analyze_models(request, Some(roots))
+    analyze_models(request, Some(roots), false)
 }
 
 /// Compiles explicitly supplied sources. With roots, model checking covers
-/// those models and their transitive dependencies. Every source is parsed
-/// before selection. Only a successful compilation exposes a schema.
+/// those models and their transitive dependencies. Only a successful
+/// compilation exposes a schema.
 pub fn compile(
     request: CompileRequest,
     roots: Option<&[String]>,
@@ -322,7 +394,7 @@ pub fn compile(
         graph,
         unsupported_version,
         internal_error,
-    } = analyze_models(request, roots)?;
+    } = analyze_models(request, roots, roots.is_some())?;
     let (status, schema) = match status {
         AnalysisStatus::CheckedSubset => (
             CompilationStatus::Compiled,
@@ -364,6 +436,7 @@ pub fn compile(
 fn analyze_models(
     request: CompileRequest,
     roots: Option<&[String]>,
+    scoped: bool,
 ) -> Result<AnalysisReport, RequestError> {
     if let Some(roots) = roots
         && (roots.is_empty()
@@ -384,13 +457,14 @@ fn analyze_models(
             "Expected a nonempty list of distinct model names",
         ));
     }
-    let mut frontend = frontend(request.sources, &request.limits)?;
+    let mut frontend = frontend(request.sources, &request.limits, scoped)?;
     let graph = if frontend.status() == SyntaxStatus::Parsed {
         semantic::analyze(
             &frontend.documents,
             roots,
             &request.limits,
             &mut frontend.diagnostics,
+            frontend.failed_sources,
         )
     } else {
         None

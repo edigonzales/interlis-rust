@@ -181,6 +181,17 @@ pub(crate) fn lex(
     budget: &mut SyntaxBudget,
     diagnostics: &mut Diagnostics,
 ) -> Lexed {
+    lex_source(sources, file, limits, budget, diagnostics, false)
+}
+
+pub(crate) fn lex_source(
+    sources: &SourceSet,
+    file: usize,
+    limits: &Limits,
+    budget: &mut SyntaxBudget,
+    diagnostics: &mut Diagnostics,
+    catalog_models: bool,
+) -> Lexed {
     let source = sources.files()[file].text();
     let mut output = Lexed {
         tokens: vec![],
@@ -348,7 +359,7 @@ pub(crate) fn lex(
             return output;
         }
         output.tokens.push(Token { kind, range });
-        if crate::syntax::foreign_header_complete(&output.tokens, source) {
+        if !catalog_models && crate::syntax::foreign_header_complete(&output.tokens, source) {
             return output;
         }
     }
