@@ -352,12 +352,9 @@ fn ensure_supported_semantics(
                             value: syntax::ViewFormation::Projection(_)
                                 | syntax::ViewFormation::Join { .. },
                             ..
-                        })) | None
-                    ) && view.base_extensions.is_empty()
-                        && view
-                            .properties
-                            .iter()
-                            .all(|p| p.value != syntax::Property::Extended);
+                        })) | Some(syntax::ViewOrigin::Extends(_))
+                            | None
+                    );
                     if !supported {
                         Some(&view.span)
                     } else {
@@ -2033,6 +2030,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_contexts(&model_order, &topics, &viewables)?;
         self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
+        self.validate_view_derivations()?;
         self.bind_constraints(&expressions)?;
         if !self.diagnostics.rejected && !self.diagnostics.incomplete {
             self.bind_translations()?;

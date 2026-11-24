@@ -1605,6 +1605,125 @@ fn projection_and_join_views_bind_ordered_members_selections_and_basis_origins()
 }
 
 #[test]
+fn view_extensions_keep_inherited_members_filters_and_basis_links() {
+    for version in ["2.3", "2.4"] {
+        let input = |property: &str, specialized: &str| {
+            request(vec![(
+                "model",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                 TOPIC Source =
+                    CLASS Root=height:0..20; END Root;
+                    CLASS Special EXTENDS Root=label:TEXT*20; END Special;
+                    CLASS Unrelated=label:TEXT*20; END Unrelated;
+                    VIEW Selected {property} PROJECTION OF row~Root;
+                        WHERE row->height > 0;
+                        = ALL OF row; amount:0..10 := 4;
+                    END Selected;
+                 END Source;
+                 TOPIC Child EXTENDS Source =
+                    VIEW Selected (EXTENDED)
+                        BASE row EXTENDED BY sub~M.Source.{specialized}
+                        WHERE DEFINED(row);
+                        = amount(EXTENDED):0..5 := 4;
+                          extra := sub->label;
+                          fixed := 3;
+                          caption := \"abc\";
+                    END Selected;
+                 END Child; END M."
+                ),
+            )])
+        };
+        let report = outcome(input("", "Special"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let child = "M.Child.Selected";
+        assert_eq!(
+            graph
+                .declaration(child)
+                .unwrap()
+                .base_reference()
+                .unwrap()
+                .target_name(),
+            "M.Source.Selected",
+        );
+        assert_eq!(
+            graph
+                .declaration(child)
+                .unwrap()
+                .view()
+                .unwrap()
+                .selections
+                .len(),
+            2
+        );
+        assert_eq!(
+            graph
+                .effective_attributes(child)
+                .unwrap()
+                .map(|decl| decl.qualified_name())
+                .collect::<Vec<_>>(),
+            [
+                "M.Source.Selected.height",
+                "M.Child.Selected.amount",
+                "M.Child.Selected.extra",
+                "M.Child.Selected.fixed",
+                "M.Child.Selected.caption"
+            ]
+        );
+        let base = graph.view_bases(child).unwrap().nth(1).unwrap();
+        assert_eq!(
+            base.type_reference().unwrap().target_name(),
+            "M.Source.Special"
+        );
+        assert_eq!(
+            base.base_reference().unwrap().target_name(),
+            "M.Source.Selected.row"
+        );
+        assert!(base.is_nullable_view_base());
+        let Some(TypeInfo::Text { max_length }) = graph.effective_type("M.Child.Selected.caption")
+        else {
+            panic!("expected a bounded text literal");
+        };
+        assert_eq!(max_length, "3");
+        outcome(
+            input("(FINAL)", "Special"),
+            Status::Rejected,
+            Some("ILI-CLASS-FINAL"),
+        );
+        outcome(
+            input("", "Unrelated"),
+            Status::Rejected,
+            Some("ILI-VIEW-BASE-EXTENSION"),
+        );
+    }
+}
+
+#[test]
+fn view_derivations_detect_cycles_and_optional_bases_through_other_members() {
+    for attributes in [
+        "ALL OF r; value:MANDATORY TEXT*10 := name;",
+        "cast := r->name; value:MANDATORY TEXT*10 := cast;",
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC T=CLASS A=END A; CLASS B=name:TEXT*10; END B;
+             VIEW J JOIN OF A,r~B (OR NULL); = {attributes} END J; END T;"
+            )),
+            Status::Rejected,
+            Some("ILI-VIEW-NULLABLE-ATTRIBUTE"),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS A=END A; VIEW V PROJECTION OF A;
+         = first:TEXT*10 := second; second:TEXT*10 := first; END V; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-VIEW-ATTRIBUTE-CYCLE"),
+    );
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(

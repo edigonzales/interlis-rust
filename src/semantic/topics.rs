@@ -196,6 +196,9 @@ impl Analyzer<'_, '_> {
                     && match self.symbols[id].ast {
                         Some(SyntaxDecl::Container { base, .. }) => base.is_none(),
                         Some(SyntaxDecl::Association(association)) => association.base.is_none(),
+                        Some(SyntaxDecl::View(view)) => {
+                            !matches!(view.origin, Some(crate::syntax::ViewOrigin::Extends(_)))
+                        }
                         _ => false,
                     })
             {

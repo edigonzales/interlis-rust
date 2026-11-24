@@ -15,10 +15,17 @@ impl Analyzer<'_, '_> {
             let (base, properties) = match self.symbols[id].ast {
                 Some(SyntaxDecl::Container {
                     base, properties, ..
-                }) => (base, properties),
+                }) => (base.as_ref(), properties),
                 Some(SyntaxDecl::Association(association)) => {
-                    (&association.base, &association.properties)
+                    (association.base.as_ref(), &association.properties)
                 }
+                Some(SyntaxDecl::View(view)) => (
+                    match &view.origin {
+                        Some(syntax::ViewOrigin::Extends(base)) => Some(base),
+                        _ => None,
+                    },
+                    &view.properties,
+                ),
                 _ => continue,
             };
             viewables.push(id);
@@ -68,7 +75,7 @@ impl Analyzer<'_, '_> {
             if self.symbols[binding.0].declaration.is_final() {
                 self.diagnostics.push(
                     "ILI-CLASS-FINAL",
-                    "A FINAL class, structure or association cannot be extended",
+                    "A FINAL viewable cannot be extended",
                     Some(binding.1.span.clone()),
                 );
                 return None;
@@ -76,7 +83,8 @@ impl Analyzer<'_, '_> {
             self.symbols[id].base_scope = Some(binding.0);
             self.symbols[id].declaration.base_reference = Some(binding.1);
         }
-        let order = self.inheritance_order(viewables, "ILI-CLASS-CYCLE")?;
+        let mut order = self.inheritance_order(viewables, "ILI-CLASS-CYCLE")?;
+        order.retain(|&id| self.symbols[id].declaration.kind != Kind::View);
         for (owner, base, span) in implicit {
             let mut topic = Some(owner);
             while let Some(id) = topic {
@@ -106,6 +114,7 @@ impl Analyzer<'_, '_> {
         let kinds = match kind {
             Kind::Class => &[Kind::Class, Kind::Structure][..],
             Kind::Association => &[Kind::Association],
+            Kind::View => &[Kind::View],
             _ => &[Kind::Structure],
         };
         match self.lookup_name(owner, &name.segments, &name.span, kinds) {
@@ -124,7 +133,7 @@ impl Analyzer<'_, '_> {
             Err(_) => {
                 self.diagnostics.push(
                     "ILI-NAME-NOT-FOUND",
-                    "Class, structure or association base cannot be resolved",
+                    "The base viewable cannot be resolved",
                     Some(name.span.clone()),
                 );
                 None
@@ -391,17 +400,6 @@ impl Analyzer<'_, '_> {
                 let value = self
                     .bind_expression(owner, statements, root, ExpressionContext::Value)
                     .and_then(|value| {
-                        if mandatory
-                            && self.symbols[owner].declaration.kind == Kind::View
-                            && self.view_uses_nullable_base(value)?
-                        {
-                            self.diagnostics.push(
-                                "ILI-VIEW-NULLABLE-ATTRIBUTE",
-                                "A mandatory view attribute cannot use an optional join basis",
-                                Some(self.expressions[value.0 as usize].span.clone()),
-                            );
-                            return None;
-                        }
                         self.value_fits(owner, value, ty, mandatory, AssignmentContext::Attribute)
                             .map(|fits| (value, fits))
                     });
