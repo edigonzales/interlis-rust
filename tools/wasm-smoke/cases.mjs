@@ -83,7 +83,7 @@ export const syntaxCases = [
 export function verifySyntax(report, text, status, code) {
   if(report.status!==status || report.fullValidation!==false || (status==='checked_subset') !== (report.model!==null)) throw new Error('Unexpected syntax contract: '+JSON.stringify(report));
   if(code && !report.diagnostics.some(d=>d.code===code)) throw new Error('Missing actual syntax diagnostic');
-  if(status==='checked_subset' && (report.model.models.length!==2 || report.diagnostics.length!==0)) throw new Error('Expected both checked models');
+  if(status==='checked_subset' && (report.model.models.length!==(text===population ? 1 : 2) || report.diagnostics.length!==0)) throw new Error('Expected checked models');
   if(text===syntaxDocument) {
     const declaration = name => report.model.declarations.find(d => d.qualifiedName === name);
     const angle = declaration('A.Angle').effectiveType;

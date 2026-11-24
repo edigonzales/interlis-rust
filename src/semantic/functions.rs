@@ -104,7 +104,7 @@ impl Analyzer<'_, '_> {
                     let ty = declaration.type_id?;
                     let mandatory = declaration.mandatory() == Some(true);
                     let at = self.expressions[argument.0 as usize].span.clone();
-                    match self.argument_fits(argument, ty, mandatory) {
+                    match self.argument_fits(owner, argument, ty, mandatory) {
                         Ok(Some(true)) => {}
                         Ok(Some(false)) => {
                             self.diagnostics.push_related(
@@ -130,7 +130,9 @@ impl Analyzer<'_, '_> {
                 }
                 self.symbols[target].declaration.type_id?
             }
-            BoundName::Predefined(name, _) => self.bind_predefined_call(name, arguments[0])?,
+            BoundName::Predefined(name, _) => {
+                self.bind_predefined_call(owner, name, arguments[0])?
+            }
         };
         let reference = self.bound_reference(owner, function, target)?;
         Some((
@@ -174,18 +176,24 @@ impl Analyzer<'_, '_> {
         Some(target)
     }
 
-    fn bind_predefined_call(&mut self, name: &str, argument: ExpressionId) -> Option<usize> {
+    fn bind_predefined_call(
+        &mut self,
+        owner: usize,
+        name: &str,
+        argument: ExpressionId,
+    ) -> Option<usize> {
         let at = self.expressions[argument.0 as usize].span.clone();
         if name == "elementCount" {
             let value = &self.expressions[argument.0 as usize];
             if value.value_type != ExpressionType::Undefined
-                && !value
-                    .type_id
-                    .is_some_and(|ty| matches!(self.types[ty], TypeInfo::Collection(_)))
+                && !value.type_id.is_some_and(|ty| {
+                    matches!(&self.types[ty], TypeInfo::Collection(collection)
+                        if matches!(self.types[collection.element], TypeInfo::Structure(_)))
+                })
             {
                 self.diagnostics.push(
                     "ILI-FUNCTION-ARGUMENT",
-                    "elementCount expects a BAG or LIST",
+                    "elementCount expects a BAG or LIST of structures",
                     Some(at),
                 );
                 return None;
@@ -206,7 +214,7 @@ impl Analyzer<'_, '_> {
         };
         let formal = self.types.len();
         self.types.push(allowed);
-        match self.argument_fits(argument, formal, false) {
+        match self.argument_fits(owner, argument, formal, false) {
             Ok(Some(true)) => {}
             Ok(Some(false)) => {
                 self.diagnostics.push(
@@ -246,6 +254,7 @@ impl Analyzer<'_, '_> {
 
     fn argument_fits(
         &mut self,
+        owner: usize,
         argument: ExpressionId,
         formal: usize,
         mandatory: bool,
@@ -282,6 +291,15 @@ impl Analyzer<'_, '_> {
                 .map(|link| self.names[link.target_name()])
                 .collect();
             let at = actual.span.clone();
+            if matches!(actual.kind, BoundExpressionKind::Path { .. })
+                && let Some(topic) = self.containing_topic(owner)
+            {
+                for id in &mut source_ids {
+                    *id = self
+                        .contextual_path_scope(topic, *id, &at)
+                        .ok_or(NumberError::Work)?;
+                }
+            }
             return self
                 .targets_specialize(&source_ids, &target_ids, &at)
                 .map(Some)

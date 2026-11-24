@@ -14,6 +14,7 @@ use std::cmp::Ordering;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum PathContext {
     Object,
+    RoleSet,
     UniquePrefix(LanguageVersion),
 }
 
@@ -53,6 +54,7 @@ impl Analyzer<'_, '_> {
         let mut steps = Vec::with_capacity(elements.len());
         let mut scope = owner;
         let topic = self.containing_topic(owner);
+        let mut plural_origin = None;
         for (position, element) in elements.iter().enumerate() {
             let PathElement::Name { name, selector, .. } = element else {
                 self.unsupported_expression(&path.span);
@@ -117,13 +119,41 @@ impl Analyzer<'_, '_> {
                 selection_span,
             });
             if position + 1 == elements.len() {
+                let value = if let Some(origin) = plural_origin {
+                    match &mut self.types[value] {
+                        TypeInfo::ObjectSelection(selection) => {
+                            selection.plural = true;
+                            value
+                        }
+                        TypeInfo::Reference(reference) => {
+                            let target = reference.target.clone();
+                            self.object_selection_type(true, target)
+                        }
+                        _ => {
+                            return self.path_error(
+                                "ILI-PATH-MULTIPLICITY",
+                                "A path through multiple related objects must select objects",
+                                &origin,
+                            );
+                        }
+                    }
+                } else {
+                    value
+                };
                 return Some((
                     BoundExpressionKind::Path { steps },
                     scalar_type(&self.types[value]),
                     Some(value),
                 ));
             }
-            scope = self.path_scope(value, topic, PathContext::Object, &name.span)?;
+            let context = if matches!(&self.types[value], TypeInfo::ObjectSelection(selection) if selection.plural)
+            {
+                plural_origin.get_or_insert_with(|| name.span.clone());
+                PathContext::RoleSet
+            } else {
+                PathContext::Object
+            };
+            scope = self.path_scope(value, topic, context, &name.span)?;
         }
         unreachable!("a parsed path contains at least one step")
     }
@@ -345,7 +375,7 @@ impl Analyzer<'_, '_> {
                 self.path_targets(object_targets(&reference.target).iter())
             }
             TypeInfo::ObjectSelection(selection) => {
-                if selection.plural {
+                if selection.plural && context != PathContext::RoleSet {
                     return self.path_error(
                         "ILI-PATH-MULTIPLICITY",
                         "A path through a role requires a single related object",
@@ -412,7 +442,12 @@ impl Analyzer<'_, '_> {
             .collect()
     }
 
-    fn contextual_path_scope(&mut self, topic: usize, root: usize, at: &Span) -> Option<usize> {
+    pub(super) fn contextual_path_scope(
+        &mut self,
+        topic: usize,
+        root: usize,
+        at: &Span,
+    ) -> Option<usize> {
         let Some(base_topic) = self.containing_topic(root) else {
             return Some(root);
         };

@@ -4422,6 +4422,52 @@ fn set_conditions_check_scope_edition_and_all_candidate_object_types() {
         Status::CheckedSubset,
         None,
     );
+    outcome(
+        single(
+            "TOPIC T=CLASS Parent=children:LIST OF TEXT*5;
+                MANDATORY CONSTRAINT INTERLIS.elementCount(children)>0;
+             END Parent; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ARGUMENT"),
+    );
+}
+
+#[test]
+fn object_formals_use_contextual_reference_targets_and_role_chains_keep_multiplicity() {
+    outcome(
+        single(
+            "FUNCTION accepts(value:OBJECT OF M.Child.Item):BOOLEAN;
+             TOPIC Parent=OID AS INTERLIS.I32OID;
+               CLASS Item=END Item;
+               STRUCTURE Wrapper=pointer:REFERENCE TO Item; END Wrapper;
+             END Parent;
+             TOPIC Child EXTENDS Parent=
+               CLASS Item (EXTENDED)=extra:BOOLEAN; END Item;
+               CLASS Tester=wrap:Wrapper; MANDATORY CONSTRAINT accepts(wrap->pointer); END Tester;
+             END Child;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let report = outcome(
+        single(
+            "TOPIC T=CLASS A=END A; CLASS B=END B; CLASS C=END C;
+               ASSOCIATION AB=origin -- {1} A; bs -- {0..*} B; END AB;
+               ASSOCIATION BC=origin -- {1} B; cs -- {0..*} C; END BC;
+               CONSTRAINTS OF A=SET CONSTRAINT WHERE INTERLIS.objectCount(bs->cs)>0:
+                 INTERLIS.objectCount(ALL)>0; END;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let expressions = report.graph().unwrap().expressions();
+    assert!(expressions.iter().any(|expression| {
+        matches!(&expression.kind, interlis::BoundExpressionKind::Path { steps }
+            if steps.len() == 2 && steps[1].reference.target_name() == "M.T.BC.cs")
+            && expression.value_type == interlis::ExpressionType::ObjectSet
+    }));
 }
 
 #[test]
