@@ -3237,6 +3237,104 @@ fn invalid_model_header_values_are_rejected_at_the_original_literal() {
 }
 
 #[test]
+fn formatted_temporal_ranges_bind_domains_and_keep_exact_written_bounds() {
+    let report = outcome(
+        single(
+            r#"DOMAIN Calendar = DATE;
+           Years = FORMAT Calendar "2010-02-31".."2030-01-02";
+           Narrow EXTENDS Years = "2015-01-01".."2025-12-31";
+           Clock = FORMAT INTERLIS.XMLTime "00:00:00.000".."23:59:59.999";
+           Stamp EXTENDS INTERLIS.XMLDateTime = "2020-01-01T00:00:00.000".."2020-01-02T12:30:00.001";
+           TOPIC T = CLASS Appointment = time : Clock; starts : Stamp; END Appointment; END T;"#,
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let Some(TypeInfo::TemporalRange(narrow)) = graph.effective_type("M.Narrow") else {
+        panic!("expected a formatted date range");
+    };
+    assert_eq!(narrow.base.target_name(), "M.Years");
+    assert_eq!(narrow.lower.components, [2015, 1, 1]);
+    assert_eq!(narrow.upper.components, [2025, 12, 31]);
+    assert_eq!(narrow.upper.original, "2025-12-31");
+    let Some(TypeInfo::TemporalRange(stamp)) = graph.effective_type("M.T.Appointment.starts")
+    else {
+        panic!("expected a formatted timestamp range");
+    };
+    assert_eq!(stamp.kind, TemporalKind::DateTime);
+    assert_eq!(stamp.upper.components, [2020, 1, 2, 12, 30, 0, 1]);
+    let location = report
+        .sources()
+        .location(stamp.upper.source_span())
+        .unwrap();
+    let source = report.sources().files()[0].text();
+    assert_eq!(
+        &source[location.start_byte as usize..location.end_byte as usize],
+        "\"2020-01-02T12:30:00.001\""
+    );
+}
+
+#[test]
+fn formatted_temporal_ranges_check_edition_component_precision_and_inheritance() {
+    for (body, code) in [
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLDate "2010-1-1".."2020-12-31";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLDate "2010-01-32".."2020-12-31";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLTime "10:00:00.00".."20:00:00.000";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLTime "10:00:00.010".."10:00:00.001";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.BOOLEAN "1".."2";"#,
+            "ILI-FORMAT-BASE",
+        ),
+        (r#"DOMAIN D="1".."2";"#, "ILI-FORMAT-BASE"),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLDate "2010-01-01".."2020-12-31";
+                 Wide EXTENDS D="2009-01-01".."2020-12-31";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+    ] {
+        outcome(single(body), Status::Rejected, Some(code));
+    }
+    let report = outcome(
+        request(vec![
+            (
+                "legacy",
+                r#"INTERLIS 2.3; MODEL Legacy AT "x" VERSION "1" =
+            DOMAIN Calendar EXTENDS INTERLIS.XMLDate = "1900-1-1".."2050-12-31"; END Legacy."#
+                    .into(),
+            ),
+            (
+                "consumer",
+                r#"INTERLIS 2.4; MODEL Consumer AT "x" VERSION "1" =
+             IMPORTS Legacy; DOMAIN Alias EXTENDS Legacy.Calendar=MANDATORY;
+             Narrow=FORMAT Alias "2010-1-1".."2020-12-31"; END Consumer."#
+                    .into(),
+            ),
+        ]),
+        Status::CheckedSubset,
+        None,
+    );
+    let Some(TypeInfo::TemporalRange(narrow)) =
+        report.graph().unwrap().effective_type("Consumer.Narrow")
+    else {
+        panic!("expected a bound imported format");
+    };
+    assert_eq!(narrow.language, interlis::LanguageVersion::V23);
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;

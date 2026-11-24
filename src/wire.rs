@@ -509,7 +509,7 @@ impl Serialize for DecimalInfo {
     }
 }
 struct TypeOutput<'a>(&'a TypeInfo, &'a ModelGraph, &'a SourceSet);
-impl Serialize for TypeOutput<'_> {
+impl<'report> Serialize for TypeOutput<'report> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -522,6 +522,13 @@ impl Serialize for TypeOutput<'_> {
             reference_system: Option<&'a crate::DomainReferenceSystem>,
             circular: bool,
             direction: Option<crate::NumericDirection>,
+        }
+        #[derive(Serialize)]
+        struct TemporalBound<'a> {
+            original: &'a str,
+            components: &'a [u16],
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
         }
         impl<'a> From<&'a crate::NumericRange> for Range<'a> {
             fn from(range: &'a crate::NumericRange) -> Self {
@@ -557,6 +564,13 @@ impl Serialize for TypeOutput<'_> {
             },
             Temporal {
                 format: crate::TemporalKind,
+            },
+            TemporalRange {
+                format: crate::TemporalKind,
+                language_version: crate::LanguageVersion,
+                base: &'a Reference<'a>,
+                lower: &'a TemporalBound<'a>,
+                upper: &'a TemporalBound<'a>,
             },
             Blackbox {
                 encoding: crate::BlackboxKind,
@@ -630,6 +644,21 @@ impl Serialize for TypeOutput<'_> {
             }
             .serialize(serializer),
             TypeInfo::Temporal(format) => Type::Temporal { format: *format }.serialize(serializer),
+            TypeInfo::TemporalRange(range) => {
+                let bound = |bound: &'report crate::TemporalBound| TemporalBound {
+                    original: &bound.original,
+                    components: &bound.components,
+                    location: self.2.location(bound.source_span()),
+                };
+                Type::TemporalRange {
+                    format: range.kind,
+                    language_version: range.language,
+                    base: &project_reference(&range.base, self.2),
+                    lower: &bound(&range.lower),
+                    upper: &bound(&range.upper),
+                }
+                .serialize(serializer)
+            }
             TypeInfo::Blackbox(encoding) => Type::Blackbox {
                 encoding: *encoding,
             }

@@ -33,7 +33,7 @@ export function verify(report, expected = 'checked_subset') {
 }
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
-const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
+const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
 const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
@@ -87,6 +87,8 @@ export function verifySyntax(report, text, status, code) {
     const angle = declaration('A.Angle').effectiveType;
     const oid = declaration('B.T.C').oidRules.object;
     if (!angle.circular || angle.unit.targetName !== 'INTERLIS.rad' || oid.domain.targetName !== 'INTERLIS.I32OID') throw new Error('Lost a bound unit or inherited OID rule');
+    const calendar = declaration('A.Calendar').effectiveType;
+    if (calendar.kind !== 'temporal_range' || calendar.base.targetName !== 'INTERLIS.XMLDate' || calendar.lower.components.join('-') !== '2005-2-3') throw new Error('Lost the bound date interval');
     const model = report.model.models[1];
     if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8' || model.effectiveXmlNamespace !== 'http://www.interlis.ch/xtf/2.4/B') throw new Error('Lost model options');
   }

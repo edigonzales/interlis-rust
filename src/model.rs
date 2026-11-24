@@ -169,6 +169,7 @@ pub enum TypeInfo {
     Boolean,
     Alignment(AlignmentKind),
     Temporal(TemporalKind),
+    TemporalRange(TemporalRange),
     Blackbox(BlackboxKind),
     Enumeration {
         values: Enumeration,
@@ -247,6 +248,30 @@ pub enum ClassValueKind {
 pub struct ClassValueType {
     pub kind: ClassValueKind,
     pub restrictions: Vec<TypeReference>,
+}
+
+#[derive(Debug)]
+pub struct TemporalRange {
+    pub kind: TemporalKind,
+    pub language: LanguageVersion,
+    pub base: TypeReference,
+    pub lower: TemporalBound,
+    pub upper: TemporalBound,
+}
+
+#[derive(Debug)]
+pub struct TemporalBound {
+    pub original: String,
+    /// Date fields are year, month, day. Time fields are hour, minute,
+    /// second, millisecond. Date-time uses both groups in that order.
+    pub components: Vec<u16>,
+    pub(crate) span: Span,
+}
+
+impl TemporalBound {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
 }
 
 #[derive(Debug, Serialize)]

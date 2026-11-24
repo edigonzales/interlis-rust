@@ -1,6 +1,7 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
-    collections::compare_count, names::predefined_viewable_base, units::unit_extends,
+    collections::compare_count, names::predefined_viewable_base, temporal::temporal_specializes,
+    units::unit_extends,
 };
 use crate::{
     AxisRotation, CollectionKind, CoordinateType, DecimalInfo, LanguageVersion, Limits,
@@ -165,7 +166,11 @@ impl Analyzer<'_, '_> {
         base: Effective,
         syntax: &TypeSyntax,
     ) -> Option<Effective> {
-        let mut own = self.concrete_type(owner, syntax)?;
+        let mut own = if matches!(syntax, TypeSyntax::Formatted { .. }) {
+            self.temporal_format(owner, syntax, Some(base), None)?
+        } else {
+            self.concrete_type(owner, syntax)?
+        };
         if self.symbols[owner].declaration.kind == super::Kind::Attribute
             && !self.attribute_preserves_mandatory(owner, base, own.mandatory, syntax.span())
         {
@@ -247,6 +252,23 @@ impl Analyzer<'_, '_> {
                 owner,
                 "ILI-CLASS-VALUE-EXTENSION",
                 "The class or structure value must specialize the inherited kind and restrictions",
+                leaf.span(),
+            );
+            return None;
+        }
+        if matches!(self.types[own_id], TypeInfo::TemporalRange(_))
+            || matches!(self.types[base_id], TypeInfo::TemporalRange(_))
+        {
+            if matches!(leaf, TypeSyntax::Named(_)) {
+                self.check_nominal_domain(owner, leaf.span())?;
+            }
+            if temporal_specializes(&self.types[own_id], &self.types[base_id]) {
+                return Some(own);
+            }
+            self.report_type_override(
+                owner,
+                "ILI-FORMAT-EXTENSION",
+                "A formatted extension must preserve or narrow its inherited layout and bounds",
                 leaf.span(),
             );
             return None;

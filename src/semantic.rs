@@ -11,6 +11,7 @@ mod object_references;
 mod oid;
 mod reference_systems;
 mod references;
+mod temporal;
 mod topics;
 mod units;
 mod viewables;
@@ -54,6 +55,10 @@ impl<'a> Symbol<'a> {
     fn domain_dependency(&self) -> Option<&'a QualifiedName> {
         self.base.or(match self.syntax {
             Some(TypeSyntax::EnumTree { domain, .. }) => Some(domain),
+            Some(TypeSyntax::Formatted {
+                base: syntax::FormatBase::Domain(domain),
+                ..
+            }) => Some(domain),
             _ => None,
         })
     }
@@ -147,7 +152,8 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Reference { .. }
         | TypeSyntax::ClassValue { .. } => true,
         TypeSyntax::Geometry(_) => true,
-        TypeSyntax::Formatted { .. } | TypeSyntax::AttributePathValue { .. } => false,
+        TypeSyntax::Formatted { base, .. } => !matches!(base, syntax::FormatBase::Structure { .. }),
+        TypeSyntax::AttributePathValue { .. } => false,
     }
 }
 
@@ -158,6 +164,7 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
             | TypeSyntax::Numeric(_)
             | TypeSyntax::Coordinate(_)
             | TypeSyntax::Geometry(_)
+            | TypeSyntax::Formatted { .. }
             | TypeSyntax::ClassValue { .. }
             | TypeSyntax::Oid { .. }
             | TypeSyntax::Enumeration { .. }
@@ -1574,7 +1581,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::ClassValue {
                 kind, restrictions, ..
             } => TypeInfo::ClassValue(self.class_value_type(owner, *kind, restrictions)?),
-            TypeSyntax::Formatted { .. } | TypeSyntax::AttributePathValue { .. } => {
+            TypeSyntax::Formatted { .. } => {
+                return self.temporal_format(owner, syntax, None, None);
+            }
+            TypeSyntax::AttributePathValue { .. } => {
                 unreachable!("unsupported type semantics checked before indexing")
             }
         };
@@ -1687,6 +1697,22 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     {
                         break self.predefined_type(name, &reference.span);
                     }
+                    Some(Target::Predefined(name @ ("XMLDate" | "XMLTime" | "XMLDateTime"))) => {
+                        if self.symbols[current].base.is_some() {
+                            let declaration = &mut self.symbols[current].declaration;
+                            declaration.base_reference = declaration.reference.take();
+                        }
+                        break self.predefined_type(name, &reference.span);
+                    }
+                    Some(Target::Predefined(_))
+                        if self.symbols[current].base.is_none()
+                            && matches!(
+                                self.symbols[current].syntax,
+                                Some(TypeSyntax::Formatted { .. })
+                            ) =>
+                    {
+                        break self.invalid_format_base(&reference.span);
+                    }
                     Some(Target::Predefined(
                         "BOOLEAN" | "URI" | "NAME" | "INTERLIS_1_DATE" | "HALIGNMENT"
                         | "VALIGNMENT",
@@ -1736,6 +1762,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for id in path.into_iter().rev() {
             if let Some(TypeSyntax::EnumTree { domain, .. }) = self.symbols[id].syntax {
                 result = result.and_then(|value| self.enum_tree_type(id, value, &domain.span));
+            } else if self.symbols[id].base.is_none()
+                && let Some(
+                    ty @ TypeSyntax::Formatted {
+                        base: syntax::FormatBase::Domain(_),
+                        ..
+                    },
+                ) = self.symbols[id].syntax
+            {
+                result = result.and_then(|value| self.temporal_format(id, ty, None, Some(value)));
             } else if self.symbols[id].base.is_some()
                 && let Some(TypeSyntax::Enumeration {
                     enumeration, order, ..
