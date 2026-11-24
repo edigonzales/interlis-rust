@@ -33,7 +33,7 @@ export function verify(report, expected = 'checked_subset') {
 }
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
-const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
+const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=active:BOOLEAN; MANDATORY CONSTRAINT requiresActive: active; END C; END T; END B.';
 const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
@@ -89,6 +89,9 @@ export function verifySyntax(report, text, status, code) {
     if (!angle.circular || angle.unit.targetName !== 'INTERLIS.rad' || oid.domain.targetName !== 'INTERLIS.I32OID') throw new Error('Lost a bound unit or inherited OID rule');
     const calendar = declaration('A.Calendar').effectiveType;
     if (calendar.kind !== 'temporal_range' || calendar.base.targetName !== 'INTERLIS.XMLDate' || calendar.lower.components.join('-') !== '2005-2-3') throw new Error('Lost the bound date interval');
+    const constraint = declaration('B.T.C').constraints[0];
+    const expression = report.model.expressions[constraint.expression];
+    if (constraint.name !== 'requiresActive' || expression.valueType !== 'boolean' || expression.reference.targetName !== 'B.T.C.active') throw new Error('Lost the bound constraint expression');
     const model = report.model.models[1];
     if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8' || model.effectiveXmlNamespace !== 'http://www.interlis.ch/xtf/2.4/B') throw new Error('Lost model options');
   }
@@ -117,13 +120,13 @@ selected.sources.push({name:'unselected',text:'INTERLIS 2.4; MODEL Other AT "x" 
 const missing=pair('2.4');missing.sources.shift();
 const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('Base','Other');
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
-const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','MANDATORY CONSTRAINT count > 0; END Item;');
+const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','UNIQUE count; END Item;');
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};
 const deepEnumeration=pair('2.4');deepEnumeration.sources=[{name:'memory:///deep-type.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN E='+('(a'.repeat(24))+'leaf'+(')'.repeat(24))+'; END M.'}];deepEnumeration.limits={max_nesting:8};
 const flatExpression = Array(20000).fill('a').join(' AND ');
-const expressionRequest = (tail = '', limits) => JSON.stringify({sources:[{name:'memory:///expression-😀.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT '+flatExpression+tail+'; END C; END M.'}],...(limits?{limits}:{})});
+const expressionRequest = (tail = '', limits) => JSON.stringify({sources:[{name:'memory:///expression-😀.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=SET CONSTRAINT '+flatExpression+tail+'; END C; END T; END M.'}],...(limits?{limits}:{})});
 export const semanticCases = [
   [expressionRequest(),'incomplete','ILI-UNSUPPORTED'],
   [expressionRequest(' AND'),'rejected','ILI-SYNTAX'],

@@ -16,14 +16,16 @@ mod wire;
 
 pub use limits::Limits;
 pub use model::{
-    AlignmentKind, AssociationInfo, AttributeSubdivision, AxisRotation, BlackboxKind, Cardinality,
-    ClassValueKind, ClassValueType, CollectionKind, CollectionType, ContextMapping, CoordinateKind,
-    CoordinateType, DecimalInfo, Declaration, DeclarationKind, DomainReferenceSystem, Enumeration,
-    EnumerationElement, EnumerationOrder, FixedTextFormat, GeometryKind, GeometryType,
-    LanguageVersion, LineForm, ModelGraph, ModelInfo, ModelKind, NumericBounds, NumericDirection,
-    NumericRange, ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance,
-    ReferenceType, RoleInfo, RoleStrength, StructureType, TemporalBound, TemporalKind,
-    TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnitConstant, UnitDefinition,
+    AlignmentKind, AssociationInfo, AttributeSubdivision, AxisRotation, BinaryOperator,
+    BlackboxKind, BoundConstraint, BoundExpression, BoundExpressionKind, Cardinality,
+    ClassValueKind, ClassValueType, CollectionKind, CollectionType, ConstraintRule, ContextMapping,
+    CoordinateKind, CoordinateType, DecimalInfo, Declaration, DeclarationKind,
+    DomainReferenceSystem, Enumeration, EnumerationElement, EnumerationOrder, ExpressionId,
+    ExpressionType, FixedTextFormat, GeometryKind, GeometryType, LanguageVersion, LineForm,
+    ModelGraph, ModelInfo, ModelKind, NumericBounds, NumericDirection, NumericRange, ObjectTarget,
+    OidKind, OidRule, OidRules, OidType, OverlapTolerance, PlausibilityDirection, ReferenceType,
+    RoleInfo, RoleStrength, StructureType, TemporalBound, TemporalKind, TemporalRange,
+    TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator, UnitConstant, UnitDefinition,
     UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};

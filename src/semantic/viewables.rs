@@ -59,10 +59,7 @@ impl Analyzer<'_, '_> {
                         return None;
                     };
                     implicit.push((parent, inherited, property.span.clone()));
-                    (
-                        inherited,
-                        self.implicit_base_reference(id, inherited, &name)?,
-                    )
+                    (inherited, self.reference_to_symbol(id, inherited, &name)?)
                 }
                 (None, None) => continue,
             };
@@ -237,7 +234,7 @@ impl Analyzer<'_, '_> {
                         }
                         self.symbols[attribute].base_scope = Some(base);
                         self.symbols[attribute].declaration.base_reference =
-                            Some(self.implicit_base_reference(attribute, base, name)?);
+                            Some(self.reference_to_symbol(attribute, base, name)?);
                         attributes[position] = attribute;
                     }
                     None if extended => {

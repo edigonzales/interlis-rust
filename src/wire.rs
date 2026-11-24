@@ -258,7 +258,9 @@ struct GraphOutput<'a> {
 }
 impl Serialize for GraphOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut out = serializer.serialize_struct("ModelGraph", 2)?;
+        let expressions = self.graph.expressions();
+        let mut out =
+            serializer.serialize_struct("ModelGraph", 2 + usize::from(!expressions.is_empty()))?;
         out.serialize_field("models", &ModelsOutput(self.graph, self.sources))?;
         out.serialize_field(
             "declarations",
@@ -267,7 +269,33 @@ impl Serialize for GraphOutput<'_> {
                 sources: self.sources,
             },
         )?;
+        if !expressions.is_empty() {
+            out.serialize_field("expressions", &ExpressionsOutput(expressions, self.sources))?;
+        }
         out.end()
+    }
+}
+struct ExpressionsOutput<'a>(&'a [crate::BoundExpression], &'a SourceSet);
+impl Serialize for ExpressionsOutput<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Expression<'a> {
+            value_type: crate::ExpressionType,
+            #[serde(flatten)]
+            kind: &'a crate::BoundExpressionKind,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for expression in self.0 {
+            seq.serialize_element(&Expression {
+                value_type: expression.value_type,
+                kind: &expression.kind,
+                location: self.1.location(expression.source_span()),
+            })?;
+        }
+        seq.end()
     }
 }
 struct ModelsOutput<'a>(&'a ModelGraph, &'a SourceSet);
@@ -369,6 +397,15 @@ impl Serialize for DeclarationsOutput<'_> {
             location: Option<SourceLocation>,
         }
         #[derive(Serialize)]
+        struct Constraint<'a> {
+            name: Option<&'a str>,
+            expression: crate::ExpressionId,
+            #[serde(flatten)]
+            rule: &'a crate::ConstraintRule,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
         struct Context<'a> {
             generic: Reference<'a>,
             alternatives: Vec<Reference<'a>>,
@@ -401,6 +438,8 @@ impl Serialize for DeclarationsOutput<'_> {
             effective_attributes: Option<Vec<&'a str>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             subdivision: Option<Subdivision>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            constraints: Vec<Constraint<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             association: Option<Association<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,6 +501,16 @@ impl Serialize for DeclarationsOutput<'_> {
                     continuous: subdivision.continuous,
                     location: self.sources.location(subdivision.source_span()),
                 }),
+                constraints: declaration
+                    .constraints()
+                    .iter()
+                    .map(|constraint| Constraint {
+                        name: constraint.name.as_deref(),
+                        rule: &constraint.rule,
+                        expression: constraint.expression,
+                        location: self.sources.location(constraint.source_span()),
+                    })
+                    .collect(),
                 association: declaration.association().map(|association| Association {
                     cardinality: &association.cardinality,
                     identified: association.identified,

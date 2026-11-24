@@ -1100,11 +1100,8 @@ mod unsupported_regressions {
         for language in ["2.3", "2.4"] {
             for body in [
                 "STRUCTURE S=value:0..100 {Systems.Position}; END S;",
-                r#"DOMAIN Code=TEXT*4 CONSTRAINTS OnlyX: THIS == "X";"#,
+                "TOPIC T=CLASS C=code:TEXT*4; UNIQUE code; END C; END T;",
             ] {
-                if language == "2.3" && body.contains("CONSTRAINTS") {
-                    continue;
-                }
                 let text = format!(
                     "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
                 );

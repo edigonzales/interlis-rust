@@ -292,7 +292,7 @@ fn cli_outcomes_are_json_reports_and_text_diagnostics_have_logical_locations() {
             "rejected",
         ),
         (
-            "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = TOPIC T=CLASS C=MANDATORY CONSTRAINT #true; END C; END T; END A.",
+            "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = TOPIC T=CLASS C=code:TEXT*4; UNIQUE code; END C; END T; END A.",
             4,
             "incomplete",
         ),

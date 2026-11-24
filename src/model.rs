@@ -230,6 +230,129 @@ pub struct AttributeSubdivision {
     pub(crate) span: Span,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ExpressionId(pub(crate) u32);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpressionType {
+    Boolean,
+    Numeric,
+    Text,
+    Undefined,
+    Object,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryOperator {
+    Implies,
+    Or,
+    Add,
+    Subtract,
+    And,
+    Multiply,
+    Divide,
+    Equal,
+    NotEqual,
+    LessEqual,
+    GreaterEqual,
+    Less,
+    Greater,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnaryOperator {
+    Not,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoundExpressionKind {
+    Undefined,
+    Boolean {
+        value: bool,
+    },
+    Number {
+        value: UnitConstant,
+        unit: Option<TypeReference>,
+    },
+    Text {
+        value: String,
+    },
+    This,
+    Attribute {
+        reference: TypeReference,
+    },
+    RuntimeParameter {
+        reference: TypeReference,
+    },
+    Unary {
+        operator: UnaryOperator,
+        operand: ExpressionId,
+    },
+    Binary {
+        operator: BinaryOperator,
+        left: ExpressionId,
+        right: ExpressionId,
+    },
+    Group {
+        expression: ExpressionId,
+    },
+    Defined {
+        expression: ExpressionId,
+    },
+}
+
+#[derive(Debug)]
+pub struct BoundExpression {
+    pub value_type: ExpressionType,
+    pub kind: BoundExpressionKind,
+    pub(crate) span: Span,
+    pub(crate) type_id: Option<usize>,
+}
+
+impl BoundExpression {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlausibilityDirection {
+    AtMost,
+    AtLeast,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConstraintRule {
+    Domain,
+    Mandatory,
+    Plausibility {
+        direction: PlausibilityDirection,
+        percentage: DecimalInfo,
+    },
+}
+
+#[derive(Debug)]
+pub struct BoundConstraint {
+    pub name: Option<String>,
+    pub rule: ConstraintRule,
+    pub expression: ExpressionId,
+    pub(crate) span: Span,
+}
+
+impl BoundConstraint {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
 impl AttributeSubdivision {
     pub fn source_span(&self) -> &Span {
         &self.span
@@ -647,6 +770,7 @@ pub struct Declaration {
     pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
     pub(crate) effective_attributes: Option<Box<[usize]>>,
     pub(crate) subdivision: Option<AttributeSubdivision>,
+    pub(crate) constraints: Option<Box<[BoundConstraint]>>,
     pub(crate) association: Option<Box<AssociationInfo>>,
     pub(crate) role: Option<Box<RoleInfo>>,
     pub(crate) generic: bool,
@@ -693,6 +817,9 @@ impl Declaration {
     pub fn subdivision(&self) -> Option<&AttributeSubdivision> {
         self.subdivision.as_ref()
     }
+    pub fn constraints(&self) -> &[BoundConstraint] {
+        self.constraints.as_deref().unwrap_or_default()
+    }
     pub fn oid_rules(&self) -> Option<&OidRules> {
         self.oids.as_deref()
     }
@@ -731,9 +858,19 @@ pub struct ModelGraph {
     pub(crate) models: Vec<ModelInfo>,
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) types: Vec<TypeInfo>,
+    pub(crate) expressions: Vec<BoundExpression>,
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn expressions(&self) -> &[BoundExpression] {
+        &self.expressions
+    }
+    pub fn expression(&self, id: ExpressionId) -> Option<&BoundExpression> {
+        self.expressions.get(id.0 as usize)
+    }
+    pub fn expression_declared_type(&self, id: ExpressionId) -> Option<&TypeInfo> {
+        self.types.get(self.expression(id)?.type_id?)
+    }
     pub fn models(&self) -> &[ModelInfo] {
         &self.models
     }

@@ -1,9 +1,10 @@
 //! Expressions use document-local indices: flat chains neither walk nor drop a
 //! recursive allocation tree. These are syntax values, without name resolution.
 use super::*;
+pub(crate) use crate::model::{BinaryOperator, PlausibilityDirection, UnaryOperator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ExprId(pub(super) u32);
+pub(crate) struct ExprId(pub(crate) u32);
 #[derive(Debug)]
 #[allow(dead_code)] // Retained syntax; expression semantics are a later phase.
 pub(crate) struct Expression {
@@ -56,26 +57,6 @@ pub(crate) enum LiteralSyntax {
         viewable: Option<QualifiedName>,
         attribute: Name,
     },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnaryOperator {
-    Not,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BinaryOperator {
-    Implies,
-    Or,
-    Add,
-    Subtract,
-    And,
-    Multiply,
-    Divide,
-    Equal,
-    NotEqual,
-    LessEqual,
-    GreaterEqual,
-    Less,
-    Greater,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -171,11 +152,6 @@ pub(crate) enum ConstraintKind {
         filter: Option<ExprId>,
         expression: ExprId,
     },
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlausibilityDirection {
-    AtMost,
-    AtLeast,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -1318,13 +1294,26 @@ mod tests {
         }
     }
     #[test]
-    fn new_expression_semantics_never_claim_subset_success_or_resolve_unknown_functions() {
-        for (v, body) in [
-            ("2.3", "CLASS C=MANDATORY CONSTRAINT Missing(THIS); END C;"),
-            ("2.4", "FUNCTION f():BOOLEAN;"),
-            ("2.4", "CLASS C=a:BOOLEAN := Missing(); END C;"),
-            ("2.4", "DOMAIN D=TEXT*4 CONSTRAINTS check: THIS == \"X\";"),
-            ("2.3", "TOPIC T=CONSTRAINTS OF Missing= END; END T;"),
+    fn expression_semantics_keep_unsupported_constructs_explicit() {
+        use AnalysisStatus::{CheckedSubset, Incomplete};
+        for (v, body, status) in [
+            (
+                "2.3",
+                "TOPIC T=CLASS C=MANDATORY CONSTRAINT Missing(THIS); END C; END T;",
+                Incomplete,
+            ),
+            ("2.4", "FUNCTION f():BOOLEAN;", Incomplete),
+            ("2.4", "CLASS C=a:BOOLEAN := Missing(); END C;", Incomplete),
+            (
+                "2.4",
+                "DOMAIN D=TEXT*4 CONSTRAINTS check: THIS == \"X\";",
+                CheckedSubset,
+            ),
+            (
+                "2.3",
+                "TOPIC T=CONSTRAINTS OF Missing= END; END T;",
+                Incomplete,
+            ),
         ] {
             clean(v, body);
             let report = analyze(CompileRequest {
@@ -1335,8 +1324,8 @@ mod tests {
                 limits: Limits::default(),
             })
             .unwrap();
-            assert_eq!(report.status(), AnalysisStatus::Incomplete, "{body}");
-            assert!(report.graph().is_none());
+            assert_eq!(report.status(), status, "{body}");
+            assert_eq!(report.graph().is_some(), status == CheckedSubset);
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&report.to_json().unwrap()).unwrap()["fullValidation"],
                 false

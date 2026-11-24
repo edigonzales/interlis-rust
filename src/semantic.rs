@@ -4,6 +4,7 @@ mod collections;
 mod contexts;
 mod domains;
 mod enumeration;
+mod expressions;
 mod geometry;
 mod model_header;
 mod names;
@@ -123,6 +124,7 @@ struct Analyzer<'a, 'd> {
     scope_names: BTreeMap<(usize, Namespace, String), usize>,
     states: Vec<State>,
     types: Vec<TypeInfo>,
+    expressions: Vec<crate::BoundExpression>,
     generic_types: BTreeMap<usize, usize>,
 }
 fn supported_numeric(ty: &syntax::NumericSyntax) -> bool {
@@ -227,7 +229,9 @@ fn ensure_supported_semantics(
                         )
                     }) || parameter_section.is_some()
                         || !parameters.is_empty()
-                        || !constraints.is_empty()
+                        || constraints
+                            .iter()
+                            .any(|constraint| !expressions::supported_constraint(constraint))
                     {
                         Some(span)
                     } else {
@@ -264,7 +268,6 @@ fn ensure_supported_semantics(
                     base,
                     ty,
                     mandatory,
-                    constraints,
                     span,
                     ..
                 } => {
@@ -291,7 +294,6 @@ fn ensure_supported_semantics(
                         && properties
                             .iter()
                             .any(|p| p.value == syntax::Property::Abstract)
-                        || !constraints.is_empty()
                         || ty.is_none() && !supported
                     {
                         Some(span)
@@ -307,7 +309,10 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
                 SyntaxDecl::Association(association) => {
                     if association.derived_from.is_some()
-                        || !association.constraints.is_empty()
+                        || association
+                            .constraints
+                            .iter()
+                            .any(|constraint| !expressions::supported_constraint(constraint))
                         || association
                             .roles
                             .iter()
@@ -394,6 +399,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             scope_names: BTreeMap::new(),
             states: vec![],
             types: vec![],
+            expressions: vec![],
             generic_types: BTreeMap::new(),
         }
     }
@@ -501,6 +507,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 topic_dependencies: None,
                 effective_attributes: None,
                 subdivision: None,
+                constraints: None,
                 association: None,
                 role: None,
                 generic: false,
@@ -1169,7 +1176,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             span: name.span.clone(),
         })
     }
-    fn implicit_base_reference(
+    fn reference_to_symbol(
         &mut self,
         owner: usize,
         target: usize,
@@ -1925,6 +1932,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.validate_domain_reference_systems()?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;
+        self.bind_constraints()?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }
@@ -1932,6 +1940,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             models: self.models,
             declarations: self.symbols.into_iter().map(|s| s.declaration).collect(),
             types: self.types,
+            expressions: self.expressions,
             names: self.names,
         })
     }

@@ -288,7 +288,7 @@ impl Analyzer<'_, '_> {
             }
             self.symbols[role].base_scope = Some(base_id);
             self.symbols[role].declaration.base_reference =
-                Some(self.implicit_base_reference(role, base_id, &declaration.name)?);
+                Some(self.reference_to_symbol(role, base_id, &declaration.name)?);
         }
         self.symbols[role].declaration.role = Some(Box::new(RoleInfo {
             strength,

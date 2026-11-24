@@ -736,7 +736,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     );
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
-        "TOPIC T=CLASS C=MANDATORY CONSTRAINT x == 1; END C; END T;",
+        "TOPIC T=CLASS C=x:0..10; UNIQUE x; END C; END T;",
         "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -3518,6 +3518,94 @@ fn equivalent_unit_factors_cancel_before_large_products_are_evaluated() {
             CONTINUOUS SUBDIVISION fine:0..0 CIRCULAR [Second21]; END Clock;",
     );
     outcome(single(&body), Status::CheckedSubset, None);
+}
+
+#[test]
+fn scalar_constraints_bind_inherited_attributes_and_domain_values() {
+    use interlis::{BinaryOperator, BoundExpressionKind, ConstraintRule, ExpressionType};
+    let report = outcome(
+        single(
+            "DOMAIN Count=0..100 CONSTRAINTS nonnegative: THIS >= 0;
+             TOPIC T=
+                CLASS Base=count:Count; flag:BOOLEAN; label:TEXT*20; END Base;
+                CLASS Child EXTENDS Base =
+                    MANDATORY CONSTRAINT condition: flag AND (THIS->count >= 2);
+                    CONSTRAINT completeness: >= 90.5 % DEFINED(label);
+                END Child;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let domain = &graph.declaration("M.Count").unwrap().constraints()[0];
+    assert!(matches!(domain.rule, ConstraintRule::Domain));
+    assert_eq!(
+        graph.expression(domain.expression).unwrap().value_type,
+        ExpressionType::Boolean
+    );
+    let constraints = graph.declaration("M.T.Child").unwrap().constraints();
+    assert_eq!(constraints[0].name.as_deref(), Some("condition"));
+    let lhs = match graph.expression(constraints[0].expression).unwrap().kind {
+        BoundExpressionKind::Binary {
+            operator: BinaryOperator::And,
+            left,
+            ..
+        } => left,
+        _ => panic!("expected a Boolean conjunction"),
+    };
+    let lhs = graph.expression(lhs).unwrap();
+    let BoundExpressionKind::Attribute { reference } = &lhs.kind else {
+        panic!("expected an inherited attribute");
+    };
+    assert_eq!(reference.target_name(), "M.T.Base.flag");
+    let location = report.sources().location(lhs.source_span()).unwrap();
+    let original = report.sources().files()[0].text();
+    assert_eq!(
+        &original[location.start_byte as usize..location.end_byte as usize],
+        "flag"
+    );
+    let ConstraintRule::Plausibility { ref percentage, .. } = constraints[1].rule else {
+        panic!("expected a plausibility constraint");
+    };
+    assert_eq!(percentage.original(), "90.5");
+}
+
+#[test]
+fn scalar_constraints_reject_wrong_operands_and_missing_attribute_names() {
+    for (constraint, code) in [
+        ("MANDATORY CONSTRAINT count;", "ILI-CONSTRAINT-BOOLEAN"),
+        (
+            "MANDATORY CONSTRAINT count AND flag;",
+            "ILI-EXPRESSION-OPERANDS",
+        ),
+        (
+            "MANDATORY CONSTRAINT label < \"other\";",
+            "ILI-EXPRESSION-OPERANDS",
+        ),
+        (
+            "MANDATORY CONSTRAINT count == flag;",
+            "ILI-EXPRESSION-OPERANDS",
+        ),
+        ("MANDATORY CONSTRAINT missing;", "ILI-PATH-NAME"),
+        ("CONSTRAINT >= 100.1% flag;", "ILI-CONSTRAINT-PERCENTAGE"),
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC T=CLASS C=count:0..10; flag:BOOLEAN; label:TEXT*4; {constraint} END C; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS C=x:0..100 [INTERLIS.m]; y:0..100 [INTERLIS.s]; flag:BOOLEAN;
+            MANDATORY CONSTRAINT x < y AND flag >= #false; END C; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
 }
 
 #[test]
