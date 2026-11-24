@@ -143,7 +143,6 @@ struct Analyzer<'a, 'd> {
     enum_bases: BTreeMap<usize, usize>,
     temporal_languages: BTreeMap<usize, crate::LanguageVersion>,
     constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
-    role_accesses: BTreeMap<(usize, String), usize>,
     generic_types: BTreeMap<usize, usize>,
 }
 fn supported_type(ty: &TypeSyntax) -> bool {
@@ -437,7 +436,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             enum_bases: BTreeMap::new(),
             temporal_languages: BTreeMap::new(),
             constraint_blocks: vec![],
-            role_accesses: BTreeMap::new(),
             generic_types: BTreeMap::new(),
         }
     }

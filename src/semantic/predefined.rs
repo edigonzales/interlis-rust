@@ -215,6 +215,7 @@ impl Analyzer<'_, '_> {
                                 reference,
                                 selection: None,
                                 selection_span: None,
+                                association_access: None,
                             }],
                         },
                         ExpressionType::Text,

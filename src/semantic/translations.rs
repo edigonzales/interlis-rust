@@ -724,6 +724,25 @@ impl Comparison<'_> {
                         {
                             return Ok(Some(false));
                         }
+                        match (&a.association_access, &b.association_access) {
+                            (Some(a), Some(b))
+                                if a.association_object == b.association_object
+                                    && a.cardinality == b.cardinality
+                                    && self.reference(
+                                        Some(&a.association),
+                                        Some(&b.association),
+                                    )?
+                                    && self.reference(
+                                        Some(&a.source_role),
+                                        Some(&b.source_role),
+                                    )?
+                                    && self.reference(
+                                        a.target_role.as_ref(),
+                                        b.target_role.as_ref(),
+                                    )? => {}
+                            (None, None) => {}
+                            _ => return Ok(Some(false)),
+                        }
                     }
                     true
                 }

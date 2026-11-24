@@ -1,5 +1,6 @@
 use super::{
     Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, TypeInfo, TypeSyntax,
+    associations::AssociationAccess,
     collections::{compare_count, structure_targets},
     domains::scalar_extension,
     expressions::{scalar_type, underlying_expression},
@@ -7,9 +8,9 @@ use super::{
     object_references::object_targets,
 };
 use crate::{
-    AttributePathOwner, AttributePathType, BoundExpressionKind, BoundPathStep, CollectionKind,
-    CoordinateKind, ExpressionId, ExpressionType, LanguageVersion, ObjectSelection, PathSelection,
-    Span, TypeReference,
+    AssociationPathStep, AttributePathOwner, AttributePathType, BoundExpressionKind, BoundPathStep,
+    CollectionKind, CoordinateKind, ExpressionId, ExpressionType, LanguageVersion, ObjectSelection,
+    PathSelection, Span, TypeReference,
     model::AttributeRestriction,
     syntax::{AttributePathOf, ObjectPath, PathElement, PathSelector, SpecialPath, TypeUseSyntax},
 };
@@ -618,6 +619,7 @@ impl Analyzer<'_, '_> {
                         reference,
                         selection: None,
                         selection_span: None,
+                        association_access: None,
                     });
                     return Some((
                         BoundExpressionKind::Path { steps },
@@ -629,18 +631,20 @@ impl Analyzer<'_, '_> {
                     reference,
                     selection: None,
                     selection_span: None,
+                    association_access: None,
                 });
                 continue;
             }
             let aggregate;
-            let (name, selector) = match element {
-                PathElement::Name { name, selector, .. } => (name, selector.as_ref()),
+            let (name, selector, association_object) = match element {
+                PathElement::Name { name, selector, .. } => (name, selector.as_ref(), false),
+                PathElement::AssociationAccess { name, .. } => (name, None, true),
                 PathElement::Special(special) if special.value == SpecialPath::Aggregates => {
                     aggregate = Name {
                         value: "AGGREGATES".into(),
                         span: special.span.clone(),
                     };
-                    (&aggregate, None)
+                    (&aggregate, None, false)
                 }
                 PathElement::Special(special)
                     if matches!(special.value, SpecialPath::ThisArea | SpecialPath::ThatArea) =>
@@ -656,100 +660,159 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
             };
-            if let Some(PathSelector::Association(association)) = selector {
-                self.unsupported_expression(&association.span);
-                return None;
-            }
-            let member =
-                match self.visible_name(
+            let qualifier = match selector {
+                Some(PathSelector::Association(name)) => Some(name),
+                _ => None,
+            };
+            let direct = !association_object && qualifier.is_none();
+            let value_selector = selector.filter(|_| qualifier.is_none());
+            let mut member = if direct {
+                self.visible_name(
                     scope,
                     &name.value,
                     Some(&[Kind::Attribute, Kind::ViewBase]),
                     &name.span,
-                ) {
-                    Ok(Some(member)) => member,
-                    Err(LookupError::Limit) => return None,
-                    _ => {
-                        if position == 0
-                            && let Some(view) = self.symbols[scope].declaration.view()
-                            && view.formation == crate::ViewFormation::Projection
-                        {
-                            let base = view.bases[0];
-                            scope = self.names[self.symbols[base]
-                                .declaration
-                                .type_reference()?
-                                .target_name()];
-                            steps.push(BoundPathStep {
-                                reference: self.reference_to_symbol(owner, base, name)?,
-                                selection: None,
-                                selection_span: None,
-                            });
-                        }
-                        match self.path_role(
-                            owner,
-                            scope,
-                            name,
-                            position == 0 && elements.len() == path.elements.len(),
-                        ) {
-                            Ok(Some(role)) => role,
-                            Err(LookupError::Limit) => return None,
-                            Err(LookupError::Ambiguous(candidates)) => {
-                                self.diagnostics.push_related(
-                                "ILI-PATH-ROLE-AMBIGUOUS",
-                                "The role can be reached through more than one association access",
-                                Some(name.span.clone()),
-                                candidates.into_iter().map(|candidate| crate::RelatedLocation {
-                                    span: self.symbols[candidate].name_span.clone(),
-                                    message: "Candidate role access".into(),
-                                }).collect(),
-                            );
-                                return None;
-                            }
-                            _ => {
-                                return self.path_error(
-                                    "ILI-PATH-NAME",
-                                    "The attribute or role is absent from this object context",
-                                    &name.span,
-                                );
-                            }
-                        }
-                    }
-                };
-            let decl = &self.symbols[member].declaration;
-            if self.symbols[owner].declaration.kind == Kind::View
-                && !self.symbols[owner].declaration.is_abstract()
-                && decl.is_abstract()
-            {
-                return self.path_error(
-                    "ILI-VIEW-ABSTRACT-ATTRIBUTE",
-                    "A concrete view cannot access an abstract basis member",
-                    &name.span,
-                );
-            }
-            let member_type = if decl.kind == Kind::Role {
-                self.role_value_type(owner, scope, member, &name.span)?
-            } else if let Some(ty) = decl.type_id {
-                ty
+                )
+                .ok()?
             } else {
-                if self.symbols[scope].declaration.kind == Kind::View {
-                    self.unsupported_expression(&name.span);
-                }
-                return None;
+                None
             };
-            let reference = self.reference_to_symbol(owner, member, name)?;
-            let (value, selection, selection_span) = match selector {
-                Some(selector) => {
+            if member.is_none()
+                && position == 0
+                && let Some(view) = self.symbols[scope].declaration.view()
+                && view.formation == crate::ViewFormation::Projection
+            {
+                let base = view.bases[0];
+                scope = self.names[self.symbols[base]
+                    .declaration
+                    .type_reference()?
+                    .target_name()];
+                steps.push(BoundPathStep {
+                    reference: self.reference_to_symbol(owner, base, name)?,
+                    selection: None,
+                    selection_span: None,
+                    association_access: None,
+                });
+            }
+            if member.is_none() && direct && value_selector.is_none() {
+                member = self
+                    .visible_name(scope, &name.value, Some(&[Kind::Role]), &name.span)
+                    .ok()?;
+            }
+            let (value, step) = if let Some(member) = member {
+                let decl = &self.symbols[member].declaration;
+                if self.symbols[owner].declaration.kind == Kind::View
+                    && !self.symbols[owner].declaration.is_abstract()
+                    && decl.is_abstract()
+                {
+                    return self.path_error(
+                        "ILI-VIEW-ABSTRACT-ATTRIBUTE",
+                        "A concrete view cannot access an abstract basis member",
+                        &name.span,
+                    );
+                }
+                let member_type = if decl.kind == Kind::Role {
+                    self.role_value_type(owner, scope, member, &name.span)?
+                } else if let Some(ty) = decl.type_id {
+                    ty
+                } else {
+                    if self.symbols[scope].declaration.kind == Kind::View {
+                        self.unsupported_expression(&name.span);
+                    }
+                    return None;
+                };
+                let (value, selection, selection_span) = if let Some(selector) = value_selector {
                     let (value, selection, origin) =
                         self.select_path_value(member_type, selector)?;
                     (value, Some(selection), Some(origin))
+                } else {
+                    (member_type, None, None)
+                };
+                (
+                    value,
+                    BoundPathStep {
+                        reference: self.reference_to_symbol(owner, member, name)?,
+                        selection,
+                        selection_span,
+                        association_access: None,
+                    },
+                )
+            } else if value_selector.is_none() {
+                let first = position == 0 && elements.len() == path.elements.len();
+                let chosen = if let Some(qualifier) = qualifier {
+                    let path = QualifiedName {
+                        segments: vec![Name {
+                            value: qualifier.value.clone(),
+                            span: qualifier.span.clone(),
+                        }],
+                        span: qualifier.span.clone(),
+                    };
+                    let BoundName::Declared(id) = self.expression_name(
+                        owner,
+                        &path,
+                        &[Kind::Association],
+                        "ILI-PATH-ASSOCIATION-QUALIFIER",
+                    )?
+                    else {
+                        return None;
+                    };
+                    Some(id)
+                } else {
+                    None
+                };
+                let mut access = self.association_path_access(
+                    owner,
+                    scope,
+                    name,
+                    first,
+                    chosen.is_some(),
+                    chosen,
+                );
+                if direct && matches!(access, Ok(None)) {
+                    access = self.association_path_access(owner, scope, name, first, true, None);
                 }
-                None => (member_type, None, None),
+                let access = match access {
+                    Ok(Some(access)) => access,
+                    Err(LookupError::Limit) => return None,
+                    Err(LookupError::Deferred) => {
+                        return self.path_error(
+                            "ILI-PATH-ROLE-ORDER",
+                            "The association must be declared before this role access",
+                            &name.span,
+                        );
+                    }
+                    Err(LookupError::Ambiguous(candidates)) => {
+                        self.diagnostics.push_related(
+                            "ILI-PATH-ROLE-AMBIGUOUS",
+                            "The role can be reached through more than one association access",
+                            Some(name.span.clone()),
+                            candidates
+                                .into_iter()
+                                .map(|candidate| crate::RelatedLocation {
+                                    span: self.symbols[candidate].name_span.clone(),
+                                    message: "Candidate role access".into(),
+                                })
+                                .collect(),
+                        );
+                        return None;
+                    }
+                    _ => {
+                        return self.path_error(
+                            "ILI-PATH-NAME",
+                            "The attribute or role is absent from this object context",
+                            &name.span,
+                        );
+                    }
+                };
+                self.bind_association_path_step(owner, name, qualifier, access, association_object)?
+            } else {
+                return self.path_error(
+                    "ILI-PATH-NAME",
+                    "The attribute is absent from this object context",
+                    &name.span,
+                );
             };
-            steps.push(BoundPathStep {
-                reference,
-                selection,
-                selection_span,
-            });
+            steps.push(step);
             if position + 1 == elements.len() {
                 let value = if let Some(origin) = plural_origin {
                     match &mut self.types[value] {
@@ -802,22 +865,61 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn path_role(
+    fn bind_association_path_step(
         &mut self,
         owner: usize,
-        scope: usize,
         name: &Name,
-        first: bool,
-    ) -> Result<Option<usize>, LookupError> {
-        if first {
-            self.visible_role(scope, &name.value, &name.span)
-        } else if let Some(role) =
-            self.visible_name(scope, &name.value, Some(&[Kind::Role]), &name.span)?
-        {
-            Ok(Some(role))
+        qualifier: Option<&Name>,
+        access: AssociationAccess,
+        association_object: bool,
+    ) -> Option<(usize, BoundPathStep)> {
+        let association_object = association_object || access.target.is_none();
+        let cardinality = self.access_cardinality(access, association_object, &name.span)?;
+        let association =
+            self.reference_to_symbol(owner, access.association, qualifier.unwrap_or(name))?;
+        let source_role = self.reference_to_symbol(owner, access.source, name)?;
+        let target_role = if let Some(target) = access.target {
+            Some(self.reference_to_symbol(owner, target, name)?)
         } else {
-            self.following_role(owner, scope, &name.value, &name.span)
-        }
+            None
+        };
+        let plural = cardinality
+            .upper
+            .as_deref()
+            .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater);
+        let type_id = if association_object {
+            self.object_selection_type(
+                plural,
+                crate::ObjectTarget {
+                    target: Some(association.clone()),
+                    restrictions: Vec::new(),
+                },
+            )
+        } else {
+            let target = access.target?;
+            let id = self.role_value_type(owner, access.association, target, &name.span)?;
+            let TypeInfo::ObjectSelection(selection) = &mut self.types[id] else {
+                unreachable!("role has an object selection type");
+            };
+            selection.plural = plural;
+            id
+        };
+        Some((
+            type_id,
+            BoundPathStep {
+                reference: target_role.as_ref().unwrap_or(&source_role).clone(),
+                selection: None,
+                selection_span: None,
+                association_access: Some(Box::new(AssociationPathStep {
+                    association,
+                    source_role,
+                    target_role,
+                    association_object,
+                    cardinality,
+                    type_id,
+                })),
+            },
+        ))
     }
 
     pub(super) fn role_value_type(

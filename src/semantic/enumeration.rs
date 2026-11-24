@@ -185,12 +185,14 @@ impl Analyzer<'_, '_> {
                 return None;
             }
 
+            let source_metadata = self.source_metadata(&item.path[0].span, &last.span, false)?;
             let element = if let Some(index) = existing {
                 let element = &mut siblings.elements[index];
                 if item.children.is_none() {
                     self.enum_duplicate(&last.span, element.span.clone());
                     return None;
                 }
+                element.source_metadata = source_metadata;
                 element
             } else {
                 if siblings.final_subtree {
@@ -205,7 +207,7 @@ impl Analyzer<'_, '_> {
                     name: last.value.clone(),
                     span: last.span.clone(),
                     children: None,
-                    source_metadata: self.source_metadata(&item.path[0].span, &last.span, false)?,
+                    source_metadata,
                 });
                 siblings.elements.last_mut().expect("element just appended")
             };

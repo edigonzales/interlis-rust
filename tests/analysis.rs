@@ -5468,6 +5468,93 @@ fn role_paths_distinguish_link_endpoints_from_collections_of_related_objects() {
 }
 
 #[test]
+fn association_path_access_preserves_the_selected_roles_and_link_multiplicity() {
+    for version in ["2.3", "2.4"] {
+        let model = |roles: &str, constraint: &str| {
+            request(vec![(
+                "roles",
+                format!(
+                    r#"INTERLIS {version}; MODEL M AT "x" VERSION "1" =
+                    TOPIC T=CLASS Owner=END Owner; CLASS Target=END Target; CLASS Other=END Other;
+                    ASSOCIATION Link=
+                        fromOwner -- {{1}} Owner; toTarget -- {{1}} Target; {roles}
+                        ready:BOOLEAN;
+                    END Link;
+                    CONSTRAINTS OF Owner={constraint}; END;
+                    END T; END M."#,
+                ),
+            )])
+        };
+        let report = outcome(
+            model(
+                "",
+                r"MANDATORY CONSTRAINT fromOwner[Link]->ready AND \toTarget->ready",
+            ),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let paths: Vec<_> = graph
+            .expressions()
+            .iter()
+            .filter_map(|expression| match &expression.kind {
+                interlis::BoundExpressionKind::Path { steps } => Some(&steps[0]),
+                _ => None,
+            })
+            .collect();
+        let qualified = paths[0].association_access.as_ref().unwrap();
+        assert_eq!(qualified.association.target_name(), "M.T.Link");
+        assert_eq!(qualified.source_role.target_name(), "M.T.Link.fromOwner");
+        assert!(qualified.target_role.is_none());
+        assert!(qualified.association_object);
+        assert_eq!(qualified.cardinality.upper.as_deref(), Some("1"));
+        let TypeInfo::ObjectSelection(result) = graph.association_path_type(qualified).unwrap()
+        else {
+            panic!("expected an association object");
+        };
+        assert!(!result.plural);
+        let range = report
+            .sources()
+            .location(qualified.association.source_span())
+            .unwrap();
+        assert_eq!(
+            &report.sources().files()[0].text()[range.start_byte as usize..range.end_byte as usize],
+            "Link"
+        );
+        let unqualified = paths[1].association_access.as_ref().unwrap();
+        assert_eq!(
+            unqualified.target_role.as_ref().unwrap().target_name(),
+            "M.T.Link.toTarget"
+        );
+        assert!(unqualified.association_object);
+        outcome(
+            model("", "MANDATORY CONSTRAINT toTarget[Link]->ready"),
+            Status::Rejected,
+            Some("ILI-PATH-NAME"),
+        );
+        outcome(
+            model("", "MANDATORY CONSTRAINT fromOwner[Missing]->ready"),
+            Status::Rejected,
+            Some("ILI-PATH-ASSOCIATION-QUALIFIER"),
+        );
+        let nary = "further -- {1} Other;";
+        outcome(
+            model(nary, "MANDATORY CONSTRAINT fromOwner[Link]->ready"),
+            Status::Rejected,
+            Some("ILI-PATH-MULTIPLICITY"),
+        );
+        outcome(
+            model(
+                nary,
+                r"SET CONSTRAINT WHERE INTERLIS.objectCount(\toTarget) >= 0: INTERLIS.objectCount(ALL) >= 0",
+            ),
+            Status::CheckedSubset,
+            None,
+        );
+    }
+}
+
+#[test]
 fn role_paths_check_declaration_order_multiplicity_and_following_external_access() {
     let base = "TOPIC T=OID AS INTERLIS.I32OID;
         CLASS A=END A; CLASS B=active:BOOLEAN; END B; CLASS C=END C;";
@@ -7013,4 +7100,33 @@ fn source_annotation_errors_and_translated_crs_use_actual_comment_locations() {
             "CRS=EPSG:21781"
         );
     }
+}
+
+#[test]
+fn reopened_enumeration_elements_bind_their_local_annotations() {
+    let declarations = "DOMAIN Shade=(
+        !!@ label=Original; baseOnly=Retained
+        warm(orange));
+        Extended EXTENDS Shade=(
+        !!@ label=Extension; localOnly=New
+        warm(yellow));";
+    let report = outcome(single(declarations), Status::CheckedSubset, None);
+    let graph = report.graph().unwrap();
+    for (domain, label, unique_key) in [
+        ("M.Shade", "Original", "baseOnly"),
+        ("M.Extended", "Extension", "localOnly"),
+    ] {
+        let TypeInfo::Enumeration { values, .. } = graph.effective_type(domain).unwrap() else {
+            panic!("expected an enumeration");
+        };
+        let metadata = values.elements()[0].source_metadata().unwrap();
+        assert_eq!(metadata.attributes.len(), 2);
+        assert_eq!(metadata.attribute("label").unwrap().text, label);
+        assert!(metadata.attribute(unique_key).is_some());
+    }
+    outcome(
+        single(&declarations.replace("localOnly=New", "label=Changed")),
+        Status::Rejected,
+        Some("ILI-METADATA-CONFLICT"),
+    );
 }

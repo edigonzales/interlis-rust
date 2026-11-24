@@ -286,6 +286,18 @@ impl Serialize for ExpressionsOutput<'_> {
             selection: Option<&'a crate::PathSelection>,
             #[serde(skip_serializing_if = "Option::is_none")]
             selection_location: Option<SourceLocation>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            association_access: Option<AssociationAccess<'a>>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct AssociationAccess<'a> {
+            association: Reference<'a>,
+            source_role: Reference<'a>,
+            target_role: Option<Reference<'a>>,
+            association_object: bool,
+            cardinality: &'a crate::Cardinality,
+            effective_type: TypeOutput<'a>,
         }
         #[derive(Serialize)]
         #[serde(untagged)]
@@ -349,6 +361,23 @@ impl Serialize for ExpressionsOutput<'_> {
                                 selection_location: step
                                     .selection_span()
                                     .and_then(|span| self.1.location(span)),
+                                association_access: step.association_access.as_deref().map(
+                                    |access| AssociationAccess {
+                                        association: project_reference(&access.association, self.1),
+                                        source_role: project_reference(&access.source_role, self.1),
+                                        target_role: access
+                                            .target_role
+                                            .as_ref()
+                                            .map(|role| project_reference(role, self.1)),
+                                        association_object: access.association_object,
+                                        cardinality: &access.cardinality,
+                                        effective_type: TypeOutput(
+                                            &self.0.types[access.type_id],
+                                            self.0,
+                                            self.1,
+                                        ),
+                                    },
+                                ),
                             })
                             .collect(),
                     },

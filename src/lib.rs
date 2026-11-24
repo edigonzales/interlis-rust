@@ -16,21 +16,21 @@ mod wire;
 
 pub use limits::Limits;
 pub use model::{
-    AlignmentKind, AssociationInfo, AttributePathOwner, AttributePathType, AttributeSubdivision,
-    AxisRotation, BinaryOperator, BlackboxKind, BoundConstraint, BoundExpression,
-    BoundExpressionKind, BoundPathStep, Cardinality, ClassValueKind, ClassValueType,
-    CollectionKind, CollectionType, ConstraintRule, ContextMapping, CoordinateKind, CoordinateType,
-    DecimalInfo, Declaration, DeclarationKind, DocumentationComment, DomainReferenceSystem,
-    Enumeration, EnumerationElement, EnumerationOrder, ExistenceTarget, ExpressionId,
-    ExpressionType, FixedTextFormat, FormattedBound, FormattedPart, FormattedType, FunctionInfo,
-    GeometryKind, GeometryType, InspectionInfo, LanguageVersion, LineForm, MetaAttribute,
-    MetadataBasketKind, ModelGraph, ModelInfo, ModelKind, NumericBounds, NumericDirection,
-    NumericRange, NumericReferenceSystem, ObjectSelection, ObjectTarget, OidKind, OidRule,
-    OidRules, OidType, OverlapTolerance, PathSelection, PlausibilityDirection, ReferenceType,
-    RoleInfo, RoleStrength, SourceMetadata, StructureType, TemporalBound, TemporalKind,
-    TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator, UnitConstant,
-    UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm, ViewFormation,
-    ViewInfo,
+    AlignmentKind, AssociationInfo, AssociationPathStep, AttributePathOwner, AttributePathType,
+    AttributeSubdivision, AxisRotation, BinaryOperator, BlackboxKind, BoundConstraint,
+    BoundExpression, BoundExpressionKind, BoundPathStep, Cardinality, ClassValueKind,
+    ClassValueType, CollectionKind, CollectionType, ConstraintRule, ContextMapping, CoordinateKind,
+    CoordinateType, DecimalInfo, Declaration, DeclarationKind, DocumentationComment,
+    DomainReferenceSystem, Enumeration, EnumerationElement, EnumerationOrder, ExistenceTarget,
+    ExpressionId, ExpressionType, FixedTextFormat, FormattedBound, FormattedPart, FormattedType,
+    FunctionInfo, GeometryKind, GeometryType, InspectionInfo, LanguageVersion, LineForm,
+    MetaAttribute, MetadataBasketKind, ModelGraph, ModelInfo, ModelKind, NumericBounds,
+    NumericDirection, NumericRange, NumericReferenceSystem, ObjectSelection, ObjectTarget, OidKind,
+    OidRule, OidRules, OidType, OverlapTolerance, PathSelection, PlausibilityDirection,
+    ReferenceType, RoleInfo, RoleStrength, SourceMetadata, StructureType, TemporalBound,
+    TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator,
+    UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
+    ViewFormation, ViewInfo,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

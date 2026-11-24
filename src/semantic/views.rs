@@ -350,6 +350,7 @@ impl Analyzer<'_, '_> {
                 reference: self.reference_to_symbol(owner, attr, name)?,
                 selection: None,
                 selection_span: None,
+                association_access: None,
             });
             parent = scope;
             parent_type = row_type.replace(element);
@@ -845,6 +846,7 @@ impl Analyzer<'_, '_> {
                 reference,
                 selection: None,
                 selection_span: None,
+                association_access: None,
             })
             .collect();
         let expression = self.record_expression(

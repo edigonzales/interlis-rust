@@ -365,6 +365,7 @@ impl Analyzer<'_, '_> {
                         reference,
                         selection: None,
                         selection_span: None,
+                        association_access: None,
                     });
                     prefix_type = Some(ty);
                     scope = self.path_scope(
@@ -390,6 +391,7 @@ impl Analyzer<'_, '_> {
                         reference,
                         selection: None,
                         selection_span: None,
+                        association_access: None,
                     };
                     keys.push(self.record_expression(
                         BoundExpressionKind::Path { steps: vec![step] },

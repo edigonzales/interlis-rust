@@ -13,10 +13,10 @@ use std::{
 };
 
 #[derive(Clone, Copy)]
-struct AssociationAccess {
-    association: usize,
-    source: usize,
-    target: usize,
+pub(super) struct AssociationAccess {
+    pub association: usize,
+    pub source: usize,
+    pub target: Option<usize>,
 }
 
 impl Analyzer<'_, '_> {
@@ -514,43 +514,20 @@ impl Analyzer<'_, '_> {
                 base = self.symbols[owner].base_scope;
             }
         }
-        self.role_accesses = accesses;
         Some(())
     }
 
-    pub(super) fn visible_role(
-        &mut self,
-        mut owner: usize,
-        name: &str,
-        at: &Span,
-    ) -> Result<Option<usize>, super::LookupError> {
-        if let Some(role) = self.visible_name(owner, name, Some(&[Kind::Role]), at)? {
-            return Ok(Some(role));
-        }
-        let mut key = (owner, name.to_owned());
-        loop {
-            if !self.step(1, at) {
-                return Err(super::LookupError::Limit);
-            }
-            if let Some(&role) = self.role_accesses.get(&key) {
-                return Ok(Some(role));
-            }
-            let Some(base) = self.symbols[owner].base_scope else {
-                return Ok(None);
-            };
-            owner = base;
-            key.0 = base;
-        }
-    }
-
-    pub(super) fn following_role(
+    pub(super) fn association_path_access(
         &mut self,
         owner: usize,
         scope: usize,
-        name: &str,
-        at: &Span,
-    ) -> Result<Option<usize>, super::LookupError> {
+        name: &syntax::Name,
+        first: bool,
+        outgoing: bool,
+        qualifier: Option<usize>,
+    ) -> Result<Option<AssociationAccess>, super::LookupError> {
         use super::LookupError;
+        let at = &name.span;
         if !matches!(
             self.symbols[scope].declaration.kind,
             Kind::Class | Kind::Association
@@ -560,6 +537,7 @@ impl Analyzer<'_, '_> {
         let owner_topic = self.containing_topic(owner);
         let object_topic = self.containing_topic(scope);
         let mut candidates = Vec::new();
+        let mut declared_later = false;
         for association in 0..self.symbols.len() {
             if !self.step(1, at) {
                 return Err(LookupError::Limit);
@@ -567,9 +545,7 @@ impl Analyzer<'_, '_> {
             let Some(info) = self.symbols[association].declaration.association() else {
                 continue;
             };
-            if !self.association_precedes_path(association, owner, at) {
-                continue;
-            }
+            let available = self.association_precedes_path(association, owner, at);
             let topic = self.containing_topic(association);
             if topic.is_none()
                 && self.symbols[association].model != self.symbols[owner].model
@@ -584,33 +560,49 @@ impl Analyzer<'_, '_> {
                 continue;
             }
             for &target in &roles {
-                if self.symbols[target].declaration.name != name {
+                if !outgoing && self.symbols[target].declaration.name != name.value {
                     continue;
                 }
                 for &source in &roles {
-                    if source == target {
+                    if outgoing != (source == target)
+                        || outgoing && self.symbols[source].declaration.name != name.value
+                    {
                         continue;
                     }
                     if !self.step(1, at) {
                         return Err(LookupError::Limit);
                     }
-                    let targets = self
-                        .role_target_ids(&self.symbols[source].declaration.role().unwrap().targets);
-                    let mut accepts = targets.is_empty();
+                    let role = self.symbols[source].declaration.role().unwrap();
+                    let external = role.external;
+                    let targets = self.role_target_ids(&role.targets);
+                    let mut accepts = !first && targets.is_empty();
                     for root in targets {
                         if self
                             .specializes_symbol(scope, root, at)
                             .ok_or(LookupError::Limit)?
                         {
-                            accepts = true;
-                            break;
+                            accepts = !first
+                                || !external
+                                    && (self.containing_topic(
+                                        self.symbols[source].declaration.parent.unwrap(),
+                                    ) == self.containing_topic(root)
+                                        || topic == object_topic
+                                            && matches!(self.symbols[scope].ast,
+                                        Some(SyntaxDecl::Container { properties, .. }) if properties.iter()
+                                            .any(|property| property.value == syntax::Property::Extended)));
+                            if accepts {
+                                break;
+                            }
                         }
                     }
-                    if accepts {
+                    if accepts && !available {
+                        declared_later |=
+                            first && qualifier.is_none_or(|qualifier| qualifier == association);
+                    } else if accepts {
                         candidates.push(AssociationAccess {
                             association,
                             source,
-                            target,
+                            target: (!outgoing).then_some(target),
                         });
                     }
                 }
@@ -639,11 +631,76 @@ impl Analyzer<'_, '_> {
                     break;
                 }
             }
-            if !hidden && let Some(previous) = found.replace(*candidate) {
+            if !hidden
+                && qualifier.is_none_or(|qualifier| qualifier == candidate.association)
+                && let Some(previous) = found.replace(*candidate)
+            {
                 return Err(LookupError::Ambiguous([previous.source, candidate.source]));
             }
         }
-        Ok(found.map(|candidate| candidate.target))
+        if found.is_none() && declared_later {
+            return Err(LookupError::Deferred);
+        }
+        Ok(found)
+    }
+
+    pub(super) fn access_cardinality(
+        &mut self,
+        access: AssociationAccess,
+        association_object: bool,
+        at: &Span,
+    ) -> Option<Cardinality> {
+        let roles = &self.symbols[access.association]
+            .declaration
+            .association()?
+            .roles;
+        if roles.len() != 2 {
+            return Some(Cardinality {
+                lower: "0".into(),
+                upper: None,
+            });
+        }
+        let target = access.target.unwrap_or_else(|| {
+            if roles[0] == access.source {
+                roles[1]
+            } else {
+                roles[0]
+            }
+        });
+        let mut cardinality = self.symbols[target].declaration.role()?.cardinality.clone();
+        if !association_object {
+            return Some(cardinality);
+        }
+        let mut current = Some(access.association);
+        while let Some(id) = current {
+            if !self.step(1, at) {
+                return None;
+            }
+            if matches!(self.symbols[id].ast, Some(SyntaxDecl::Association(syntax)) if syntax.cardinality.is_some())
+            {
+                let links = self.symbols[id]
+                    .declaration
+                    .association()?
+                    .cardinality
+                    .clone();
+                let mut multiply = |a: &str, b: &str| {
+                    if !self.step(a.len().saturating_mul(b.len()).max(1), at) {
+                        return None;
+                    }
+                    let a = num_bigint::BigUint::parse_bytes(a.as_bytes(), 10)?;
+                    let b = num_bigint::BigUint::parse_bytes(b.as_bytes(), 10)?;
+                    Some((a * b).to_string())
+                };
+                cardinality.lower = multiply(&cardinality.lower, &links.lower)?;
+                cardinality.upper = match (cardinality.upper, links.upper) {
+                    (Some(a), Some(b)) => Some(multiply(&a, &b)?),
+                    _ => None,
+                };
+                break;
+            }
+            current = self.symbols[id].base_scope;
+        }
+        Some(cardinality)
     }
 
     fn replaces_role_access(&self, access: AssociationAccess) -> bool {

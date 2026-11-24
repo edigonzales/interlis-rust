@@ -406,12 +406,27 @@ pub struct BoundPathStep {
     pub selection: Option<PathSelection>,
     #[serde(skip)]
     pub(crate) selection_span: Option<Span>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub association_access: Option<Box<AssociationPathStep>>,
 }
 
 impl BoundPathStep {
     pub fn selection_span(&self) -> Option<&Span> {
         self.selection_span.as_ref()
     }
+}
+
+/// A path through an association from an object participating in its source role.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociationPathStep {
+    pub association: TypeReference,
+    pub source_role: TypeReference,
+    pub target_role: Option<TypeReference>,
+    pub association_object: bool,
+    pub cardinality: Cardinality,
+    #[serde(skip)]
+    pub(crate) type_id: usize,
 }
 
 #[derive(Debug)]
@@ -1173,6 +1188,9 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn association_path_type(&self, step: &AssociationPathStep) -> Option<&TypeInfo> {
+        self.types.get(step.type_id)
+    }
     pub fn metadata_objects(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
         let &id = self.names.get(name)?;
         self.declarations[id].metadata_basket_kind()?;
