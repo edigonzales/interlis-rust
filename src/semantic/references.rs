@@ -32,7 +32,10 @@ impl Analyzer<'_, '_> {
         let mut restrictions = Vec::with_capacity(sources.len());
         for name in sources {
             match self.lookup_name(owner, &name.segments, &name.span, kinds) {
-                Ok(target) => restrictions.push(self.bound_reference(owner, name, target)?),
+                Ok(target) => {
+                    let target = self.materialized_class_value(owner, target, &name.span)?;
+                    restrictions.push(self.bound_reference(owner, name, target)?);
+                }
                 Err(LookupError::Limit) => return None,
                 Err(LookupError::Deferred) => {
                     self.diagnostics.push(

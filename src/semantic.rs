@@ -10,6 +10,7 @@ mod expressions;
 mod formats;
 mod functions;
 mod geometry;
+mod graphics;
 mod metadata;
 mod model_header;
 mod names;
@@ -347,7 +348,7 @@ fn ensure_supported_semantics(
                             _ => None,
                         })
                 }
-                SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
+                SyntaxDecl::Graphic(_) => None,
                 SyntaxDecl::MetadataBasket(_) => None,
                 SyntaxDecl::RuntimeParameter { type_use, span, .. } => match &type_use.ty {
                     Some(ty) if supported_type(ty) => None,
@@ -555,6 +556,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 predefined: false,
                 metadata_kind: None,
                 source_metadata: None,
+                graphic: None,
+                drawing_rule: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1147,15 +1150,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         None,
                     ) {
+                        self.index_abstract_final(id, &graphic.properties);
                         for rule in &graphic.rules {
-                            self.add(
+                            if let Some(rule_id) = self.add(
                                 Kind::DrawingRule,
                                 &rule.name,
                                 &rule.span,
                                 Some(id),
                                 model,
                                 None,
-                            );
+                            ) {
+                                self.index_abstract_final(rule_id, &rule.properties);
+                            }
                         }
                     }
                 }
@@ -2037,6 +2043,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_association_derivations(&viewables, &expressions)?;
         self.validate_derivations()?;
         self.bind_constraints(&expressions)?;
+        self.bind_graphics(&expressions)?;
         if !self.diagnostics.rejected && !self.diagnostics.incomplete {
             self.bind_translations()?;
         }

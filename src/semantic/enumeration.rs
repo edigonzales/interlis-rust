@@ -470,14 +470,79 @@ impl Analyzer<'_, '_> {
                 }
                 return Some(false);
             }
-            TypeInfo::Boolean => &["false", "true"],
-            TypeInfo::Alignment(AlignmentKind::Horizontal) => &["Left", "Center", "Right"],
-            TypeInfo::Alignment(AlignmentKind::Vertical) => {
-                &["Top", "Cap", "Half", "Base", "Bottom"]
-            }
-            _ => return Some(false),
+            scalar => predefined_enum_values(scalar),
         };
         Some(path.len() == 1 && names.contains(&path[0].as_str()))
+    }
+
+    pub(super) fn ordered_enum_siblings(
+        &mut self,
+        ty: usize,
+        a: &[String],
+        b: &[String],
+        at: &Span,
+    ) -> Option<bool> {
+        let (Some((last_a, prefix_a)), Some((last_b, prefix_b))) = (a.split_last(), b.split_last())
+        else {
+            return Some(false);
+        };
+        if prefix_a != prefix_b {
+            return Some(false);
+        }
+        let base = self.enum_root(ty).0;
+        if let TypeInfo::Enumeration { values, .. } = &self.types[base] {
+            let mut tree = values;
+            for name in prefix_a {
+                self.work
+                    .charge(
+                        u32::try_from(tree.elements.len().saturating_mul(name.len() + 1))
+                            .unwrap_or(u32::MAX),
+                    )
+                    .ok()
+                    .or_else(|| {
+                        self.diagnostics
+                            .limit("Semantic work budget exceeded", Some(at.clone()));
+                        None
+                    })?;
+                tree = tree
+                    .elements
+                    .iter()
+                    .find(|element| element.name == *name)?
+                    .children
+                    .as_ref()?;
+            }
+            let comparisons = tree
+                .elements
+                .len()
+                .saturating_mul(1 + last_a.len() + last_b.len());
+            if self
+                .work
+                .charge(u32::try_from(comparisons).unwrap_or(u32::MAX))
+                .is_err()
+            {
+                self.diagnostics
+                    .limit("Semantic work budget exceeded", Some(at.clone()));
+                return None;
+            }
+            let rank = |name: &str| {
+                tree.elements
+                    .iter()
+                    .position(|element| element.name == name)
+            };
+            return Some(rank(last_a).zip(rank(last_b)).is_some_and(|(a, b)| a <= b));
+        }
+        let names = predefined_enum_values(&self.types[base]);
+        let rank = |name: &str| names.iter().position(|value| *value == name);
+        Some(prefix_a.is_empty() && rank(last_a).zip(rank(last_b)).is_some_and(|(a, b)| a <= b))
+    }
+}
+
+fn predefined_enum_values(ty: &TypeInfo) -> &'static [&'static str] {
+    match ty {
+        TypeInfo::Boolean => &["false", "true"],
+        TypeInfo::Alignment(AlignmentKind::Horizontal) => &["Left", "Center", "Right"],
+        TypeInfo::Alignment(AlignmentKind::Vertical) => &["Top", "Cap", "Half", "Base", "Bottom"],
+        _ => &[],
     }
 }
 

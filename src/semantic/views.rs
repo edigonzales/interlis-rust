@@ -402,9 +402,13 @@ impl Analyzer<'_, '_> {
         source: usize,
         inspection: &InlineInspection,
     ) -> Option<(InspectionInfo, usize)> {
-        let topic = self.containing_topic(owner);
-        let mut scope = source;
-        let mut parent = source;
+        let topic = self.expression_topic(owner);
+        let mut scope = if let Some(topic) = topic {
+            self.contextual_path_scope(topic, source, &inspection.span)?
+        } else {
+            source
+        };
+        let mut parent = scope;
         let mut value = None;
         let mut row_type = None;
         let mut parent_type = None;
@@ -517,11 +521,8 @@ impl Analyzer<'_, '_> {
         let (view, inspected, element_type) = match &expression.inspection {
             InspectionSource::View(name) => {
                 let (reference, id) = self.inspection_source(owner, name, true)?;
-                let inspection = self.symbols[id]
-                    .declaration
-                    .view()
-                    .and_then(|view| view.inspection.as_ref());
-                let Some(inspection) = inspection.cloned() else {
+                let info = self.symbols[id].declaration.view()?;
+                let Some(inspection) = info.inspection.clone() else {
                     self.diagnostics.push(
                         "ILI-INSPECTION-FACTOR-TARGET",
                         "The named view must be an inspection",
@@ -529,7 +530,7 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 };
-                let element_type = self.structure_type_id(Some(inspection.element.clone()));
+                let element_type = self.symbols[*info.bases.first()?].declaration.type_id?;
                 (Some(reference), inspection, element_type)
             }
             InspectionSource::Inline(inspection) => {
@@ -553,7 +554,12 @@ impl Analyzer<'_, '_> {
                     },
                 )
             };
-            if !self.value_fits(
+            if !ty.is_some_and(|ty| {
+                matches!(
+                    self.types[ty],
+                    TypeInfo::ObjectSelection(_) | TypeInfo::Reference(_)
+                )
+            }) || !self.value_fits(
                 owner,
                 restriction,
                 expected,

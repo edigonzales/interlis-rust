@@ -313,6 +313,7 @@ impl Serialize for ExpressionsOutput<'_> {
             Inspection {
                 kind: &'static str,
                 view: Option<Reference<'a>>,
+                #[serde(rename = "inspectionSource")]
                 source: Reference<'a>,
                 element: Reference<'a>,
                 path: crate::ExpressionId,
@@ -598,6 +599,56 @@ fn project_enumeration<'a>(
     }
 }
 
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DrawingValueOutput<'a> {
+    Expression {
+        expression: crate::ExpressionId,
+    },
+    MetaObject {
+        reference: Reference<'a>,
+    },
+    According {
+        selector: crate::ExpressionId,
+        cases: Vec<DrawingCaseOutput<'a>>,
+    },
+}
+
+#[derive(Serialize)]
+struct DrawingCaseOutput<'a> {
+    first: Option<crate::ExpressionId>,
+    last: Option<crate::ExpressionId>,
+    value: DrawingValueOutput<'a>,
+    #[serde(flatten)]
+    location: Option<SourceLocation>,
+}
+
+fn project_drawing_value<'a>(
+    value: &'a crate::DrawingValue,
+    sources: &SourceSet,
+) -> DrawingValueOutput<'a> {
+    match value {
+        crate::DrawingValue::Expression { expression } => DrawingValueOutput::Expression {
+            expression: *expression,
+        },
+        crate::DrawingValue::MetaObject { reference } => DrawingValueOutput::MetaObject {
+            reference: project_reference(reference, sources),
+        },
+        crate::DrawingValue::According { selector, cases } => DrawingValueOutput::According {
+            selector: *selector,
+            cases: cases
+                .iter()
+                .map(|case| DrawingCaseOutput {
+                    first: case.first,
+                    last: case.last,
+                    value: project_drawing_value(&case.value, sources),
+                    location: sources.location(case.source_span()),
+                })
+                .collect(),
+        },
+    }
+}
+
 struct DeclarationsOutput<'a> {
     graph: &'a ModelGraph,
     sources: &'a SourceSet,
@@ -681,6 +732,34 @@ impl Serialize for DeclarationsOutput<'_> {
         }
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
+        struct Graphic<'a> {
+            basis: Reference<'a>,
+            selections: &'a [crate::ExpressionId],
+            rules: Vec<&'a str>,
+            effective_rules: Vec<&'a str>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DrawingRule<'a> {
+            signature_class: Option<Reference<'a>>,
+            clauses: Vec<DrawingClause<'a>>,
+        }
+        #[derive(Serialize)]
+        struct DrawingClause<'a> {
+            condition: Option<crate::ExpressionId>,
+            assignments: Vec<DrawingAssignment<'a>>,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
+        struct DrawingAssignment<'a> {
+            parameter: Reference<'a>,
+            value: DrawingValueOutput<'a>,
+            #[serde(flatten)]
+            location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct Declaration<'a> {
             name: &'a str,
             qualified_name: &'a str,
@@ -723,6 +802,10 @@ impl Serialize for DeclarationsOutput<'_> {
             nullable_view_base: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             view: Option<View<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            graphic: Option<Graphic<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            drawing_rule: Option<DrawingRule<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             derived_from: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -819,6 +902,46 @@ impl Serialize for DeclarationsOutput<'_> {
                         source: project_reference(&info.source, self.sources),
                         area: info.area,
                     }),
+                }),
+                graphic: declaration.graphic().map(|graphic| Graphic {
+                    basis: project_reference(&graphic.basis, self.sources),
+                    selections: &graphic.selections,
+                    rules: graphic
+                        .rules
+                        .iter()
+                        .map(|&id| self.graph.declarations()[id].qualified_name())
+                        .collect(),
+                    effective_rules: graphic
+                        .effective_rules
+                        .iter()
+                        .map(|&id| self.graph.declarations()[id].qualified_name())
+                        .collect(),
+                }),
+                drawing_rule: declaration.drawing_rule().map(|rule| DrawingRule {
+                    signature_class: rule
+                        .signature_class
+                        .as_ref()
+                        .map(|class| project_reference(class, self.sources)),
+                    clauses: rule
+                        .clauses
+                        .iter()
+                        .map(|clause| DrawingClause {
+                            condition: clause.condition,
+                            assignments: clause
+                                .assignments
+                                .iter()
+                                .map(|assignment| DrawingAssignment {
+                                    parameter: project_reference(
+                                        &assignment.parameter,
+                                        self.sources,
+                                    ),
+                                    value: project_drawing_value(&assignment.value, self.sources),
+                                    location: self.sources.location(assignment.source_span()),
+                                })
+                                .collect(),
+                            location: self.sources.location(clause.source_span()),
+                        })
+                        .collect(),
                 }),
                 derived_from: declaration
                     .derived_from()

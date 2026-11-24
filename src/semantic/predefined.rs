@@ -6,6 +6,24 @@ use crate::{
 };
 
 impl Analyzer<'_, '_> {
+    pub(super) fn materialized_class_value(
+        &mut self,
+        owner: usize,
+        target: BoundName,
+        at: &Span,
+    ) -> Option<BoundName> {
+        if let BoundName::Predefined(
+            "SurfaceEdge" | "SurfaceBoundary" | "LineGeometry",
+            Kind::Structure,
+        ) = target
+        {
+            return Some(BoundName::Declared(
+                self.bound_structure(owner, target, at)?,
+            ));
+        }
+        Some(target)
+    }
+
     pub(super) fn predefined_geometry_structure(
         &mut self,
         owner: usize,

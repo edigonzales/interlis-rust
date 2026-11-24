@@ -419,6 +419,8 @@ impl Analyzer<'_, '_> {
                 | Kind::LineForm
                 | Kind::MetadataBasket
                 | Kind::MetaObject
+                | Kind::Graphic
+                | Kind::DrawingRule
         ) {
             return Ok(None);
         }
@@ -434,6 +436,43 @@ impl Analyzer<'_, '_> {
         let mut expressions = Vec::new();
         if !pair_expressions(&mut expressions, a.derivations(), b.derivations()) {
             return Ok(Some(false));
+        }
+        match (a.graphic(), b.graphic()) {
+            (Some(a), Some(b)) => {
+                if !comparison.reference(Some(&a.basis), Some(&b.basis))?
+                    || !pair_expressions(&mut expressions, &a.selections, &b.selections)
+                    || a.effective_rules.len() != b.effective_rules.len()
+                    || a.effective_rules
+                        .iter()
+                        .zip(&b.effective_rules)
+                        .any(|(&a, &b)| originals[b] != a)
+                {
+                    return Ok(Some(false));
+                }
+            }
+            (None, None) => {}
+            _ => return Ok(Some(false)),
+        }
+        if let (Some(a), Some(b)) = (a.drawing_rule(), b.drawing_rule()) {
+            if !comparison.reference(a.signature_class.as_ref(), b.signature_class.as_ref())?
+                || a.clauses.len() != b.clauses.len()
+            {
+                return Ok(Some(false));
+            }
+            for (a, b) in a.clauses.iter().zip(&b.clauses) {
+                if !pair_optional(&mut expressions, a.condition, b.condition)
+                    || a.assignments.len() != b.assignments.len()
+                {
+                    return Ok(Some(false));
+                }
+                for (a, b) in a.assignments.iter().zip(&b.assignments) {
+                    if !comparison.reference(Some(&a.parameter), Some(&b.parameter))?
+                        || !comparison.pair_drawing_values(&mut expressions, &a.value, &b.value)?
+                    {
+                        return Ok(Some(false));
+                    }
+                }
+            }
         }
         if let (Some(left), Some(right)) = (a.view(), b.view()) {
             if left.formation != right.formation
@@ -603,6 +642,50 @@ fn original_root(mut id: usize, originals: &[usize], work: &mut WorkBudget) -> R
 }
 
 impl Comparison<'_> {
+    fn pair_drawing_values(
+        &mut self,
+        expressions: &mut Vec<(ExpressionId, ExpressionId)>,
+        a: &crate::DrawingValue,
+        b: &crate::DrawingValue,
+    ) -> Result<bool, ()> {
+        use crate::DrawingValue::*;
+        self.work.charge(1)?;
+        Ok(match (a, b) {
+            (Expression { expression: a }, Expression { expression: b }) => {
+                expressions.push((*a, *b));
+                true
+            }
+            (MetaObject { reference: a }, MetaObject { reference: b }) => {
+                self.reference(Some(a), Some(b))?
+            }
+            (
+                According {
+                    selector: a,
+                    cases: aa,
+                },
+                According {
+                    selector: b,
+                    cases: bb,
+                },
+            ) => {
+                if aa.len() != bb.len() {
+                    return Ok(false);
+                }
+                expressions.push((*a, *b));
+                for (a, b) in aa.iter().zip(bb) {
+                    if !pair_optional(expressions, a.first, b.first)
+                        || !pair_optional(expressions, a.last, b.last)
+                        || !self.pair_drawing_values(expressions, &a.value, &b.value)?
+                    {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            _ => false,
+        })
+    }
+
     fn pair_constraint(
         &mut self,
         pending: &mut Vec<(ExpressionId, ExpressionId)>,

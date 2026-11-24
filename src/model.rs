@@ -1051,6 +1051,80 @@ pub struct Declaration {
     pub(crate) predefined: bool,
     pub(crate) metadata_kind: Option<MetadataBasketKind>,
     pub(crate) source_metadata: Option<std::sync::Arc<SourceMetadata>>,
+    pub(crate) graphic: Option<Box<GraphicInfo>>,
+    pub(crate) drawing_rule: Option<Box<DrawingRuleInfo>>,
+}
+
+#[derive(Debug)]
+pub struct GraphicInfo {
+    pub basis: TypeReference,
+    pub selections: Vec<ExpressionId>,
+    pub(crate) rules: Box<[usize]>,
+    pub(crate) effective_rules: Box<[usize]>,
+}
+
+#[derive(Debug)]
+pub struct DrawingRuleInfo {
+    pub signature_class: Option<TypeReference>,
+    pub clauses: Box<[DrawingClause]>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DrawingClause {
+    pub condition: Option<ExpressionId>,
+    pub assignments: Vec<DrawingAssignment>,
+    #[serde(skip)]
+    pub(crate) span: Span,
+}
+
+impl DrawingClause {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DrawingAssignment {
+    pub parameter: TypeReference,
+    pub value: DrawingValue,
+    #[serde(skip)]
+    pub(crate) span: Span,
+}
+
+impl DrawingAssignment {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DrawingValue {
+    Expression {
+        expression: ExpressionId,
+    },
+    MetaObject {
+        reference: TypeReference,
+    },
+    According {
+        selector: ExpressionId,
+        cases: Vec<DrawingCase>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DrawingCase {
+    pub first: Option<ExpressionId>,
+    pub last: Option<ExpressionId>,
+    pub value: DrawingValue,
+    #[serde(skip)]
+    pub(crate) span: Span,
+}
+
+impl DrawingCase {
+    pub fn source_span(&self) -> &Span {
+        &self.span
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1083,6 +1157,12 @@ pub struct ViewInfo {
 }
 
 impl Declaration {
+    pub fn graphic(&self) -> Option<&GraphicInfo> {
+        self.graphic.as_deref()
+    }
+    pub fn drawing_rule(&self) -> Option<&DrawingRuleInfo> {
+        self.drawing_rule.as_deref()
+    }
     pub fn source_metadata(&self) -> Option<&SourceMetadata> {
         self.source_metadata.as_deref()
     }
@@ -1199,6 +1279,27 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn drawing_rules(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        Some(
+            self.declaration(name)?
+                .graphic()?
+                .rules
+                .iter()
+                .map(|&id| &self.declarations[id]),
+        )
+    }
+    pub fn effective_drawing_rules(
+        &self,
+        name: &str,
+    ) -> Option<impl Iterator<Item = &Declaration>> {
+        Some(
+            self.declaration(name)?
+                .graphic()?
+                .effective_rules
+                .iter()
+                .map(|&id| &self.declarations[id]),
+        )
+    }
     pub fn association_path_type(&self, step: &AssociationPathStep) -> Option<&TypeInfo> {
         self.types.get(step.type_id)
     }

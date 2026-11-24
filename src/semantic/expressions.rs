@@ -417,6 +417,7 @@ impl Analyzer<'_, '_> {
                     BoundName::Predefined(_, kind) => kind,
                     BoundName::Declared(id) => self.symbols[id].declaration.kind,
                 };
+                let target = self.materialized_class_value(owner, target, &name.span)?;
                 let reference = self.bound_reference(owner, name, target)?;
                 let ty = self.types.len();
                 self.types.push(TypeInfo::ClassValue(ClassValueType {

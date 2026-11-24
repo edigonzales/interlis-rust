@@ -974,7 +974,7 @@ mod tests {
 
         for (max_nesting, status) in [
             (3, AnalysisStatus::LimitExceeded),
-            (4, AnalysisStatus::Incomplete),
+            (4, AnalysisStatus::Rejected),
         ] {
             let limits = Limits {
                 max_nesting,

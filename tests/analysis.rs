@@ -7585,3 +7585,97 @@ fn predefined_geometry_references_keep_separate_edition_profiles() {
         Some("ILI-PATH-NAME"),
     );
 }
+
+#[test]
+fn graphics_bind_signature_assignments_enumeration_ranges_and_overrides() {
+    for version in ["2.3", "2.4"] {
+        let model = |colour_range: &str, priority: &str| {
+            request(vec![(
+                "drawing",
+                format!(
+                    r#"INTERLIS {version};
+                SYMBOLOGY MODEL Design AT "x" VERSION "1" =
+                    TOPIC Symbols=
+                        CLASS Label EXTENDS INTERLIS.SIGN=
+                          PARAMETER Priority:MANDATORY 0..10; Caption:TEXT;
+                        END Label;
+                    END Symbols;
+                END Design.
+                MODEL M AT "x" VERSION "1" =
+                    IMPORTS Design;
+                    SIGN BASKET Palette~Design.Symbols OBJECTS OF Label:pin;
+                    TOPIC T=CLASS Feature=
+                        label:TEXT*8; colour:(blue,red,green) ORDERED;
+                    END Feature;
+                    GRAPHIC Base BASED ON Feature=
+                        draw OF Design.Symbols.Label: (
+                            Sign:={{pin}};
+                            Priority:=ACCORDING colour ({priority} WHEN IN {colour_range}, 8 WHEN IN #green);
+                            Caption:=label
+                        );
+                    END Base;
+                    GRAPHIC Child EXTENDS Base=
+                        draw (EXTENDED): (Priority:=4);
+                    END Child;
+                    END T;
+                END M."#
+                ),
+            )])
+        };
+        let report = outcome(model("#blue..#red", "6"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let child = graph.declaration("M.T.Child").unwrap();
+        assert_eq!(child.graphic().unwrap().basis.target_name(), "M.T.Feature");
+        let rules: Vec<_> = graph
+            .effective_drawing_rules("M.T.Child")
+            .unwrap()
+            .collect();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].base_reference().unwrap().target_name(),
+            "M.T.Base.draw"
+        );
+        let base = graph
+            .declaration("M.T.Base.draw")
+            .unwrap()
+            .drawing_rule()
+            .unwrap();
+        assert_eq!(
+            base.signature_class.as_ref().unwrap().target_name(),
+            "Design.Symbols.Label"
+        );
+        let assignments = &base.clauses[0].assignments;
+        assert!(matches!(
+            &assignments[0].value, interlis::DrawingValue::MetaObject { reference }
+                if reference.target_name() == "M.Palette.pin"
+        ));
+        assert_eq!(
+            assignments[1].parameter.target_name(),
+            "Design.Symbols.Label.Priority"
+        );
+        let interlis::DrawingValue::According { selector, cases } = &assignments[1].value else {
+            panic!("expected a typed enumeration mapping");
+        };
+        assert!(graph.expression(*selector).is_some());
+        assert!(cases[0].first.is_some() && cases[0].last.is_some());
+        assert!(cases[1].last.is_none());
+        let range = report
+            .sources()
+            .location(assignments[1].parameter.source_span())
+            .unwrap();
+        assert_eq!(
+            &report.sources().files()[0].text()[range.start_byte as usize..range.end_byte as usize],
+            "Priority"
+        );
+        outcome(
+            model("#red..#blue", "6"),
+            Status::Rejected,
+            Some("ILI-GRAPHIC-ENUM-RANGE"),
+        );
+        outcome(
+            model("#blue..#red", "11"),
+            Status::Rejected,
+            Some("ILI-GRAPHIC-PARAMETER-TYPE"),
+        );
+    }
+}
