@@ -130,8 +130,8 @@ impl Analyzer<'_, '_> {
         match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Structure]) {
             Ok(bound @ BoundName::Declared(_)) => self.bound_reference(owner, name, bound),
             Ok(bound @ BoundName::Predefined(..)) => {
-                self.bound_structure(owner, bound, &name.span)?;
-                self.bound_reference(owner, name, bound)
+                let id = self.bound_structure(owner, bound, &name.span)?;
+                self.bound_reference(owner, name, BoundName::Declared(id))
             }
             Err(LookupError::Limit) => None,
             Err(_) => {

@@ -1,6 +1,7 @@
 use super::{
-    Analyzer, BoundName, Kind, SyntaxDecl, TypeInfo,
+    Analyzer, BoundName, Kind, QualifiedName, SyntaxDecl, TypeInfo,
     expressions::{ExpressionContext, scalar_type, underlying_expression},
+    functions::AssignmentContext,
     paths::PathContext,
 };
 use crate::{
@@ -8,8 +9,9 @@ use crate::{
     ExpressionType, GeometryKind, InspectionInfo, LanguageVersion, NumericBounds, NumericRange,
     ObjectTarget, Span, StructureType, UnitConstant, ViewFormation, ViewInfo,
     syntax::{
-        AggregationGrouping, Expression, InlineInspection, Property, RenamedViewable,
-        ViewAttribute, ViewOrigin,
+        AggregationGrouping, ConstraintKind, ExprId, Expression, ExpressionKind, InlineInspection,
+        InspectionExpression, InspectionSource, Property, RenamedViewable, ViewAttribute,
+        ViewOrigin,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +102,32 @@ impl Analyzer<'_, '_> {
                     bases.push(self.bind_view_base(id, candidate, true)?);
                 }
             }
-            pending.insert(id, (formation, bases));
+            let mut dependencies: Vec<_> = bases
+                .iter()
+                .map(|&basis| {
+                    let reference = self.symbols[basis]
+                        .declaration
+                        .reference
+                        .as_ref()
+                        .expect("basis is bound");
+                    (
+                        self.names[reference.target_name()],
+                        reference.source_span().clone(),
+                    )
+                })
+                .collect();
+            if let Some(parent) = self.symbols[id].base_scope
+                && let Some(reference) = self.symbols[id].declaration.base_reference()
+            {
+                dependencies.push((parent, reference.source_span().clone()));
+            }
+            self.inspection_dependencies(
+                id,
+                view,
+                documents[&view.span.sort_key().0],
+                &mut dependencies,
+            )?;
+            pending.insert(id, (formation, bases, dependencies));
         }
         // Formations, inheritance and extensions all depend on the members of their sources.
         let mut state = vec![0; self.symbols.len()];
@@ -117,25 +144,15 @@ impl Analyzer<'_, '_> {
                 if !self.step(1, &at) {
                     return None;
                 }
-                let declared = &pending[view].1;
-                let source = if let Some(&base) = declared.get(*next) {
-                    let base = self.symbols[base].declaration.reference.as_ref()?;
-                    Some((self.names[base.target_name()], base))
-                } else if *next == declared.len() {
-                    self.symbols[*view]
-                        .base_scope
-                        .zip(self.symbols[*view].declaration.base_reference())
-                } else {
-                    None
-                };
-                let Some((mut source, base)) = source else {
-                    let (formation, bases) = pending.remove(view)?;
+                let Some((source, at)) = pending[view].2.get(*next) else {
+                    let (formation, bases, _) = pending.remove(view)?;
                     self.complete_view_formation(*view, formation, bases)?;
                     self.bind_view_members(*view, documents)?;
                     state[*view] = 2;
                     stack.pop();
                     continue;
                 };
+                let mut source = *source;
                 *next += 1;
                 if self.symbols[source].declaration.kind == Kind::Association
                     && let Some(view) = self.symbols[source].declaration.derived_from()
@@ -154,7 +171,7 @@ impl Analyzer<'_, '_> {
                         self.diagnostics.push(
                             "ILI-VIEW-CYCLE",
                             "This basis closes a cycle of view formations",
-                            Some(base.source_span().clone()),
+                            Some(at.clone()),
                         );
                         return None;
                     }
@@ -163,6 +180,70 @@ impl Analyzer<'_, '_> {
             }
         }
         Some(views)
+    }
+
+    fn inspection_dependencies(
+        &mut self,
+        owner: usize,
+        view: &crate::syntax::ViewDecl,
+        statements: &[Expression],
+        dependencies: &mut Vec<(usize, Span)>,
+    ) -> Option<()> {
+        let mut pending: Vec<_> = view
+            .selections
+            .iter()
+            .map(|selection| selection.expression)
+            .collect();
+        for attribute in &view.attributes {
+            match attribute {
+                ViewAttribute::Derived { value, .. } => pending.push(*value),
+                ViewAttribute::Typed(declaration) => {
+                    if let SyntaxDecl::Attribute { derivations, .. } = declaration.as_ref() {
+                        pending.extend(derivations);
+                    }
+                }
+                ViewAttribute::AllOf(_) => {}
+            }
+        }
+        for constraint in &view.constraints {
+            match &constraint.kind {
+                ConstraintKind::Mandatory { expression }
+                | ConstraintKind::Plausibility { expression, .. } => {
+                    pending.push(*expression);
+                }
+                ConstraintKind::Set {
+                    expression, filter, ..
+                } => {
+                    pending.push(*expression);
+                    pending.extend(filter);
+                }
+                ConstraintKind::Unique { filter, .. } => pending.extend(filter),
+                ConstraintKind::Existence { .. } => {}
+            }
+        }
+        while let Some(ExprId(id)) = pending.pop() {
+            let expression = &statements[id as usize];
+            if !self.step(1, &expression.span) {
+                return None;
+            }
+            match &expression.kind {
+                ExpressionKind::Call { arguments, .. } => pending.extend(arguments),
+                ExpressionKind::Binary { left, right, .. } => pending.extend([*left, *right]),
+                ExpressionKind::Unary { operand, .. } => pending.push(*operand),
+                ExpressionKind::Parenthesized { expression }
+                | ExpressionKind::Defined { expression } => pending.push(*expression),
+                ExpressionKind::Inspection(inspection) => {
+                    let (name, named) = match &inspection.inspection {
+                        InspectionSource::View(name) => (name, true),
+                        InspectionSource::Inline(path) => (&path.base.target, false),
+                    };
+                    let (_, source) = self.inspection_source(owner, name, named)?;
+                    dependencies.push((source, name.span.clone()));
+                }
+                _ => {}
+            }
+        }
+        Some(())
     }
 
     fn complete_view_formation(
@@ -377,7 +458,7 @@ impl Analyzer<'_, '_> {
             },
         )?;
         let source =
-            self.reference_to_symbol(owner, source, inspection.base.target.segments.last()?)?;
+            self.bound_reference(owner, &inspection.base.target, BoundName::Declared(source))?;
         let value_type = scalar_type(&self.types[value?]);
         let path = self.record_expression(
             BoundExpressionKind::Path { steps },
@@ -395,6 +476,124 @@ impl Analyzer<'_, '_> {
                 parent_type,
             },
             row_type?,
+        ))
+    }
+
+    fn inspection_source(
+        &mut self,
+        owner: usize,
+        name: &QualifiedName,
+        named: bool,
+    ) -> Option<(crate::TypeReference, usize)> {
+        let kinds: &[_] = if named {
+            &[Kind::View]
+        } else {
+            &[Kind::Class, Kind::Structure, Kind::Association, Kind::View]
+        };
+        let bound = self.expression_name(owner, name, kinds, "ILI-INSPECTION-FACTOR-TARGET")?;
+        let source = match bound {
+            BoundName::Declared(source) => source,
+            BoundName::Predefined(_, Kind::Structure) => {
+                self.bound_structure(owner, bound, &name.span)?
+            }
+            BoundName::Predefined(..) => {
+                self.unsupported_expression(&name.span);
+                return None;
+            }
+        };
+        self.require_view_dependency(owner, source, &name.span)?;
+        Some((
+            self.bound_reference(owner, name, BoundName::Declared(source))?,
+            source,
+        ))
+    }
+
+    pub(super) fn bind_inspection_expression(
+        &mut self,
+        owner: usize,
+        expression: &InspectionExpression,
+        at: &Span,
+    ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
+        let (view, inspected, element_type) = match &expression.inspection {
+            InspectionSource::View(name) => {
+                let (reference, id) = self.inspection_source(owner, name, true)?;
+                let inspection = self.symbols[id]
+                    .declaration
+                    .view()
+                    .and_then(|view| view.inspection.as_ref());
+                let Some(inspection) = inspection.cloned() else {
+                    self.diagnostics.push(
+                        "ILI-INSPECTION-FACTOR-TARGET",
+                        "The named view must be an inspection",
+                        Some(name.span.clone()),
+                    );
+                    return None;
+                };
+                let element_type = self.structure_type_id(Some(inspection.element.clone()));
+                (Some(reference), inspection, element_type)
+            }
+            InspectionSource::Inline(inspection) => {
+                let (_, id) = self.inspection_source(owner, &inspection.base.target, false)?;
+                let (bound, ty) = self.bind_inspection_path(owner, id, inspection)?;
+                (None, bound, ty)
+            }
+        };
+        let restriction = if let Some(path) = &expression.of {
+            let (kind, value, ty) = self.expression_path(owner, path)?;
+            let restriction = self.record_expression(kind, value, ty, &path.span);
+            let source = self.names[inspected.source.target_name()];
+            let expected = if self.symbols[source].declaration.kind == Kind::Structure {
+                self.structure_type_id(Some(inspected.source.clone()))
+            } else {
+                self.object_selection_type(
+                    false,
+                    ObjectTarget {
+                        target: Some(inspected.source.clone()),
+                        restrictions: Vec::new(),
+                    },
+                )
+            };
+            if !self.value_fits(
+                owner,
+                restriction,
+                expected,
+                true,
+                AssignmentContext::Function,
+            )? {
+                self.diagnostics.push(
+                    "ILI-INSPECTION-FACTOR-RESTRICTION",
+                    "The restriction must select one object of the inspection source type",
+                    Some(path.span.clone()),
+                );
+                return None;
+            }
+            Some(restriction)
+        } else {
+            None
+        };
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Collection(CollectionType {
+            kind: CollectionKind::Bag,
+            cardinality: Cardinality {
+                lower: "0".into(),
+                upper: None,
+            },
+            element: element_type,
+        }));
+        if !self.step(1, at) {
+            return None;
+        }
+        Some((
+            BoundExpressionKind::Inspection {
+                view,
+                source: inspected.source,
+                element: inspected.element,
+                path: inspected.path,
+                restriction,
+                area: inspected.area,
+            },
+            scalar_type(&self.types[ty]),
+            Some(ty),
         ))
     }
 
@@ -442,24 +641,31 @@ impl Analyzer<'_, '_> {
             "SurfaceEdge",
             Some(edge_template),
         )?;
-        let geometry_ty = self.types.len();
-        self.types.push(TypeInfo::Geometry(polyline));
-        let mut edge_members = vec![self.contextual_geometry_attribute(
-            edge,
-            edge_template,
-            "Geometry",
-            geometry_ty,
-        )?];
-        if self.expression_language(owner) == LanguageVersion::V23 {
-            let ty = self.structure_type_id(line_attrs);
-            edge_members.push(self.contextual_geometry_attribute(
+        if self.symbols[edge]
+            .declaration
+            .effective_attributes
+            .is_none()
+        {
+            let geometry_ty = self.types.len();
+            self.types.push(TypeInfo::Geometry(polyline));
+            let mut edge_members = vec![self.contextual_geometry_attribute(
                 edge,
                 edge_template,
-                "LineAttrs",
-                ty,
-            )?);
+                "Geometry",
+                geometry_ty,
+            )?];
+            if self.expression_language(owner) == LanguageVersion::V23 {
+                let ty = self.structure_type_id(line_attrs);
+                edge_members.push(self.contextual_geometry_attribute(
+                    edge,
+                    edge_template,
+                    "LineAttrs",
+                    ty,
+                )?);
+            }
+            self.symbols[edge].declaration.effective_attributes =
+                Some(edge_members.into_boxed_slice());
         }
-        self.symbols[edge].declaration.effective_attributes = Some(edge_members.into_boxed_slice());
         let row = if area {
             edge
         } else {
@@ -470,9 +676,16 @@ impl Analyzer<'_, '_> {
                 "SurfaceBoundary",
                 Some(template),
             )?;
-            let list = self.geometry_structure_list(owner, edge)?;
-            let lines = self.contextual_geometry_attribute(boundary, template, "Lines", list)?;
-            self.symbols[boundary].declaration.effective_attributes = Some(Box::new([lines]));
+            if self.symbols[boundary]
+                .declaration
+                .effective_attributes
+                .is_none()
+            {
+                let list = self.geometry_structure_list(owner, edge)?;
+                let lines =
+                    self.contextual_geometry_attribute(boundary, template, "Lines", list)?;
+                self.symbols[boundary].declaration.effective_attributes = Some(Box::new([lines]));
+            }
             boundary
         };
         let reference = self.geometry_symbol_reference(owner, row)?;
@@ -546,16 +759,22 @@ impl Analyzer<'_, '_> {
             &[Kind::Class, Kind::Structure, Kind::Association, Kind::View],
             "ILI-VIEW-BASE",
         )?;
-        let BoundName::Declared(source) = target else {
-            self.unsupported_expression(&base.span);
-            return None;
+        let source = match target {
+            BoundName::Declared(source) => source,
+            BoundName::Predefined(_, Kind::Structure) => {
+                self.bound_structure(owner, target, &base.target.span)?
+            }
+            BoundName::Predefined(..) => {
+                self.unsupported_expression(&base.span);
+                return None;
+            }
         };
         self.require_view_dependency(owner, source, &base.target.span)?;
         let name = base
             .alias
             .as_ref()
             .unwrap_or_else(|| base.target.segments.last().unwrap());
-        let reference = self.bound_reference(owner, &base.target, target)?;
+        let reference = self.bound_reference(owner, &base.target, BoundName::Declared(source))?;
         let ty = self.object_selection_type(
             false,
             ObjectTarget {
@@ -580,7 +799,7 @@ impl Analyzer<'_, '_> {
 
     fn require_view_dependency(&mut self, owner: usize, source: usize, at: &Span) -> Option<()> {
         if let (Some(topic), Some(target)) =
-            (self.containing_topic(owner), self.containing_topic(source))
+            (self.expression_topic(owner), self.containing_topic(source))
             && !self.specializes_symbol(topic, target, at)?
             && !self.topic_has_dependency(topic, target, at)?
         {
@@ -988,15 +1207,10 @@ impl Analyzer<'_, '_> {
         Some(copy_id)
     }
 
-    pub(super) fn validate_view_derivations(&mut self) -> Option<()> {
+    pub(super) fn validate_derivations(&mut self) -> Option<()> {
         let mut dependencies = BTreeMap::new();
         for id in 0..self.symbols.len() {
-            let decl = &self.symbols[id].declaration;
-            if decl.kind != Kind::Attribute
-                || !decl
-                    .parent
-                    .is_some_and(|owner| self.symbols[owner].declaration.kind == Kind::View)
-            {
+            if !self.is_derived_member(id) {
                 continue;
             }
             dependencies.insert(id, self.view_attribute_dependencies(id)?);
@@ -1073,15 +1287,29 @@ impl Analyzer<'_, '_> {
                 if !self.step(1, at) {
                     return None;
                 }
+                if !dependencies.contains_key(target) {
+                    continue;
+                }
                 match state[*target] {
                     0 => {
                         state[*target] = 1;
                         stack.push((*target, 0));
                     }
                     1 => {
+                        let association =
+                            self.symbols[*member]
+                                .declaration
+                                .parent
+                                .is_some_and(|owner| {
+                                    self.symbols[owner].declaration.kind == Kind::Association
+                                });
                         self.diagnostics.push(
-                            "ILI-VIEW-ATTRIBUTE-CYCLE",
-                            "This reference closes a cycle of view attribute derivations",
+                            if association {
+                                "ILI-ASSOCIATION-DERIVATION-CYCLE"
+                            } else {
+                                "ILI-VIEW-ATTRIBUTE-CYCLE"
+                            },
+                            "This reference closes a cycle of derived members",
                             Some(at.clone()),
                         );
                         return None;
@@ -1091,6 +1319,16 @@ impl Analyzer<'_, '_> {
             }
         }
         Some(())
+    }
+
+    fn is_derived_member(&self, member: usize) -> bool {
+        let declaration = &self.symbols[member].declaration;
+        matches!(declaration.kind, Kind::Attribute | Kind::Role)
+            && declaration.parent.is_some_and(|owner| {
+                let declaration = &self.symbols[owner].declaration;
+                declaration.kind == Kind::View
+                    || declaration.kind == Kind::Association && declaration.derived_from().is_some()
+            })
     }
 
     fn view_attribute_dependencies(&mut self, member: usize) -> Option<ViewAttributeDependencies> {
@@ -1154,11 +1392,7 @@ impl Analyzer<'_, '_> {
                         if union && position == 0 && target.kind == Kind::ViewBase {
                             branch.bases.insert(id);
                         }
-                        if target.kind == Kind::Attribute
-                            && target.parent.is_some_and(|owner| {
-                                self.symbols[owner].declaration.kind == Kind::View
-                            })
-                        {
+                        if self.is_derived_member(id) {
                             result
                                 .attributes
                                 .push((id, step.reference.source_span().clone()));
@@ -1170,10 +1404,29 @@ impl Analyzer<'_, '_> {
                                 }
                             }
                         }
+                        if let Some(access) = step.association_access.as_ref()
+                            && let Some(&owner) = self.names.get(access.association.target_name())
+                            && self.symbols[owner].declaration.derived_from().is_some()
+                        {
+                            result.attributes.extend(
+                                self.symbols[owner]
+                                    .declaration
+                                    .association()?
+                                    .roles
+                                    .iter()
+                                    .map(|&role| (role, step.reference.source_span().clone())),
+                            );
+                        }
                     }
                 }
                 BoundExpressionKind::Call { arguments, .. } => {
                     pending.extend(arguments.iter().copied())
+                }
+                BoundExpressionKind::Inspection {
+                    path, restriction, ..
+                } => {
+                    pending.push(*path);
+                    pending.extend(restriction);
                 }
                 BoundExpressionKind::Binary { left, right, .. } => pending.extend([*left, *right]),
                 BoundExpressionKind::Unary { operand, .. } => pending.push(*operand),

@@ -780,6 +780,31 @@ impl Comparison<'_> {
                     },
                 ) => self.reference(Some(a), Some(b))? && pair_expressions(&mut pending, av, bv),
                 (
+                    Inspection {
+                        view: a,
+                        source: sa,
+                        element: ea,
+                        path: pa,
+                        restriction: ra,
+                        area: aa,
+                    },
+                    Inspection {
+                        view: b,
+                        source: sb,
+                        element: eb,
+                        path: pb,
+                        restriction: rb,
+                        area: ab,
+                    },
+                ) => {
+                    pending.push((*pa, *pb));
+                    aa == ab
+                        && self.reference(a.as_ref(), b.as_ref())?
+                        && self.reference(Some(sa), Some(sb))?
+                        && self.reference(Some(ea), Some(eb))?
+                        && pair_optional(&mut pending, *ra, *rb)
+                }
+                (
                     Binary {
                         operator: a,
                         left: al,

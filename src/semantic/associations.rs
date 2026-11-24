@@ -92,9 +92,16 @@ impl Analyzer<'_, '_> {
             let derived = self.symbols[owner].declaration.derived_from().is_some();
             for role in &syntax.roles {
                 let id = self.scope_names[&(owner, Namespace::Member, role.name.value.clone())];
-                let Some(root) = role.derivation else {
+                let inherited = self.symbols[id].base_scope.and_then(|base| {
+                    self.symbols[base]
+                        .declaration
+                        .derivations()
+                        .first()
+                        .copied()
+                });
+                if role.derivation.is_none() && (!derived || inherited.is_none()) {
                     continue;
-                };
+                }
                 if !derived {
                     self.diagnostics.push(
                         "ILI-ROLE-DERIVATION-CONTEXT",
@@ -103,12 +110,16 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 }
-                let value = self.bind_expression(
-                    owner,
-                    documents[&role.span.sort_key().0],
-                    root,
-                    ExpressionContext::Value,
-                )?;
+                let value = if let Some(root) = role.derivation {
+                    self.bind_expression(
+                        owner,
+                        documents[&role.span.sort_key().0],
+                        root,
+                        ExpressionContext::Value,
+                    )?
+                } else {
+                    inherited?
+                };
                 self.require_association_view_path(value, &role.span)?;
                 let targets = &self.symbols[id].declaration.role()?.targets;
                 let restrictions = if targets
@@ -183,7 +194,35 @@ impl Analyzer<'_, '_> {
                 if !self.step(1, &at) {
                     return None;
                 }
-                let assignments = self.symbols[member].declaration.derivations().to_vec();
+                let mut assignments = self.symbols[member].declaration.derivations().to_vec();
+                if self.symbols[member].declaration.kind == Kind::Attribute
+                    && assignments.is_empty()
+                    && let Some(base) = self.symbols[member].base_scope
+                {
+                    assignments.extend_from_slice(self.symbols[base].declaration.derivations());
+                    let ty = self.symbols[member].declaration.type_id?;
+                    let mandatory = self.symbols[member].declaration.mandatory() == Some(true);
+                    for &assignment in &assignments {
+                        if !self.value_fits(
+                            owner,
+                            assignment,
+                            ty,
+                            mandatory,
+                            AssignmentContext::Attribute,
+                        )? {
+                            self.diagnostics.push(
+                                "ILI-ATTRIBUTE-DERIVATION-TYPE",
+                                "The inherited derivation must satisfy the overriding attribute type",
+                                Some(at.clone()),
+                            );
+                            return None;
+                        }
+                    }
+                    if !assignments.is_empty() {
+                        self.symbols[member].declaration.derivations =
+                            Some(assignments.clone().into_boxed_slice());
+                    }
+                }
                 if assignments.is_empty() {
                     self.diagnostics.push(
                         "ILI-ASSOCIATION-DERIVATION-MISSING",

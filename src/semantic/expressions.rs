@@ -201,6 +201,19 @@ impl Analyzer<'_, '_> {
                         .map(|argument| bound[&argument.0])
                         .collect(),
                 )?,
+                ExpressionKind::Inspection(inspection) => {
+                    if context == ExpressionContext::Set
+                        && let Some(restriction) = &inspection.of
+                    {
+                        self.diagnostics.push(
+                            "ILI-SET-OBJECT-VALUE",
+                            "An individual object restriction may appear in WHERE but cannot appear in a SET condition",
+                            Some(restriction.span.clone()),
+                        );
+                        return None;
+                    }
+                    self.bind_inspection_expression(owner, inspection, &expression.span)?
+                }
                 ExpressionKind::RuntimeParameter(name) => {
                     let BoundName::Declared(target) = self.expression_name(
                         owner,
@@ -280,10 +293,6 @@ impl Analyzer<'_, '_> {
                     ValueType::Boolean,
                     None,
                 ),
-                _ => {
-                    self.unsupported_expression(&expression.span);
-                    return None;
-                }
             };
             let result = self.record_expression(kind, value_type, type_id, &expression.span);
             bound.insert(id.0, result);

@@ -1293,15 +1293,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 (target, declaration.qualified.clone(), None)
             }
             Ok(bound @ BoundName::Predefined(builtin, kind)) => {
-                let target = if kind == Kind::Domain {
-                    Target::Predefined(builtin)
+                let (target, qualified) = if kind == Kind::Domain {
+                    (Target::Predefined(builtin), format!("INTERLIS.{builtin}"))
                 } else {
-                    self.bound_structure(owner, bound, &name.span)?;
-                    Target::Structure
+                    let id = self.bound_structure(owner, bound, &name.span)?;
+                    (
+                        Target::Structure,
+                        self.symbols[id].declaration.qualified.clone(),
+                    )
                 };
                 (
                     target,
-                    format!("INTERLIS.{builtin}"),
+                    qualified,
                     Some(self.models[self.symbols[owner].model].language),
                 )
             }
@@ -2032,7 +2035,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
         self.bind_association_derivations(&viewables, &expressions)?;
-        self.validate_view_derivations()?;
+        self.validate_derivations()?;
         self.bind_constraints(&expressions)?;
         if !self.diagnostics.rejected && !self.diagnostics.incomplete {
             self.bind_translations()?;

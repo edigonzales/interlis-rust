@@ -373,6 +373,14 @@ pub enum BoundExpressionKind {
         function: TypeReference,
         arguments: Vec<ExpressionId>,
     },
+    Inspection {
+        view: Option<TypeReference>,
+        source: TypeReference,
+        element: TypeReference,
+        path: ExpressionId,
+        restriction: Option<ExpressionId>,
+        area: bool,
+    },
     Unary {
         operator: UnaryOperator,
         operand: ExpressionId,

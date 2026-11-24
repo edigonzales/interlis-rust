@@ -123,7 +123,10 @@ impl Analyzer<'_, '_> {
             }
             Ok(bound @ BoundName::Predefined(_, Kind::Structure)) if kind == Kind::Structure => {
                 let id = self.bound_structure(owner, bound, &name.span)?;
-                Some((id, self.bound_reference(owner, name, bound)?))
+                Some((
+                    id,
+                    self.bound_reference(owner, name, BoundName::Declared(id))?,
+                ))
             }
             Ok(bound @ BoundName::Predefined(builtin, Kind::Class)) if kind == Kind::Class => {
                 if let Some(id) = self.predefined_metadata(owner, builtin, &name.span) {

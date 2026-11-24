@@ -5759,6 +5759,14 @@ fn derived_associations_bind_view_paths_and_require_effective_assignments() {
             Status::Rejected,
             Some("ILI-ASSOCIATION-DERIVATION-MISSING"),
         );
+        outcome(
+            model(
+                "JoinView",
+                "left -- {1} A := row->A; right -- {1} B := row->A->right;",
+            ),
+            Status::Rejected,
+            Some("ILI-ASSOCIATION-DERIVATION-CYCLE"),
+        );
     }
     outcome(
         single(
@@ -5769,6 +5777,95 @@ fn derived_associations_bind_view_paths_and_require_effective_assignments() {
         Status::Rejected,
         Some("ILI-VIEW-CYCLE"),
     );
+    let inherited = "TOPIC T=CLASS A=rank:0..5; END A; CLASS B=END B;
+        VIEW Rows JOIN OF A,B;=END Rows;
+        ASSOCIATION Base DERIVED FROM Rows=left -- A := Rows->A; right -- B := Rows->B;
+            rank:0..10 := Rows->A->rank; END Base;
+        ASSOCIATION Child EXTENDS Base=left (EXTENDED) -- A; rank (EXTENDED):0..5;
+        END Child; END T;";
+    let report = outcome(single(inherited), Status::CheckedSubset, None);
+    let graph = report.graph().unwrap();
+    for member in ["left", "rank"] {
+        assert_eq!(
+            graph
+                .declaration(&format!("M.T.Child.{member}"))
+                .unwrap()
+                .derivations(),
+            graph
+                .declaration(&format!("M.T.Base.{member}"))
+                .unwrap()
+                .derivations(),
+        );
+    }
+    outcome(
+        single(&inherited.replace("rank:0..5; END A", "rank:0..10; END A")),
+        Status::Rejected,
+        Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+    );
+}
+
+#[test]
+fn inspection_factors_bind_inline_and_named_sources_and_object_restrictions() {
+    for version in ["2.3", "2.4"] {
+        let model = |named: &str, inline: &str, extra: &str| {
+            request(vec![(
+                "inspection",
+                format!(
+                    r#"INTERLIS {version}; MODEL M AT "x" VERSION "1" =
+                TOPIC T=STRUCTURE Part=flag:BOOLEAN; END Part;
+                CLASS Item=parts:LIST OF Part; ready:BOOLEAN; END Item;
+                VIEW Collected PROJECTION OF Item;= a:={named}; b:={inline}; END Collected;
+                VIEW Elements INSPECTION OF Item->parts;= {extra} END Elements;
+                END T; END M."#
+                ),
+            )])
+        };
+        let selected = "INSPECTION Elements OF Item";
+        let inline = "INSPECTION OF Item->parts OF Item";
+        let report = outcome(model(selected, inline, ""), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        for (name, expected_view) in [
+            ("M.T.Collected.a", Some("M.T.Elements")),
+            ("M.T.Collected.b", None),
+        ] {
+            let id = graph.declaration(name).unwrap().derivations()[0];
+            let interlis::BoundExpressionKind::Inspection {
+                view,
+                source,
+                element,
+                path,
+                restriction,
+                area,
+            } = &graph.expression(id).unwrap().kind
+            else {
+                panic!("expected bound inspection");
+            };
+            assert_eq!(
+                view.as_ref().map(|reference| reference.target_name()),
+                expected_view
+            );
+            assert_eq!(source.target_name(), "M.T.Item");
+            assert_eq!(element.target_name(), "M.T.Part");
+            assert!(graph.expression(*path).is_some());
+            assert!(restriction.is_some());
+            assert!(!area);
+            let TypeInfo::Collection(collection) = graph.expression_declared_type(id).unwrap()
+            else {
+                panic!("expected BAG OF Part");
+            };
+            assert_eq!(collection.kind, interlis::CollectionKind::Bag);
+        }
+        outcome(
+            model("INSPECTION Elements OF Item->ready", inline, ""),
+            Status::Rejected,
+            Some("ILI-INSPECTION-FACTOR-RESTRICTION"),
+        );
+        outcome(
+            model(selected, inline, "cycle:=INSPECTION Elements;"),
+            Status::Rejected,
+            Some("ILI-VIEW-CYCLE"),
+        );
+    }
 }
 
 #[test]
@@ -7443,4 +7540,48 @@ fn geometric_inspections_bind_area_sides_and_contextual_segment_types() {
             Some("ILI-VIEW-ALL-OF"),
         );
     }
+}
+
+#[test]
+fn predefined_geometry_references_keep_separate_edition_profiles() {
+    let legacy = "INTERLIS 2.3; MODEL Legacy AT \"x\" VERSION \"1\" =
+        TOPIC T=CLASS Item=edge:INTERLIS.SurfaceEdge;
+        MANDATORY CONSTRAINT DEFINED(edge->LineAttrs); END Item; END T; END Legacy.";
+    let modern = "INTERLIS 2.4; MODEL Modern AT \"x\" VERSION \"1\" =
+        TOPIC T=CLASS Item=edge:INTERLIS.SurfaceEdge; END Item; END T; END Modern.";
+    let report = outcome(
+        request(vec![
+            ("a-legacy", legacy.into()),
+            ("b-modern", modern.into()),
+        ]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    for (model, has_line_attrs) in [("Legacy", true), ("Modern", false)] {
+        let link = graph
+            .declaration(&format!("{model}.T.Item.edge"))
+            .unwrap()
+            .type_reference()
+            .unwrap();
+        let mut members = graph.effective_attributes(link.target_name()).unwrap();
+        assert_eq!(
+            members.any(|member| member.name() == "LineAttrs"),
+            has_line_attrs
+        );
+    }
+    outcome(
+        request(vec![
+            ("a-legacy", legacy.into()),
+            (
+                "b-modern",
+                modern.replace(
+                    "END Item;",
+                    "MANDATORY CONSTRAINT DEFINED(edge->LineAttrs); END Item;",
+                ),
+            ),
+        ]),
+        Status::Rejected,
+        Some("ILI-PATH-NAME"),
+    );
 }

@@ -310,6 +310,15 @@ impl Serialize for ExpressionsOutput<'_> {
                 kind: &'static str,
                 reference: Reference<'a>,
             },
+            Inspection {
+                kind: &'static str,
+                view: Option<Reference<'a>>,
+                source: Reference<'a>,
+                element: Reference<'a>,
+                path: crate::ExpressionId,
+                restriction: Option<crate::ExpressionId>,
+                area: bool,
+            },
             Other(&'a crate::BoundExpressionKind),
         }
         #[derive(Serialize)]
@@ -329,6 +338,7 @@ impl Serialize for ExpressionsOutput<'_> {
             let effective_type = if matches!(
                 expression.kind,
                 crate::BoundExpressionKind::ObjectSet { .. }
+                    | crate::BoundExpressionKind::Inspection { .. }
             ) || matches!(
                 expression.value_type,
                 crate::ExpressionType::Class
@@ -388,6 +398,22 @@ impl Serialize for ExpressionsOutput<'_> {
                     crate::BoundExpressionKind::AttributePath { reference } => Kind::Symbol {
                         kind: "attribute_path",
                         reference: project_reference(reference, self.1),
+                    },
+                    crate::BoundExpressionKind::Inspection {
+                        view,
+                        source,
+                        element,
+                        path,
+                        restriction,
+                        area,
+                    } => Kind::Inspection {
+                        kind: "inspection",
+                        view: view.as_ref().map(|view| project_reference(view, self.1)),
+                        source: project_reference(source, self.1),
+                        element: project_reference(element, self.1),
+                        path: *path,
+                        restriction: *restriction,
+                        area: *area,
                     },
                     kind => Kind::Other(kind),
                 },
