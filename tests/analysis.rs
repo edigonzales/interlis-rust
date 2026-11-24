@@ -737,7 +737,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
         "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
-        "TOPIC T = STRUCTURE Part=END Part; CLASS X=parts:BAG OF Part; END X; VIEW V INSPECTION OF X->parts; = END V; END T;",
+        "TOPIC T = CLASS X=route:POLYLINE; END X; VIEW V INSPECTION OF X->route; = END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
@@ -1808,6 +1808,62 @@ fn cross_topic_view_extensions_need_the_effective_basis_dependency() {
         Status::Rejected,
         Some("ILI-VIEW-TOPIC-DEPENDENCY"),
     );
+}
+
+#[test]
+fn inspections_bind_the_nested_structure_and_its_immediate_parent() {
+    for version in ["2.3", "2.4"] {
+        let input = |area: &str, selected: &str| {
+            request(vec![(
+                "view",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                 TOPIC T =
+                    STRUCTURE Point=label:TEXT*10; END Point;
+                    STRUCTURE Group=points:LIST OF Point; code:TEXT*10; END Group;
+                    CLASS Root=groups:BAG OF Group; END Root;
+                    VIEW Inspected {area} INSPECTION OF point~Root->groups->points;
+                        = ALL OF point; parentCode:TEXT*10 := {selected}->code;
+                    END Inspected;
+                 END T; END M."
+                ),
+            )])
+        };
+        let report = outcome(input("", "point->PARENT"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let inspection = graph
+            .declaration("M.T.Inspected")
+            .unwrap()
+            .view()
+            .unwrap()
+            .inspection
+            .as_ref()
+            .unwrap();
+        assert_eq!(inspection.parent.target_name(), "M.T.Group");
+        assert_eq!(inspection.element.target_name(), "M.T.Point");
+        let interlis::BoundExpressionKind::Path { steps } =
+            &graph.expression(inspection.path).unwrap().kind
+        else {
+            panic!("expected bound decomposition");
+        };
+        assert_eq!(steps[0].reference.target_name(), "M.T.Root.groups");
+        assert_eq!(steps[1].reference.target_name(), "M.T.Group.points");
+        let copy = graph.declaration("M.T.Inspected.label").unwrap();
+        assert_eq!(
+            copy.derived_from().unwrap().target_name(),
+            "M.T.Point.label"
+        );
+        outcome(
+            input("AREA", "PARENT"),
+            Status::Rejected,
+            Some("ILI-INSPECTION-TYPE"),
+        );
+        outcome(
+            input("", "THISAREA"),
+            Status::Rejected,
+            Some("ILI-INSPECTION-CONTEXT"),
+        );
+    }
 }
 
 #[test]

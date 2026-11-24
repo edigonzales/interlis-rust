@@ -469,6 +469,8 @@ impl Analyzer<'_, '_> {
         owner: usize,
         path: &ObjectPath,
     ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
+        let mut scope = owner;
+        let mut steps = Vec::with_capacity(path.elements.len());
         let elements = match path.elements.split_first() {
             Some((PathElement::Special(special), tail)) if special.value == SpecialPath::This => {
                 if tail.is_empty() {
@@ -505,11 +507,58 @@ impl Analyzer<'_, '_> {
         if !self.step(elements.len(), &path.span) {
             return None;
         }
-        let mut steps = Vec::with_capacity(elements.len());
-        let mut scope = owner;
         let topic = self.containing_topic(owner);
         let mut plural_origin = None;
         for (position, element) in elements.iter().enumerate() {
+            if let PathElement::Special(special) = element
+                && special.value == SpecialPath::Parent
+            {
+                let Some(inspection) = self.symbols[owner]
+                    .declaration
+                    .view()
+                    .and_then(|view| view.inspection.as_ref())
+                    .filter(|inspection| {
+                        scope == owner || self.names[inspection.element.target_name()] == scope
+                    })
+                else {
+                    return self.path_error(
+                        "ILI-INSPECTION-CONTEXT",
+                        "PARENT requires the element context of an ordinary inspection",
+                        &special.span,
+                    );
+                };
+                scope = self.names[inspection.parent.target_name()];
+                let name = Name {
+                    value: "PARENT".into(),
+                    span: special.span.clone(),
+                };
+                let reference = self.reference_to_symbol(owner, scope, &name)?;
+                if position + 1 == elements.len() {
+                    let ty = self.object_selection_type(
+                        false,
+                        crate::ObjectTarget {
+                            target: Some(reference.clone()),
+                            restrictions: Vec::new(),
+                        },
+                    );
+                    steps.push(BoundPathStep {
+                        reference,
+                        selection: None,
+                        selection_span: None,
+                    });
+                    return Some((
+                        BoundExpressionKind::Path { steps },
+                        ExpressionType::Object,
+                        Some(ty),
+                    ));
+                }
+                steps.push(BoundPathStep {
+                    reference,
+                    selection: None,
+                    selection_span: None,
+                });
+                continue;
+            }
             let aggregate;
             let (name, selector) = match element {
                 PathElement::Name { name, selector, .. } => (name, selector.as_ref()),
@@ -519,6 +568,15 @@ impl Analyzer<'_, '_> {
                         span: special.span.clone(),
                     };
                     (&aggregate, None)
+                }
+                PathElement::Special(special)
+                    if matches!(special.value, SpecialPath::ThisArea | SpecialPath::ThatArea) =>
+                {
+                    return self.path_error(
+                        "ILI-INSPECTION-CONTEXT",
+                        "THISAREA and THATAREA are only available in an area inspection",
+                        &special.span,
+                    );
                 }
                 _ => {
                     self.unsupported_expression(&path.span);

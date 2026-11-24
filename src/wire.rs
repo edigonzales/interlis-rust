@@ -515,6 +515,14 @@ impl Serialize for DeclarationsOutput<'_> {
             selections: &'a [crate::ExpressionId],
             #[serde(skip_serializing_if = "<[_]>::is_empty")]
             grouping: &'a [crate::ExpressionId],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            inspection: Option<Inspection<'a>>,
+        }
+        #[derive(Serialize)]
+        struct Inspection<'a> {
+            path: crate::ExpressionId,
+            element: Reference<'a>,
+            parent: Reference<'a>,
         }
         #[derive(Serialize)]
         struct Context<'a> {
@@ -643,6 +651,11 @@ impl Serialize for DeclarationsOutput<'_> {
                         .collect(),
                     selections: &view.selections,
                     grouping: &view.grouping,
+                    inspection: view.inspection.as_ref().map(|info| Inspection {
+                        path: info.path,
+                        element: project_reference(&info.element, self.sources),
+                        parent: project_reference(&info.parent, self.sources),
+                    }),
                 }),
                 derived_from: declaration
                     .derived_from()

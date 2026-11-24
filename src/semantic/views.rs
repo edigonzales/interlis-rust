@@ -1,13 +1,15 @@
 use super::{
     Analyzer, BoundName, Kind, SyntaxDecl, TypeInfo,
     expressions::{ExpressionContext, scalar_type, underlying_expression},
+    paths::PathContext,
 };
 use crate::{
     BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind, CollectionType, ExpressionId,
-    ExpressionType, LanguageVersion, NumericBounds, NumericRange, ObjectTarget, Span,
-    StructureType, UnitConstant, ViewFormation, ViewInfo,
+    ExpressionType, InspectionInfo, LanguageVersion, NumericBounds, NumericRange, ObjectTarget,
+    Span, StructureType, UnitConstant, ViewFormation, ViewInfo,
     syntax::{
-        AggregationGrouping, Expression, Property, RenamedViewable, ViewAttribute, ViewOrigin,
+        AggregationGrouping, Expression, InlineInspection, Property, RenamedViewable,
+        ViewAttribute, ViewOrigin,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,7 +69,10 @@ impl Analyzer<'_, '_> {
                             bases.push(self.bind_view_base(id, base, false)?);
                             ViewFormation::Aggregation
                         }
-                        _ => unreachable!("unsupported view formations are gated before binding"),
+                        crate::syntax::ViewFormation::Inspection(inspection) => {
+                            bases.push(self.bind_view_base(id, &inspection.base, false)?);
+                            ViewFormation::Inspection
+                        }
                     };
                     Some(kind)
                 }
@@ -158,10 +163,20 @@ impl Analyzer<'_, '_> {
         let mut bases = Vec::new();
         let mut selections = Vec::new();
         let mut grouping = Vec::new();
+        let mut inspected = None;
         let formation = if let Some(parent) = self.symbols[id].base_scope {
             let inherited = self.symbols[parent].declaration.view()?;
+            let inspection_bytes = inherited.inspection.as_ref().map_or(0, |inspection| {
+                [&inspection.element, &inspection.parent]
+                    .iter()
+                    .map(|link| link.target_name().len() + link.declared_name().len())
+                    .sum()
+            });
             if !self.step(
-                inherited.bases.len() + inherited.selections.len() + inherited.grouping.len(),
+                inherited.bases.len()
+                    + inherited.selections.len()
+                    + inherited.grouping.len()
+                    + inspection_bytes,
                 &syntax.name.span,
             ) {
                 return None;
@@ -170,6 +185,7 @@ impl Analyzer<'_, '_> {
             bases.extend_from_slice(&inherited.bases);
             selections.extend_from_slice(&inherited.selections);
             grouping.extend_from_slice(&inherited.grouping);
+            inspected = inherited.inspection.clone();
             let formation = inherited.formation;
             let at = self.symbols[id]
                 .declaration
@@ -211,6 +227,10 @@ impl Analyzer<'_, '_> {
             .iter()
             .map(|extension| extension.extensions.len())
             .sum();
+        if formation == ViewFormation::Inspection && count != 0 {
+            self.unsupported_expression(&syntax.base_extensions[0].span);
+            return None;
+        }
         let (formation_bases, extension_bases) = local.split_at(local.len() - count);
         bases.extend_from_slice(formation_bases);
         let mut candidates = extension_bases.iter().copied();
@@ -258,13 +278,108 @@ impl Analyzer<'_, '_> {
             bases,
             selections,
             grouping,
+            inspection: inspected,
         }));
-        if let Some(ViewOrigin::Formation(formation)) = &syntax.origin
-            && let crate::syntax::ViewFormation::Aggregation { grouping, .. } = &formation.value
-        {
-            self.bind_aggregation(id, grouping, &formation.span)?;
+        if let Some(ViewOrigin::Formation(formation)) = &syntax.origin {
+            match &formation.value {
+                crate::syntax::ViewFormation::Aggregation { grouping, .. } => {
+                    self.bind_aggregation(id, grouping, &formation.span)?;
+                }
+                crate::syntax::ViewFormation::Inspection(inspection) => {
+                    let base = self.symbols[id].declaration.view()?.bases[0];
+                    let source = self.names[self.symbols[base]
+                        .declaration
+                        .type_reference()?
+                        .target_name()];
+                    let inspected = self.bind_inspection_path(id, source, inspection)?;
+                    let ty = self.object_selection_type(
+                        false,
+                        ObjectTarget {
+                            target: Some(inspected.element.clone()),
+                            restrictions: Vec::new(),
+                        },
+                    );
+                    self.symbols[base].declaration.type_id = Some(ty);
+                    self.symbols[id].declaration.view.as_mut()?.inspection = Some(inspected);
+                }
+                _ => {}
+            }
         }
         Some(())
+    }
+
+    fn bind_inspection_path(
+        &mut self,
+        owner: usize,
+        source: usize,
+        inspection: &InlineInspection,
+    ) -> Option<InspectionInfo> {
+        let topic = self.containing_topic(owner);
+        let mut scope = source;
+        let mut parent = source;
+        let mut value = None;
+        let mut steps = Vec::with_capacity(inspection.attributes.len());
+        for name in &inspection.attributes {
+            if !self.step(1 + name.value.len(), &name.span) {
+                return None;
+            }
+            let attr = self.path_attribute(scope, name)?;
+            let ty = self.symbols[attr].declaration.type_id?;
+            let element = match &self.types[ty] {
+                TypeInfo::Collection(collection) => collection.element,
+                _ => ty,
+            };
+            if matches!(&self.types[element], TypeInfo::Geometry(_)) {
+                self.unsupported_expression(&name.span);
+                return None;
+            }
+            if inspection.area.is_some() || !matches!(&self.types[element], TypeInfo::Structure(_))
+            {
+                self.diagnostics.push(
+                    "ILI-INSPECTION-TYPE",
+                    "An inspection requires a structure or geometry attribute and AREA requires an area",
+                    Some(name.span.clone()),
+                );
+                return None;
+            }
+            steps.push(BoundPathStep {
+                reference: self.reference_to_symbol(owner, attr, name)?,
+                selection: None,
+                selection_span: None,
+            });
+            parent = scope;
+            scope = self.path_scope(element, topic, PathContext::RoleSet, &name.span)?;
+            value = Some(ty);
+        }
+        let at = &inspection.attributes.last()?.span;
+        let element = self.reference_to_symbol(
+            owner,
+            scope,
+            &crate::syntax::Name {
+                value: self.symbols[scope].declaration.name.clone(),
+                span: at.clone(),
+            },
+        )?;
+        let parent = self.reference_to_symbol(
+            owner,
+            parent,
+            &crate::syntax::Name {
+                value: self.symbols[parent].declaration.name.clone(),
+                span: at.clone(),
+            },
+        )?;
+        let value_type = scalar_type(&self.types[value?]);
+        let path = self.record_expression(
+            BoundExpressionKind::Path { steps },
+            value_type,
+            value,
+            &inspection.span,
+        );
+        Some(InspectionInfo {
+            path,
+            element,
+            parent,
+        })
     }
 
     fn bind_aggregation(
@@ -515,24 +630,29 @@ impl Analyzer<'_, '_> {
                         );
                         return None;
                     };
-                    let decl = &self.symbols[base].declaration;
-                    let source = self.names[decl.type_reference()?.target_name()];
-                    let source = &self.symbols[source].declaration;
+                    let view = self.symbols[id].declaration.view()?;
+                    let source = self.names[if base == view.bases[0]
+                        && let Some(inspection) = view.inspection.as_ref()
+                    {
+                        inspection.element.target_name()
+                    } else {
+                        self.symbols[base]
+                            .declaration
+                            .type_reference()?
+                            .target_name()
+                    }];
+                    let decl = &self.symbols[source].declaration;
                     let with_roles =
                         self.models[self.symbols[id].model].language() == LanguageVersion::V24;
-                    let roles = source
+                    let roles = decl
                         .association()
                         .filter(|_| with_roles)
                         .map_or(&[][..], |a| &a.roles);
-                    let base_members = source.effective_attributes.as_deref().unwrap_or_default();
+                    let base_members = decl.effective_attributes.as_deref().unwrap_or_default();
                     let amount = roles.len() + base_members.len();
                     if !self.step(amount, &all.span) {
                         return None;
                     }
-                    let source = self.names[self.symbols[base]
-                        .declaration
-                        .type_reference()?
-                        .target_name()];
                     let decl = &self.symbols[source].declaration;
                     let roles = decl
                         .association()

@@ -921,6 +921,14 @@ pub enum ViewFormation {
     Join,
     Union,
     Aggregation,
+    Inspection,
+}
+
+#[derive(Clone, Debug)]
+pub struct InspectionInfo {
+    pub path: ExpressionId,
+    pub element: TypeReference,
+    pub parent: TypeReference,
 }
 
 #[derive(Debug)]
@@ -928,6 +936,7 @@ pub struct ViewInfo {
     pub formation: ViewFormation,
     pub selections: Vec<ExpressionId>,
     pub grouping: Vec<ExpressionId>,
+    pub inspection: Option<InspectionInfo>,
     pub(crate) bases: Vec<usize>,
 }
 

@@ -411,6 +411,18 @@ impl Analyzer<'_, '_> {
             {
                 return Ok(Some(false));
             }
+            match (&left.inspection, &right.inspection) {
+                (Some(a), Some(b)) => {
+                    if !comparison.reference(Some(&a.parent), Some(&b.parent))?
+                        || !comparison.reference(Some(&a.element), Some(&b.element))?
+                    {
+                        return Ok(Some(false));
+                    }
+                    expressions.push((a.path, b.path));
+                }
+                (None, None) => {}
+                _ => return Ok(Some(false)),
+            }
             let (a, b) = (
                 a.effective_attributes.as_deref().unwrap_or_default(),
                 b.effective_attributes.as_deref().unwrap_or_default(),
@@ -649,6 +661,8 @@ impl Comparison<'_> {
                     }
                     for (a, b) in a.iter().zip(b) {
                         if !equivalent_selector(a.selection.as_ref(), b.selection.as_ref())
+                            || (a.reference.declared_name() == "PARENT")
+                                != (b.reference.declared_name() == "PARENT")
                             || !self.reference(Some(&a.reference), Some(&b.reference))?
                         {
                             return Ok(Some(false));

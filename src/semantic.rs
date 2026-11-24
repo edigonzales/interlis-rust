@@ -346,31 +346,14 @@ fn ensure_supported_semantics(
                 }
                 SyntaxDecl::Context(_) => None,
                 SyntaxDecl::View(view) => {
-                    let supported = matches!(
-                        view.origin,
-                        Some(syntax::ViewOrigin::Formation(syntax::Located {
-                            value: syntax::ViewFormation::Projection(_)
-                                | syntax::ViewFormation::Join { .. }
-                                | syntax::ViewFormation::Union(_)
-                                | syntax::ViewFormation::Aggregation { .. },
-                            ..
-                        })) | Some(syntax::ViewOrigin::Extends(_))
-                            | None
-                    );
-                    if !supported {
-                        Some(&view.span)
-                    } else {
-                        view.attributes
-                            .iter()
-                            .find_map(|attribute| match attribute {
-                                syntax::ViewAttribute::Typed(item) => declarations(
-                                    std::slice::from_ref(item.as_ref()),
-                                    work,
-                                    diagnostics,
-                                ),
-                                _ => None,
-                            })
-                    }
+                    view.attributes
+                        .iter()
+                        .find_map(|attribute| match attribute {
+                            syntax::ViewAttribute::Typed(item) => {
+                                declarations(std::slice::from_ref(item.as_ref()), work, diagnostics)
+                            }
+                            _ => None,
+                        })
                 }
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
                 SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
