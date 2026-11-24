@@ -224,6 +224,7 @@ impl Analyzer<'_, '_> {
                     );
                     constraints.push(BoundConstraint {
                         name: None,
+                        target: None,
                         expression: None,
                         span: name.span,
                         source_metadata: None,

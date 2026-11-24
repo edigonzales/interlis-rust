@@ -489,6 +489,7 @@ pub struct ExistenceTarget {
 #[derive(Debug)]
 pub struct BoundConstraint {
     pub name: Option<String>,
+    pub target: Option<TypeReference>,
     pub rule: ConstraintRule,
     pub expression: Option<ExpressionId>,
     pub(crate) span: Span,

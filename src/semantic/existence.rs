@@ -18,7 +18,7 @@ impl Analyzer<'_, '_> {
         targets: &[TargetSyntax],
     ) -> Option<BoundConstraint> {
         let (source, actual) = self.existence_path(owner, path)?;
-        let topic = self.containing_topic(owner);
+        let topic = self.expression_topic(owner);
         let mut required = Vec::with_capacity(targets.len());
         for target in targets {
             let name = &target.viewable;
@@ -63,6 +63,7 @@ impl Analyzer<'_, '_> {
         }
         Some(BoundConstraint {
             name: syntax.name.as_ref().map(|name| name.value.clone()),
+            target: None,
             rule: ConstraintRule::Existence {
                 source_path: source,
                 required,
@@ -165,7 +166,7 @@ impl Analyzer<'_, '_> {
                     return Some(false);
                 }
                 if from_vertex_domain {
-                    let language = self.models[self.symbols[owner].model].language;
+                    let language = self.expression_language(owner);
                     let check = self
                         .check_unit_specialization(actual, expected, false)
                         .and_then(|reason| {

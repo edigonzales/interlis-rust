@@ -5295,7 +5295,7 @@ fn same_topic_constraint_blocks_augment_the_target_in_source_order() {
     outcome(
         single("TOPIC Base=CLASS Item=flag:BOOLEAN; END Item; END Base;
             TOPIC Derived EXTENDS Base=CONSTRAINTS OF Item=MANDATORY CONSTRAINT flag; END; END Derived;"),
-        Status::Incomplete, Some("ILI-UNSUPPORTED"),
+        Status::CheckedSubset, None,
     );
 }
 
@@ -5550,6 +5550,80 @@ fn association_path_access_preserves_the_selected_roles_and_link_multiplicity() 
             ),
             Status::CheckedSubset,
             None,
+        );
+    }
+}
+
+#[test]
+fn inherited_constraints_belong_to_the_extending_topic_and_use_its_members() {
+    for version in ["2.3", "2.4"] {
+        let model = format!(
+            r#"INTERLIS {version}; CONTRACTED MODEL M AT "x" VERSION "1" =
+            TOPIC Base =
+                CLASS Item=END Item;
+                CLASS Holder=old:BOOLEAN; END Holder;
+                ASSOCIATION Link=item -- {{1}} Item; holder -- {{1}} Holder; END Link;
+                CONSTRAINTS OF Holder=MANDATORY CONSTRAINT old; END;
+            END Base;
+            TOPIC Extended EXTENDS Base =
+                CLASS Item (EXTENDED)=flag:BOOLEAN; END Item;
+                FUNCTION check(value:BOOLEAN):BOOLEAN;
+                CONSTRAINTS OF Holder=MANDATORY CONSTRAINT check(item->flag); END;
+            END Extended;
+            TOPIC Sibling EXTENDS Base = END Sibling;
+            END M."#,
+        );
+        let report = outcome(
+            request(vec![("constraints", model.clone())]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let base = graph.declaration("M.Base.Holder").unwrap().constraints();
+        let extended = graph.declaration("M.Extended").unwrap().constraints();
+        assert_eq!(base.len(), 1);
+        assert_eq!(extended.len(), 1);
+        assert!(
+            graph
+                .declaration("M.Sibling")
+                .unwrap()
+                .constraints()
+                .is_empty()
+        );
+        assert_eq!(
+            extended[0].target.as_ref().unwrap().target_name(),
+            "M.Base.Holder"
+        );
+        let interlis::BoundExpressionKind::Call {
+            function,
+            arguments,
+        } = &graph
+            .expression(extended[0].expression.unwrap())
+            .unwrap()
+            .kind
+        else {
+            panic!("expected a function in the extending topic");
+        };
+        assert_eq!(function.target_name(), "M.Extended.check");
+        let interlis::BoundExpressionKind::Path { steps } =
+            &graph.expression(arguments[0]).unwrap().kind
+        else {
+            panic!("expected an object path");
+        };
+        assert_eq!(steps[1].reference.target_name(), "M.Extended.Item.flag");
+        outcome(
+            request(vec![(
+                "constraints",
+                model
+                    .replace("TOPIC Extended EXTENDS Base", "TOPIC Extended")
+                    .replace(
+                        "CONSTRAINTS OF Holder=MANDATORY CONSTRAINT check",
+                        "CONSTRAINTS OF M.Base.Holder=MANDATORY CONSTRAINT check",
+                    )
+                    .replace("Item (EXTENDED)", "Item"),
+            )]),
+            Status::Rejected,
+            Some("ILI-CONSTRAINT-TARGET-TOPIC"),
         );
     }
 }

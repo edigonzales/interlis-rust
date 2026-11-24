@@ -534,7 +534,7 @@ impl Analyzer<'_, '_> {
         ) {
             return Ok(None);
         }
-        let owner_topic = self.containing_topic(owner);
+        let owner_topic = self.expression_topic(owner);
         let object_topic = self.containing_topic(scope);
         let mut candidates = Vec::new();
         let mut declared_later = false;

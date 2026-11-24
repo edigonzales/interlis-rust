@@ -531,7 +531,7 @@ impl Analyzer<'_, '_> {
         owner: usize,
         path: &ObjectPath,
     ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
-        let mut scope = owner;
+        let mut scope = self.expression_object(owner, &path.span)?;
         let mut steps = Vec::with_capacity(path.elements.len());
         let elements = match path.elements.split_first() {
             Some((PathElement::Special(special), tail)) if special.value == SpecialPath::This => {
@@ -539,12 +539,12 @@ impl Analyzer<'_, '_> {
                     let type_id = match self.symbols[owner].declaration.kind {
                         Kind::Class | Kind::Association | Kind::View => {
                             let target =
-                                self.current_object_target(owner, "THIS", &special.span)?;
+                                self.current_object_target(scope, "THIS", &special.span)?;
                             Some(self.object_selection_type(false, target))
                         }
                         Kind::Structure => {
                             let target =
-                                self.current_object_target(owner, "THIS", &special.span)?;
+                                self.current_object_target(scope, "THIS", &special.span)?;
                             let id = self.types.len();
                             self.types.push(TypeInfo::Structure(crate::StructureType {
                                 target: target.target,
@@ -569,7 +569,7 @@ impl Analyzer<'_, '_> {
         if !self.step(elements.len(), &path.span) {
             return None;
         }
-        let topic = self.containing_topic(owner);
+        let topic = self.expression_topic(owner);
         let mut plural_origin = None;
         for (position, element) in elements.iter().enumerate() {
             if let PathElement::Special(special) = element
@@ -862,6 +862,14 @@ impl Analyzer<'_, '_> {
                 "The attribute is absent from this object context",
                 &name.span,
             ),
+        }
+    }
+
+    pub(super) fn expression_object(&mut self, owner: usize, at: &Span) -> Option<usize> {
+        if let Some(topic) = self.constraint_topic {
+            self.contextual_path_scope(topic, owner, at)
+        } else {
+            Some(owner)
         }
     }
 

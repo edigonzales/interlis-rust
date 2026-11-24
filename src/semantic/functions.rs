@@ -610,7 +610,7 @@ impl Analyzer<'_, '_> {
             return None;
         }
         let mut restrictions: Vec<_> = restrictions.into_iter().cloned().collect();
-        if path_value && let Some(topic) = self.containing_topic(owner) {
+        if path_value && let Some(topic) = self.expression_topic(owner) {
             for target in &mut restrictions {
                 let Some(&root) = self.names.get(target.target_name()) else {
                     continue;
@@ -872,7 +872,7 @@ impl Analyzer<'_, '_> {
                 .collect();
             let at = actual.span.clone();
             if matches!(actual.kind, BoundExpressionKind::Path { .. })
-                && let Some(topic) = self.containing_topic(owner)
+                && let Some(topic) = self.expression_topic(owner)
             {
                 for id in &mut source_ids {
                     *id = self

@@ -611,6 +611,8 @@ impl Serialize for DeclarationsOutput<'_> {
         struct Constraint<'a> {
             name: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            target: Option<Reference<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             expression: Option<crate::ExpressionId>,
             #[serde(flatten)]
             rule: Rule<'a>,
@@ -797,6 +799,10 @@ impl Serialize for DeclarationsOutput<'_> {
                     .iter()
                     .map(|constraint| Constraint {
                         name: constraint.name.as_deref(),
+                        target: constraint
+                            .target
+                            .as_ref()
+                            .map(|target| project_reference(target, self.sources)),
                         rule: match &constraint.rule {
                             crate::ConstraintRule::Existence {
                                 source_path,

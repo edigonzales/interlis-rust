@@ -17,6 +17,10 @@ pub(super) enum ExpressionContext {
 }
 
 impl Analyzer<'_, '_> {
+    pub(super) fn expression_language(&self, owner: usize) -> LanguageVersion {
+        self.models[self.symbols[self.constraint_topic.unwrap_or(owner)].model].language
+    }
+
     pub(super) fn bind_expression(
         &mut self,
         owner: usize,
@@ -32,7 +36,7 @@ impl Analyzer<'_, '_> {
         let mut pending = vec![Visit::Start(root)];
         let mut bound = BTreeMap::new();
         let mut literal_scopes = BTreeMap::new();
-        let modern = self.models[self.symbols[owner].model].language == LanguageVersion::V24;
+        let modern = self.expression_language(owner) == LanguageVersion::V24;
         let mut uses_objects = false;
         while let Some(visit) = pending.pop() {
             let id = match visit {
@@ -159,7 +163,7 @@ impl Analyzer<'_, '_> {
                 ExpressionKind::ObjectSet(target) => {
                     let selected = if let Some(target) = target {
                         self.bind_object_target(
-                            owner,
+                            self.constraint_topic.unwrap_or(owner),
                             target,
                             &[Kind::Class, Kind::Association, Kind::View],
                         )?
@@ -167,7 +171,8 @@ impl Analyzer<'_, '_> {
                         self.symbols[owner].declaration.kind,
                         Kind::Class | Kind::Association | Kind::View
                     ) {
-                        self.current_object_target(owner, "ALL", &expression.span)?
+                        let scope = self.expression_object(owner, &expression.span)?;
+                        self.current_object_target(scope, "ALL", &expression.span)?
                     } else {
                         self.diagnostics.push(
                             "ILI-ALL-CONTEXT",
@@ -441,7 +446,16 @@ impl Analyzer<'_, '_> {
         kinds: &[Kind],
         code: &str,
     ) -> Option<BoundName> {
-        match self.lookup_name(owner, &name.segments, &name.span, kinds) {
+        let scope = self.constraint_topic.unwrap_or(owner);
+        if let Some(topic) = self.constraint_topic
+            && let [name] = name.segments.as_slice()
+            && let Some(target) = self
+                .visible_name(topic, &name.value, Some(kinds), &name.span)
+                .ok()?
+        {
+            return Some(BoundName::Declared(target));
+        }
+        match self.lookup_name(scope, &name.segments, &name.span, kinds) {
             Ok(target) => Some(target),
             Err(LookupError::Limit) => None,
             Err(LookupError::Ambiguous(candidates)) => {

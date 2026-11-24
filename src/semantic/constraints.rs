@@ -1,5 +1,5 @@
 use super::{
-    Analyzer, BoundName, Kind, SyntaxDecl, TypeInfo,
+    Analyzer, BoundName, Kind, QualifiedName, SyntaxDecl, TypeInfo,
     expressions::{ExpressionContext, scalar_type},
     paths::PathContext,
 };
@@ -11,11 +11,17 @@ use crate::{
 use std::collections::BTreeMap;
 
 impl Analyzer<'_, '_> {
+    pub(super) fn expression_topic(&self, owner: usize) -> Option<usize> {
+        self.constraint_topic
+            .or_else(|| self.containing_topic(owner))
+    }
+
     pub(super) fn bind_constraints(
         &mut self,
         documents: &BTreeMap<u32, &[Expression]>,
     ) -> Option<()> {
-        let mut attached = BTreeMap::<usize, Vec<&ConstraintSyntax>>::new();
+        let mut attached = BTreeMap::new();
+        let mut inherited = BTreeMap::new();
         for index in 0..self.constraint_blocks.len() {
             let (topic, block) = self.constraint_blocks[index];
             let kinds = &[Kind::Class, Kind::Association, Kind::View];
@@ -43,27 +49,32 @@ impl Analyzer<'_, '_> {
                 continue;
             };
             let target_topic = self.containing_topic(target);
-            if target_topic != Some(topic) {
-                if let Some(base) = target_topic
-                    && self.specializes_symbol(topic, base, &block.target.span)?
-                {
-                    self.unsupported_expression(&block.target.span);
-                } else {
-                    self.diagnostics.push(
-                        "ILI-CONSTRAINT-TARGET-TOPIC",
-                        "External constraints belong in the target's topic",
-                        Some(block.target.span.clone()),
-                    );
-                }
-                continue;
-            }
             if !self.step(block.constraints.len(), &block.span) {
                 return None;
             }
-            attached
-                .entry(target)
-                .or_default()
-                .extend(&block.constraints);
+            let constraints = block
+                .constraints
+                .iter()
+                .map(|constraint| (constraint, Some(&block.target)));
+            if target_topic == Some(topic) {
+                attached
+                    .entry(target)
+                    .or_insert_with(Vec::new)
+                    .extend(constraints);
+            } else if let Some(base) = target_topic
+                && self.specializes_symbol(topic, base, &block.target.span)?
+            {
+                inherited
+                    .entry((topic, target))
+                    .or_insert_with(Vec::new)
+                    .extend(constraints);
+            } else {
+                self.diagnostics.push(
+                    "ILI-CONSTRAINT-TARGET-TOPIC",
+                    "External constraints belong in the target's topic or a topic extending it",
+                    Some(block.target.span.clone()),
+                );
+            }
         }
         for owner in 0..self.symbols.len() {
             let mut bound = Vec::new();
@@ -108,13 +119,32 @@ impl Analyzer<'_, '_> {
                 self.bind_named_constraints(
                     owner,
                     documents,
-                    inline.iter().chain(external),
+                    inline
+                        .iter()
+                        .map(|constraint| (constraint, None))
+                        .chain(external),
                     &mut bound,
                 )?;
             }
             if !bound.is_empty() {
                 self.symbols[owner].declaration.constraints = Some(bound.into_boxed_slice());
             }
+        }
+        let mut by_topic = BTreeMap::new();
+        for ((topic, target), constraints) in inherited {
+            self.constraint_topic = Some(topic);
+            let result = self.bind_named_constraints(
+                target,
+                documents,
+                constraints.into_iter(),
+                by_topic.entry(topic).or_insert_with(Vec::new),
+            );
+            self.constraint_topic = None;
+            result?;
+        }
+        for (topic, mut constraints) in by_topic {
+            constraints.sort_by_key(|constraint| constraint.source_span().sort_key());
+            self.symbols[topic].declaration.constraints = Some(constraints.into_boxed_slice());
         }
         Some(())
     }
@@ -123,11 +153,11 @@ impl Analyzer<'_, '_> {
         &mut self,
         owner: usize,
         documents: &BTreeMap<u32, &[Expression]>,
-        syntax: impl Iterator<Item = &'syntax ConstraintSyntax>,
+        syntax: impl Iterator<Item = (&'syntax ConstraintSyntax, Option<&'syntax QualifiedName>)>,
         bound: &mut Vec<BoundConstraint>,
     ) -> Option<()> {
         let mut names = BTreeMap::new();
-        for constraint in syntax {
+        for (constraint, external_target) in syntax {
             if let Some(name) = &constraint.name {
                 if !self.step(1 + name.value.len(), &name.span) {
                     return None;
@@ -137,11 +167,22 @@ impl Analyzer<'_, '_> {
                     continue;
                 }
             }
+            let target = if let Some(name) = external_target {
+                Some(self.bound_reference(
+                    self.constraint_topic.unwrap_or(owner),
+                    name,
+                    BoundName::Declared(owner),
+                )?)
+            } else {
+                None
+            };
             let expressions = documents[&constraint.span.sort_key().0];
             let (rule, root) = match &constraint.kind {
                 ConstraintKind::Existence { path, required } => {
-                    if let Some(existence) = self.bind_existence(owner, constraint, path, required)
+                    if let Some(mut existence) =
+                        self.bind_existence(owner, constraint, path, required)
                     {
+                        existence.target = target;
                         bound.push(existence);
                     }
                     if self.diagnostics.limited {
@@ -154,7 +195,7 @@ impl Analyzer<'_, '_> {
                     filter,
                     key,
                 } => {
-                    if let Some(unique) = self.bind_unique(
+                    if let Some(mut unique) = self.bind_unique(
                         owner,
                         expressions,
                         constraint,
@@ -162,6 +203,7 @@ impl Analyzer<'_, '_> {
                         *filter,
                         key,
                     ) {
+                        unique.target = target;
                         bound.push(unique);
                     }
                     if self.diagnostics.limited {
@@ -245,7 +287,7 @@ impl Analyzer<'_, '_> {
                     )
                 }
             };
-            if let Some(constraint) = self.bind_constraint(
+            if let Some(mut constraint) = self.bind_constraint(
                 owner,
                 expressions,
                 constraint.name.as_ref(),
@@ -253,6 +295,7 @@ impl Analyzer<'_, '_> {
                 root,
                 &constraint.span,
             ) {
+                constraint.target = target;
                 bound.push(constraint);
             }
             if self.diagnostics.limited {
@@ -281,6 +324,7 @@ impl Analyzer<'_, '_> {
         let expression = self.bind_boolean_expression(owner, expressions, root, context)?;
         Some(BoundConstraint {
             name: name.map(|name| name.value.clone()),
+            target: None,
             rule,
             expression: Some(expression),
             span: span.clone(),
@@ -352,9 +396,9 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 }
-                let topic = self.containing_topic(owner);
-                let language = self.models[self.symbols[owner].model].language();
-                let mut scope = owner;
+                let topic = self.expression_topic(owner);
+                let language = self.expression_language(owner);
+                let mut scope = self.expression_object(owner, &constraint.span)?;
                 let mut steps = Vec::with_capacity(prefix.len());
                 let mut prefix_type = None;
                 for name in prefix {
@@ -414,6 +458,7 @@ impl Analyzer<'_, '_> {
         };
         Some(BoundConstraint {
             name: constraint.name.as_ref().map(|name| name.value.clone()),
+            target: None,
             rule: ConstraintRule::Unique {
                 basket: basket.is_some(),
                 local_prefix,

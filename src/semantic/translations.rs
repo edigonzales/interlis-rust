@@ -604,7 +604,9 @@ impl Comparison<'_> {
         b: &BoundConstraint,
     ) -> Result<bool, ()> {
         self.work.charge(1)?;
-        if !pair_optional(pending, a.expression, b.expression) {
+        if !self.reference(a.target.as_ref(), b.target.as_ref())?
+            || !pair_optional(pending, a.expression, b.expression)
+        {
             return Ok(false);
         }
         use ConstraintRule::*;
