@@ -2131,13 +2131,9 @@ mod tests {
                 .any(|d| d.code == "ILI-NUMERIC-RANGE")
         );
         assert!(!result.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
-        for body in [
-            "DOMAIN D=MANDATORY;",
-            "STRUCTURE Segment=END Segment; LINE FORM curve:Segment;",
-        ] {
-            clean("2.4", body);
-            assert_eq!(report("2.4", body).status(), AnalysisStatus::Incomplete);
-        }
+        let body = "DOMAIN D=MANDATORY;";
+        clean("2.4", body);
+        assert_eq!(report("2.4", body).status(), AnalysisStatus::Incomplete);
     }
     #[test]
     fn recursive_type_limits_precede_deeper_construction_and_recovery_keeps_later_declarations() {

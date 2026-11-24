@@ -1,5 +1,5 @@
 use super::{
-    Analyzer, Kind, LookupError, NumberError, QualifiedName, domains::scalar_extension,
+    Analyzer, Kind, LookupError, NumberError, QualifiedName, SyntaxDecl, domains::scalar_extension,
     units::unit_extends,
 };
 use crate::{
@@ -9,6 +9,45 @@ use crate::{
 use std::collections::BTreeSet;
 
 impl Analyzer<'_, '_> {
+    pub(super) fn bind_line_forms(&mut self) -> Option<()> {
+        for owner in 0..self.symbols.len() {
+            let Some(SyntaxDecl::LineForm(form)) = self.symbols[owner].ast else {
+                continue;
+            };
+            let model = &self.models[self.symbols[owner].model];
+            if model.language() == LanguageVersion::V23 && !model.is_contracted() {
+                self.diagnostics.push(
+                    "ILI-LINE-FORM-CONTRACTED",
+                    "A custom line form requires a CONTRACTED model in INTERLIS 2.3",
+                    Some(form.name.span.clone()),
+                );
+                return None;
+            }
+            let name = QualifiedName {
+                segments: vec![syntax::Name {
+                    value: form.segment.value.clone(),
+                    span: form.segment.span.clone(),
+                }],
+                span: form.segment.span.clone(),
+            };
+            let bound =
+                self.expression_name(owner, &name, &[Kind::Structure], "ILI-LINE-FORM-STRUCTURE")?;
+            let segment = self.bound_structure(owner, bound, &name.span)?;
+            let base = self.predefined_segment(owner, "LineSegment", &form.segment.span)?;
+            if segment == base || !self.specializes_symbol(segment, base, &form.segment.span)? {
+                self.diagnostics.push(
+                    "ILI-LINE-FORM-STRUCTURE",
+                    "The segment structure of a line form must extend INTERLIS.LineSegment",
+                    Some(form.segment.span.clone()),
+                );
+                return None;
+            }
+            self.symbols[owner].declaration.reference =
+                Some(self.bound_reference(owner, &name, bound)?);
+        }
+        Some(())
+    }
+
     pub(super) fn geometry_type(
         &mut self,
         owner: usize,

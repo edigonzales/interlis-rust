@@ -1524,14 +1524,14 @@ mod review_regressions {
                 "FUNCTION f (x:BOOLEAN):BOOLEAN;",
                 AnalysisStatus::CheckedSubset,
             ),
-            ("LINE FORM curve:Segment;", AnalysisStatus::Incomplete),
+            ("LINE FORM curve:Segment;", AnalysisStatus::CheckedSubset),
             ("SIGN BASKET B~S;", AnalysisStatus::Incomplete),
             ("REFSYSTEM BASKET B~S;", AnalysisStatus::Incomplete),
         ] {
             let report = analyze(CompileRequest {
                 sources: vec![SourceInput {
                     name: "x".into(),
-                    text: model(&format!("DOMAIN G (GENERIC)=COORD NUMERIC; X=COORD 0..1; STRUCTURE Segment=END Segment; TOPIC S=END S; CONTEXT first=G=X; empty= {tail}"), "2.4"),
+                    text: model(&format!("DOMAIN G (GENERIC)=COORD NUMERIC; X=COORD 0..1; STRUCTURE Segment EXTENDS INTERLIS.LineSegment=END Segment; TOPIC S=END S; CONTEXT first=G=X; empty= {tail}"), "2.4"),
                 }],
                 limits: Limits::default(),
             })

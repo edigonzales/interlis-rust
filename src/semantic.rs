@@ -15,6 +15,7 @@ mod names;
 mod object_references;
 mod oid;
 mod paths;
+mod predefined;
 mod reference_systems;
 mod references;
 mod subdivisions;
@@ -336,7 +337,7 @@ fn ensure_supported_semantics(
                     }
                 }
                 SyntaxDecl::Unit(_) => None,
-                SyntaxDecl::LineForm(form) => Some(&form.span),
+                SyntaxDecl::LineForm(_) => None,
                 SyntaxDecl::Function(function) => (!supported_function_argument(&function.result)
                     || function
                         .arguments
@@ -570,6 +571,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 view_topic: false,
                 nullable_view_base: false,
                 derived_from: None,
+                predefined: false,
             },
             name_span: name.span.clone(),
             model,
@@ -1232,7 +1234,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 if !self.step(bytes, &name.span) {
                     return None;
                 }
-                (self.symbols[id].declaration.qualified.clone(), None)
+                (
+                    self.symbols[id].declaration.qualified.clone(),
+                    self.symbols[id]
+                        .declaration
+                        .is_predefined()
+                        .then_some(self.models[self.symbols[owner].model].language()),
+                )
             }
             BoundName::Predefined(name, _) => (
                 format!("INTERLIS.{name}"),
@@ -1959,6 +1967,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             return None;
         }
         let mut viewables = self.bind_viewable_bases()?;
+        self.bind_line_forms()?;
         self.check_topic_members()?;
         self.check_abstract_topics(&topics)?;
         self.bind_units()?;

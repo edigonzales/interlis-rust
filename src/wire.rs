@@ -541,6 +541,8 @@ impl Serialize for DeclarationsOutput<'_> {
             final_declaration: bool,
             #[serde(rename = "abstract")]
             abstract_declaration: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            predefined: bool,
             type_reference: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
@@ -606,6 +608,7 @@ impl Serialize for DeclarationsOutput<'_> {
                 declared_mandatory: declaration.declared_mandatory(),
                 final_declaration: declaration.is_final(),
                 abstract_declaration: declaration.is_abstract(),
+                predefined: declaration.is_predefined(),
                 type_reference: reference,
                 base_reference: declaration
                     .base_reference()
@@ -727,7 +730,9 @@ impl Serialize for DeclarationsOutput<'_> {
                     .iter()
                     .map(|reference| project_reference(reference, self.sources))
                     .collect(),
-                location: self.sources.location(declaration.source_span()),
+                location: (!declaration.is_predefined())
+                    .then(|| self.sources.location(declaration.source_span()))
+                    .flatten(),
             })?;
         }
         seq.end()

@@ -1987,8 +1987,11 @@ fn formatted_bounds_accept_abstract_values_and_padded_exponents() {
                 format!(
                     "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
                  STRUCTURE Proto (ABSTRACT)=n(ABSTRACT):NUMERIC; END Proto;
+                 STRUCTURE Mixed (ABSTRACT) EXTENDS Proto=m:0.00..99.99; END Mixed;
                  STRUCTURE Concrete=n:0.10e1..0.99e3; END Concrete;
                  DOMAIN ProtoValue {property}=FORMAT BASED ON Proto (n/2) \"01\"..\"20\";
+                     Dotted (ABSTRACT) EXTENDS ProtoValue=FORMAT BASED ON Mixed (INHERITANCE \".\" m/2)
+                        \"01.02.03\"..\"20.25.26\";
                      Scaled=FORMAT BASED ON Concrete (n/2) \"00.12e2\"..\"00.90e3\";
                  END M."
                 ),
@@ -2003,7 +2006,86 @@ fn formatted_bounds_accept_abstract_values_and_padded_exponents() {
         assert_eq!(lower.components[0].original(), "00.12e2");
         assert_eq!(lower.components[0].coefficient(), "12");
         assert_eq!(lower.components[0].written_exponent(), 2);
+        let Some(TypeInfo::Formatted(dotted)) = graph.effective_type("M.Dotted") else {
+            panic!("expected a format with inherited components");
+        };
+        let (lower, _) = dotted.bounds.as_ref().unwrap();
+        assert_eq!(
+            lower
+                .components
+                .iter()
+                .map(interlis::DecimalInfo::original)
+                .collect::<Vec<_>>(),
+            ["01", "02.03"]
+        );
         outcome(input(""), Status::Rejected, Some("ILI-FORMAT-ABSTRACT"));
+        let mut ambiguous = input("(ABSTRACT)");
+        ambiguous.sources[0].text = ambiguous.sources[0]
+            .text
+            .replace("INHERITANCE \".\"", "INHERITANCE \"\"");
+        outcome(ambiguous, Status::Rejected, Some("ILI-FORMAT-SEPARATOR"));
+    }
+}
+
+#[test]
+fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
+    for (version, contract) in [("2.3", "CONTRACTED"), ("2.4", "")] {
+        let input = |base: &str, contract: &str| {
+            request(vec![(
+                "lines",
+                format!(
+                    "INTERLIS {version}; {contract} MODEL M AT \"x\" VERSION \"1\" =
+                 STRUCTURE Segment {base}=weight:0..10; END Segment;
+                 LINE FORM Custom:Segment;
+                 DOMAIN Vertex2=COORD 0.0..100.0,0.0..100.0;
+                     Path=POLYLINE WITH (STRAIGHTS,Custom) VERTEX Vertex2;
+                 END M."
+                ),
+            )])
+        };
+        let report = outcome(
+            input("EXTENDS INTERLIS.LineSegment", contract),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let form = graph.declaration("M.Custom").unwrap();
+        assert_eq!(form.type_reference().unwrap().target_name(), "M.Segment");
+        let members = graph
+            .effective_attributes("M.Segment")
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            members[0].qualified_name(),
+            "INTERLIS.LineSegment.SegmentEndPoint"
+        );
+        assert!(members[0].is_predefined());
+        assert_eq!(members[0].mandatory(), Some(true));
+        assert_eq!(members[1].qualified_name(), "M.Segment.weight");
+        let TypeInfo::Geometry(geometry) = graph.effective_type("M.Path").unwrap() else {
+            panic!("expected a geometric type");
+        };
+        let interlis::LineForm::Named(named) = &geometry.line_forms[1] else {
+            panic!("expected a named line form");
+        };
+        assert_eq!(named.target_name(), "M.Custom");
+        outcome(
+            input("", contract),
+            Status::Rejected,
+            Some("ILI-LINE-FORM-STRUCTURE"),
+        );
+        outcome(
+            input("EXTENDS INTERLIS.StraightSegment", contract),
+            Status::Rejected,
+            Some("ILI-CLASS-FINAL"),
+        );
+        if version == "2.3" {
+            outcome(
+                input("EXTENDS INTERLIS.LineSegment", ""),
+                Status::Rejected,
+                Some("ILI-LINE-FORM-CONTRACTED"),
+            );
+        }
     }
 }
 

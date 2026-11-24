@@ -129,13 +129,9 @@ impl Analyzer<'_, '_> {
     ) -> Option<TypeReference> {
         match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Structure]) {
             Ok(bound @ BoundName::Declared(_)) => self.bound_reference(owner, name, bound),
-            Ok(BoundName::Predefined(..)) => {
-                self.diagnostics.push(
-                    "ILI-UNSUPPORTED",
-                    "This predefined structure value requires its full declaration",
-                    Some(name.span.clone()),
-                );
-                None
+            Ok(bound @ BoundName::Predefined(..)) => {
+                self.bound_structure(owner, bound, &name.span)?;
+                self.bound_reference(owner, name, bound)
             }
             Err(LookupError::Limit) => None,
             Err(_) => {

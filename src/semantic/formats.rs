@@ -62,16 +62,9 @@ impl Analyzer<'_, '_> {
                 );
             }
         }
-        for (index, part) in syntax.parts.iter().enumerate() {
+        for part in &syntax.parts {
             match part {
                 FormatPart::Literal(literal) => {
-                    if literal.value.is_empty() && index > 0 && index + 1 < syntax.parts.len() {
-                        return self.format_error(
-                            "ILI-FORMAT-SEPARATOR",
-                            "Numeric format components require a nonempty separator",
-                            &literal.span,
-                        );
-                    }
                     if !self.step(literal.value.len() + 1, &literal.span) {
                         return None;
                     }
@@ -108,6 +101,22 @@ impl Analyzer<'_, '_> {
                 FormatPart::Attribute { span, .. } => {
                     self.unsupported_expression(span);
                     return None;
+                }
+            }
+        }
+        let mut separated = true;
+        for part in &parts {
+            match part {
+                FormattedPart::Literal { value, .. } => separated |= !value.is_empty(),
+                FormattedPart::Numeric { attribute, .. } => {
+                    if !separated {
+                        return self.format_error(
+                            "ILI-FORMAT-SEPARATOR",
+                            "Numeric format components require a nonempty separator",
+                            attribute.source_span(),
+                        );
+                    }
+                    separated = false;
                 }
             }
         }
@@ -381,60 +390,100 @@ impl Analyzer<'_, '_> {
 
 fn parse_value<'a>(
     format: &FormattedType,
-    mut text: &str,
+    text: &str,
     limits: &Limits,
     work: &mut WorkBudget,
     component_type: impl Fn(&TypeReference) -> Option<&'a crate::NumericRange>,
 ) -> Result<Option<Vec<DecimalInfo>>, NumberError> {
+    struct Visit<'a> {
+        part: usize,
+        remaining: &'a str,
+        prefix_len: usize,
+        value: Option<DecimalInfo>,
+    }
+    let mut pending = vec![Visit {
+        part: 0,
+        remaining: text,
+        prefix_len: 0,
+        value: None,
+    }];
     let mut values = Vec::new();
-    for (index, part) in format.parts.iter().enumerate() {
+    while let Some(visit) = pending.pop() {
         work.charge(1).map_err(|_| NumberError::Work)?;
+        values.truncate(visit.prefix_len);
+        if let Some(value) = visit.value {
+            values.push(value);
+        }
+        let Some(part) = format.parts.get(visit.part) else {
+            if visit.remaining.is_empty() {
+                return Ok(Some(values));
+            }
+            continue;
+        };
+        let part_index = visit.part + 1;
         match part {
             FormattedPart::Literal { value, .. } => {
-                let Some(rest) = text.strip_prefix(value) else {
-                    return Ok(None);
-                };
-                text = rest;
+                work.charge(u32::try_from(value.len()).map_err(|_| NumberError::Limit)?)
+                    .map_err(|_| NumberError::Work)?;
+                if let Some(rest) = visit.remaining.strip_prefix(value) {
+                    pending.push(Visit {
+                        part: part_index,
+                        remaining: rest,
+                        prefix_len: values.len(),
+                        value: None,
+                    });
+                }
             }
             FormattedPart::Numeric { attribute, width } => {
                 let Some(range) = component_type(attribute) else {
                     return Ok(None);
                 };
-                let next_literal = match format.parts.get(index + 1) {
-                    Some(FormattedPart::Literal { value, .. }) => Some(value.as_str()),
-                    _ => None,
-                };
-                let Some((size, digits)) =
-                    component_prefix(text, range.bounds.as_ref(), next_literal)
+                let Some((digits, ends)) =
+                    component_prefixes(visit.remaining, range.bounds.as_ref())
                 else {
-                    return Ok(None);
+                    continue;
                 };
                 if width
                     .as_ref()
                     .is_some_and(|w| compare_count(&digits.to_string(), w) == Ordering::Less)
                 {
-                    return Ok(None);
+                    continue;
                 }
-                let value = DecimalLiteral::parse_formatted(&text[..size], limits, work)?.info;
-                if let Some(bounds) = &range.bounds
-                    && (compare_decimal(&value, &bounds.lower, work)? == Ordering::Less
-                        || compare_decimal(&value, &bounds.upper, work)? == Ordering::Greater)
-                {
-                    return Ok(None);
+                // Push the shorter forms first so that the longest valid component
+                // wins when an abstract number can end at more than one separator.
+                for end in ends.into_iter().flatten() {
+                    let value = match DecimalLiteral::parse_formatted(
+                        &visit.remaining[..end],
+                        limits,
+                        work,
+                    ) {
+                        Ok(value) => value.info,
+                        Err(NumberError::Form) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if let Some(bounds) = &range.bounds
+                        && (compare_decimal(&value, &bounds.lower, work)? == Ordering::Less
+                            || compare_decimal(&value, &bounds.upper, work)? == Ordering::Greater)
+                    {
+                        continue;
+                    }
+                    pending.push(Visit {
+                        part: part_index,
+                        remaining: &visit.remaining[end..],
+                        prefix_len: values.len(),
+                        value: Some(value),
+                    });
                 }
-                values.push(value);
-                text = &text[size..];
             }
         }
     }
-    Ok(text.is_empty().then_some(values))
+    Ok(None)
 }
 
-fn component_prefix(
+fn component_prefixes(
     text: &str,
     bounds: Option<&NumericBounds>,
-    next_literal: Option<&str>,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, [Option<usize>; 3])> {
     let signed = usize::from(text.starts_with(['+', '-']));
     let digits = text[signed..]
         .bytes()
@@ -444,19 +493,15 @@ fn component_prefix(
         return None;
     }
     let mut end = signed + digits;
-    let use_optional_prefix = |start: usize, finish: usize| {
-        next_literal
-            .is_none_or(|next| text[finish..].starts_with(next) || !text[start..].starts_with(next))
-    };
-    let has_exponent = bounds.is_some_and(|bounds| bounds.lower.scaled || bounds.upper.scaled);
     if let Some(bounds) = bounds {
         let precision = bounds.lower.fractional_digits() as usize;
+        let scaled = bounds.lower.scaled || bounds.upper.scaled;
         if precision > 0 {
             let fraction = text[end..].strip_prefix('.')?.as_bytes().get(..precision)?;
             if !fraction.iter().all(u8::is_ascii_digit) {
                 return None;
             }
-            if has_exponent
+            if scaled
                 && (!text[signed..end].bytes().all(|b| b == b'0')
                     || fraction[0] == b'0' && !fraction.iter().all(|&b| b == b'0'))
             {
@@ -464,29 +509,31 @@ fn component_prefix(
             }
             end += 1 + precision;
         }
-    } else if let Some(fraction) = text[end..].strip_prefix('.') {
-        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 0 && use_optional_prefix(end, end + 1 + digits) {
-            end += 1 + digits;
+        if scaled {
+            end += exponent_length(&text[end..])?;
+        }
+        return Some((digits, [Some(end), None, None]));
+    }
+    let mut ends = [Some(end), None, None];
+    if let Some(fraction) = text[end..].strip_prefix('.') {
+        let length = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if length > 0 {
+            end += 1 + length;
+            ends[1] = Some(end);
         }
     }
-    if let Some(exponent) = text[end..].strip_prefix(['e', 'E'])
-        && (has_exponent || bounds.is_none())
-    {
-        let signed = usize::from(exponent.starts_with(['+', '-']));
-        let digits = exponent[signed..]
-            .bytes()
-            .take_while(u8::is_ascii_digit)
-            .count();
-        if digits > 0 && (has_exponent || use_optional_prefix(end, end + 1 + signed + digits)) {
-            end += 1 + signed + digits;
-        } else if has_exponent {
-            return None;
-        }
-    } else if has_exponent {
-        return None;
-    }
-    Some((end, digits))
+    ends[2] = exponent_length(&text[end..]).map(|length| end + length);
+    Some((digits, ends))
+}
+
+fn exponent_length(text: &str) -> Option<usize> {
+    let exponent = text.strip_prefix(['e', 'E'])?;
+    let signed = usize::from(exponent.starts_with(['+', '-']));
+    let digits = exponent[signed..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    (digits > 0).then_some(1 + signed + digits)
 }
 
 pub(super) fn compare_components(

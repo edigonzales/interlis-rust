@@ -121,6 +121,10 @@ impl Analyzer<'_, '_> {
             Ok(bound @ BoundName::Declared(id)) => {
                 Some((id, self.bound_reference(owner, name, bound)?))
             }
+            Ok(bound @ BoundName::Predefined(_, Kind::Structure)) if kind == Kind::Structure => {
+                let id = self.bound_structure(owner, bound, &name.span)?;
+                Some((id, self.bound_reference(owner, name, bound)?))
+            }
             Ok(BoundName::Predefined(..)) => {
                 self.diagnostics.push(
                     "ILI-UNSUPPORTED",
@@ -187,6 +191,9 @@ impl Analyzer<'_, '_> {
         }
         let mut declared = Vec::new();
         for &owner in order {
+            if self.symbols[owner].declaration.is_predefined() {
+                continue;
+            }
             let mut attributes = Vec::new();
             if let Some(base) = self.symbols[owner].base_scope {
                 let inherited = &self.symbols[base].declaration.effective_attributes;

@@ -387,6 +387,7 @@ impl Analyzer<'_, '_> {
                 | Kind::Context
                 | Kind::View
                 | Kind::ViewBase
+                | Kind::LineForm
         ) {
             return Ok(None);
         }

@@ -947,6 +947,7 @@ pub struct Declaration {
     pub(crate) view_topic: bool,
     pub(crate) nullable_view_base: bool,
     pub(crate) derived_from: Option<TypeReference>,
+    pub(crate) predefined: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1032,6 +1033,9 @@ impl Declaration {
     }
     pub fn derived_from(&self) -> Option<&TypeReference> {
         self.derived_from.as_ref()
+    }
+    pub fn is_predefined(&self) -> bool {
+        self.predefined
     }
     pub fn derivations(&self) -> &[ExpressionId] {
         self.derivations.as_deref().unwrap_or_default()
