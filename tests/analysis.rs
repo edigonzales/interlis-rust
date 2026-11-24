@@ -3243,9 +3243,10 @@ fn formatted_temporal_ranges_bind_domains_and_keep_exact_written_bounds() {
             r#"DOMAIN Calendar = DATE;
            Years = FORMAT Calendar "2010-02-31".."2030-01-02";
            Narrow EXTENDS Years = "2015-01-01".."2025-12-31";
-           Clock = FORMAT INTERLIS.XMLTime "00:00:00.000".."23:59:59.999";
+           Clock = FORMAT INTERLIS.XMLTime "-00:-00:-00.000".."23:59:59.999";
            Stamp EXTENDS INTERLIS.XMLDateTime = "2020-01-01T00:00:00.000".."2020-01-02T12:30:00.001";
-           TOPIC T = CLASS Appointment = time : Clock; starts : Stamp; END Appointment; END T;"#,
+           TOPIC T = CLASS Appointment = time : Clock; day: INTERLIS.XMLDate; starts : Stamp; END Appointment;
+           CLASS Precise EXTENDS Appointment = day (EXTENDED):INTERLIS.XMLDateTime; END Precise; END T;"#,
         ),
         Status::CheckedSubset,
         None,
@@ -3264,6 +3265,10 @@ fn formatted_temporal_ranges_bind_domains_and_keep_exact_written_bounds() {
     };
     assert_eq!(stamp.kind, TemporalKind::DateTime);
     assert_eq!(stamp.upper.components, [2020, 1, 2, 12, 30, 0, 1]);
+    assert!(matches!(
+        graph.effective_type("M.T.Precise.day"),
+        Some(TypeInfo::Temporal(TemporalKind::DateTime))
+    ));
     let location = report
         .sources()
         .location(stamp.upper.source_span())
@@ -3288,6 +3293,10 @@ fn formatted_temporal_ranges_check_edition_component_precision_and_inheritance()
         ),
         (
             r#"DOMAIN D=FORMAT INTERLIS.XMLTime "10:00:00.00".."20:00:00.000";"#,
+            "ILI-FORMAT-BOUNDS",
+        ),
+        (
+            r#"DOMAIN D=FORMAT INTERLIS.XMLTime "-00:-00:-00.001".."20:00:00.000";"#,
             "ILI-FORMAT-BOUNDS",
         ),
         (

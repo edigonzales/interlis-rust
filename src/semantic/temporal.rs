@@ -186,19 +186,23 @@ fn temporal_components(
         }
         components.push(field(hour, 2, 0, 23)?);
         components.push(field(minute, if padded { 2 } else { 1 }, 0, 59)?);
+        let millis = field(millis, 3, 0, 999)?;
+        if second.starts_with('-') && millis != 0 {
+            return None;
+        }
         components.push(field(second, if padded { 2 } else { 1 }, 0, 59)?);
-        components.push(field(millis, 3, 0, 999)?);
+        components.push(millis);
     }
     Some(components)
 }
 
 fn field(text: &str, width: usize, lower: u16, upper: u16) -> Option<u16> {
-    let digits = text.strip_prefix('+').unwrap_or(text);
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
     if digits.len() < width || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let value = digits.parse().ok()?;
-    (lower..=upper).contains(&value).then_some(value)
+    ((lower..=upper).contains(&value) && (!text.starts_with('-') || value == 0)).then_some(value)
 }
 
 pub(super) fn temporal_specializes(own: &TypeInfo, base: &TypeInfo) -> bool {

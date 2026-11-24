@@ -256,9 +256,13 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
-        if matches!(self.types[own_id], TypeInfo::TemporalRange(_))
-            || matches!(self.types[base_id], TypeInfo::TemporalRange(_))
-        {
+        if matches!(
+            self.types[own_id],
+            TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_)
+        ) || matches!(
+            self.types[base_id],
+            TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_)
+        ) {
             if matches!(leaf, TypeSyntax::Named(_)) {
                 self.check_nominal_domain(owner, leaf.span())?;
             }
@@ -491,8 +495,13 @@ impl Analyzer<'_, '_> {
                 self.number_error(NumberError::Work, span);
                 return None;
             }
-            if reference.target_name() == expected.target_name()
-                && reference.predefined_language() == expected.predefined_language()
+            let predefined_temporal_extension = reference.predefined_language().is_some()
+                && expected.predefined_language().is_some()
+                && reference.target_name() == "INTERLIS.XMLDateTime"
+                && expected.target_name() == "INTERLIS.XMLDate";
+            if predefined_temporal_extension
+                || reference.target_name() == expected.target_name()
+                    && reference.predefined_language() == expected.predefined_language()
             {
                 return Some(true);
             }
@@ -634,7 +643,6 @@ pub(super) fn scalar_extension(
         (Boolean, Boolean) => true,
         (Alignment(a), Alignment(b)) => a == b,
         (Blackbox(a), Blackbox(b)) => a == b,
-        (Temporal(a), Temporal(b)) => a == b,
         (EnumTree { domain: a }, EnumTree { domain: b }) => a == b,
         (Oid(OidType::Typed(carrier)), Oid(OidType::Any)) if !carrier.has_unbounded_range() => true,
         (Oid(_), _) | (_, Oid(_)) => {
