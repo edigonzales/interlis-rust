@@ -199,7 +199,7 @@ impl Analyzer<'_, '_> {
                     && self.symbols[member].base_scope.is_some()
                 {
                     let inherited =
-                        self.check_association_fallback(owner, member, &assignments, &at)?;
+                        self.check_inherited_derivations(owner, member, &assignments, &at)?;
                     if assignments.is_empty() && !inherited.is_empty() {
                         self.symbols[member].declaration.derivations =
                             Some(inherited.clone().into_boxed_slice());
@@ -222,7 +222,7 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
-    fn check_association_fallback(
+    pub(super) fn check_inherited_derivations(
         &mut self,
         owner: usize,
         member: usize,
@@ -230,7 +230,7 @@ impl Analyzer<'_, '_> {
         at: &Span,
     ) -> Option<Vec<ExpressionId>> {
         for &value in local.iter().rev() {
-            if self.association_path_is_defined(value, at)? {
+            if self.derivation_is_defined(value, at)? {
                 return Some(Vec::new());
             }
         }
@@ -261,7 +261,7 @@ impl Analyzer<'_, '_> {
                     );
                     return None;
                 }
-                if self.association_path_is_defined(value, at)? {
+                if self.derivation_is_defined(value, at)? {
                     return Some(inherited);
                 }
             }
@@ -270,10 +270,24 @@ impl Analyzer<'_, '_> {
         Some(inherited)
     }
 
-    fn association_path_is_defined(&mut self, value: ExpressionId, at: &Span) -> Option<bool> {
+    fn derivation_is_defined(&mut self, value: ExpressionId, at: &Span) -> Option<bool> {
         let expression = underlying_expression(&self.expressions, value);
         let BoundExpressionKind::Path { steps } = &expression.kind else {
-            return Some(false);
+            return Some(
+                expression.value_type != crate::ExpressionType::Undefined
+                    && matches!(
+                        expression.kind,
+                        BoundExpressionKind::Boolean { .. }
+                            | BoundExpressionKind::Number { .. }
+                            | BoundExpressionKind::Temporal { .. }
+                            | BoundExpressionKind::Formatted { .. }
+                            | BoundExpressionKind::Text { .. }
+                            | BoundExpressionKind::Enumeration { .. }
+                            | BoundExpressionKind::Class { .. }
+                            | BoundExpressionKind::AttributePath { .. }
+                            | BoundExpressionKind::Defined { .. }
+                    ),
+            );
         };
         if self.work.charge(u32::try_from(steps.len()).ok()?).is_err() {
             self.diagnostics

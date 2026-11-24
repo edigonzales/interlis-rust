@@ -8433,3 +8433,57 @@ fn derived_association_checks_the_fallback_of_an_optional_override() {
         );
     }
 }
+
+#[test]
+fn inspection_base_extensions_and_view_factors_use_the_same_optional_alias() {
+    for edition in ["2.3", "2.4"] {
+        let input = |target, factors| {
+            request(vec![(
+                "view.ili",
+                format!(
+                    r#"INTERLIS {edition}; MODEL M AT "x" VERSION "1" =
+                TOPIC T=
+                  STRUCTURE Part=label:TEXT; END Part;
+                  CLASS Item=pieces:BAG OF Part; END Item;
+                  CLASS Special EXTENDS Item=flag:BOOLEAN; END Special;
+                  CLASS Unrelated=flag:BOOLEAN; END Unrelated;
+                  VIEW Pieces INSPECTION OF item~Item->pieces;
+                    BASE item EXTENDED BY sub~{target}
+                    = flag:MANDATORY BOOLEAN := {factors};
+                  END Pieces;
+                END T; END M."#
+                ),
+            )])
+        };
+        let report = outcome(
+            input("Special", "#true, sub->flag"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let aliases: Vec<_> = graph.view_bases("M.T.Pieces").unwrap().collect();
+        assert_eq!(
+            aliases[1].base_reference().unwrap().target_name(),
+            "M.T.Pieces.item"
+        );
+        assert!(aliases[1].is_nullable_view_base());
+        assert_eq!(
+            graph
+                .declaration("M.T.Pieces.flag")
+                .unwrap()
+                .derivations()
+                .len(),
+            2
+        );
+        outcome(
+            input("Unrelated", "#true, sub->flag"),
+            Status::Rejected,
+            Some("ILI-VIEW-BASE-EXTENSION"),
+        );
+        outcome(
+            input("Special", "sub->flag, sub->flag"),
+            Status::Rejected,
+            Some("ILI-VIEW-NULLABLE-ATTRIBUTE"),
+        );
+    }
+}

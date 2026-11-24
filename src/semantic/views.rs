@@ -19,12 +19,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Default)]
 struct ViewAttributeDependencies {
     attributes: Vec<(usize, Span)>,
-    union_branches: Vec<UnionBranch>,
-    nullable: bool,
+    branches: Vec<DerivationBranch>,
 }
 
 #[derive(Default)]
-struct UnionBranch {
+struct DerivationBranch {
     bases: BTreeSet<usize>,
     attributes: BTreeSet<usize>,
     nested_attributes: BTreeSet<usize>,
@@ -322,10 +321,6 @@ impl Analyzer<'_, '_> {
             .iter()
             .map(|extension| extension.extensions.len())
             .sum();
-        if formation == ViewFormation::Inspection && count != 0 {
-            self.unsupported_expression(&syntax.base_extensions[0].span);
-            return None;
-        }
         let (formation_bases, extension_bases) = local.split_at(local.len() - count);
         bases.extend_from_slice(formation_bases);
         let mut candidates = extension_bases.iter().copied();
@@ -863,18 +858,11 @@ impl Analyzer<'_, '_> {
             let (member, previous) = match attribute {
                 ViewAttribute::Typed(item) => {
                     let SyntaxDecl::Attribute {
-                        name,
-                        properties,
-                        derivations,
-                        ..
+                        name, properties, ..
                     } = item.as_ref()
                     else {
                         unreachable!("typed view member has attribute syntax");
                     };
-                    if !union && derivations.len() > 1 {
-                        self.unsupported_expression(item.span());
-                        return None;
-                    }
                     let member = self.path_attribute(id, name)?;
                     let position = inherited.get(&name.value).copied();
                     self.bind_view_attribute_base(
@@ -1238,8 +1226,17 @@ impl Analyzer<'_, '_> {
                 let dep = &dependencies[member];
                 let Some((target, at)) = dep.attributes.get(*next) else {
                     state[*member] = 2;
-                    nullable[*member] =
-                        dep.nullable || dep.attributes.iter().any(|(target, _)| nullable[*target]);
+                    let inherited = self.symbols[*member].base_scope;
+                    nullable[*member] = (inherited.is_some() || !dep.branches.is_empty())
+                        && inherited.is_none_or(|base| nullable[base])
+                        && dep.branches.iter().all(|branch| {
+                            branch.nullable
+                                || branch
+                                    .attributes
+                                    .iter()
+                                    .chain(&branch.nested_attributes)
+                                    .any(|&attribute| nullable[attribute])
+                        });
                     let decl = &self.symbols[*member].declaration;
                     let at = decl
                         .derivations()
@@ -1251,15 +1248,23 @@ impl Analyzer<'_, '_> {
                         .clone();
                     let mandatory = decl.mandatory() == Some(true);
                     let owner = decl.parent?;
+                    if self.symbols[owner].declaration.kind == Kind::View
+                        && inherited.is_some_and(|base| {
+                            self.symbols[base].declaration.type_id != decl.type_id
+                        })
+                    {
+                        let local = decl.derivations().to_vec();
+                        self.check_inherited_derivations(owner, *member, &local, &at)?;
+                    }
                     if let Some(view) = self.symbols[owner].declaration.view()
                         && view.formation == ViewFormation::Union
                     {
-                        if !self.step(view.bases.len() + dep.union_branches.len(), &at) {
+                        if !self.step(view.bases.len() + dep.branches.len(), &at) {
                             return None;
                         }
                         let covered = self.union_coverage(
                             *member,
-                            &dep.union_branches,
+                            &dep.branches,
                             &union_bases,
                             &nullable,
                             &at,
@@ -1352,9 +1357,7 @@ impl Analyzer<'_, '_> {
         }
         for root in roots {
             let branch = self.view_derivation_dependencies(root, union, &mut result)?;
-            if union {
-                result.union_branches.push(branch);
-            }
+            result.branches.push(branch);
         }
         Some(result)
     }
@@ -1364,9 +1367,10 @@ impl Analyzer<'_, '_> {
         root: ExpressionId,
         union: bool,
         result: &mut ViewAttributeDependencies,
-    ) -> Option<UnionBranch> {
+    ) -> Option<DerivationBranch> {
         let actual = underlying_expression(&self.expressions, root);
-        let mut branch = UnionBranch {
+        let mut branch = DerivationBranch {
+            nullable: actual.value_type == ExpressionType::Undefined,
             unconditional: actual.value_type != ExpressionType::Undefined
                 && matches!(
                     actual.kind,
@@ -1379,7 +1383,7 @@ impl Analyzer<'_, '_> {
                         | BoundExpressionKind::Class { .. }
                         | BoundExpressionKind::AttributePath { .. }
                 ),
-            ..UnionBranch::default()
+            ..DerivationBranch::default()
         };
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -1392,10 +1396,7 @@ impl Analyzer<'_, '_> {
                     for (position, step) in steps.iter().enumerate() {
                         let id = self.names[step.reference.target_name()];
                         let target = &self.symbols[id].declaration;
-                        result.nullable |= target.is_nullable_view_base();
-                        if union {
-                            branch.nullable |= target.is_nullable_view_base();
-                        }
+                        branch.nullable |= target.is_nullable_view_base();
                         if union && position == 0 && target.kind == Kind::ViewBase {
                             branch.bases.insert(id);
                         }
@@ -1403,26 +1404,23 @@ impl Analyzer<'_, '_> {
                             result
                                 .attributes
                                 .push((id, step.reference.source_span().clone()));
-                            if union {
-                                if position == 0 {
-                                    branch.attributes.insert(id);
-                                } else {
-                                    branch.nested_attributes.insert(id);
-                                }
+                            if position == 0 {
+                                branch.attributes.insert(id);
+                            } else {
+                                branch.nested_attributes.insert(id);
                             }
                         }
                         if let Some(access) = step.association_access.as_ref()
                             && let Some(&owner) = self.names.get(access.association.target_name())
                             && self.symbols[owner].declaration.derived_from().is_some()
                         {
-                            result.attributes.extend(
-                                self.symbols[owner]
-                                    .declaration
-                                    .association()?
-                                    .roles
-                                    .iter()
-                                    .map(|&role| (role, step.reference.source_span().clone())),
-                            );
+                            let roles = &self.symbols[owner].declaration.association()?.roles;
+                            for &role in roles {
+                                result
+                                    .attributes
+                                    .push((role, step.reference.source_span().clone()));
+                                branch.nested_attributes.insert(role);
+                            }
                         }
                     }
                 }
@@ -1449,7 +1447,7 @@ impl Analyzer<'_, '_> {
     fn union_coverage(
         &mut self,
         member: usize,
-        branches: &[UnionBranch],
+        branches: &[DerivationBranch],
         previous: &BTreeMap<usize, BTreeSet<usize>>,
         nullable: &[bool],
         at: &Span,
