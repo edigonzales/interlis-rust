@@ -149,6 +149,11 @@ impl Span {
 }
 
 impl SourceSet {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+    pub(crate) fn empty() -> Self {
+        Self { files: Vec::new() }
+    }
+
     /// Takes ownership without normalizing text or building text-sized auxiliary indices.
     /// Names are unique, 1–1024 UTF-8 bytes and contain no control characters.
     /// Requests contain 1–4096 sources, in deterministic UTF-8 name order.

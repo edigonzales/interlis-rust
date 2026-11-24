@@ -18,7 +18,10 @@ required-features = ["native-cli"]
 
 [features]
 default = ["native-cli"]
-native-cli = ["dep:same-file"]
+native-cli = [
+    "dep:md-5", "dep:quick-xml", "dep:same-file", "dep:sha2", "dep:tempfile",
+    "dep:time", "dep:ureq", "dep:url",
+]
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
@@ -29,7 +32,14 @@ serde_json = "1"
 unicode-normalization = { version = "0.1.26", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+md-5 = { version = "0.10", optional = true }
+quick-xml = { version = "0.39", optional = true }
 same-file = { version = "1.0.6", optional = true }
+sha2 = { version = "0.10", optional = true }
+tempfile = { version = "3", optional = true }
+time = { version = "0.3", features = ["formatting", "parsing"], optional = true }
+ureq = { version = "3.5", default-features = false, features = ["rustls"], optional = true }
+url = { version = "2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2", optional = true }

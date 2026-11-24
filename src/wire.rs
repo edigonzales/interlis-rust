@@ -79,6 +79,26 @@ pub(crate) fn encode_compilation_report(
     })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+pub(crate) fn encode_check_report(report: &CompilationReport) -> Result<String, RequestError> {
+    #[derive(Serialize)]
+    struct Output<'a> {
+        status: &'static str,
+        diagnostics: Vec<DiagnosticOutput<'a>>,
+    }
+    use crate::CompilationStatus::*;
+    bounded_json(&Output {
+        status: match report.status() {
+            Compiled => "ok",
+            Rejected => "rejected",
+            Incomplete => "incomplete",
+            LimitExceeded => "limit_exceeded",
+            InternalError => "internal_error",
+        },
+        diagnostics: diagnostic_output(report.diagnostics(), report.sources()),
+    })
+}
+
 /// Strict JSON request to a bounded JSON syntax report.
 pub fn parse_json(input: &str) -> Result<String, RequestError> {
     encode_syntax_report(&parse_request_json(input)?)

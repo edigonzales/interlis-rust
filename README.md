@@ -1,8 +1,8 @@
 # interlis-rust
 
 The Rust library, native CLI and WebAssembly package share one parser and model
-compiler for INTERLIS 2.3 and 2.4. Provide every source in the selected models'
-transitive dependency closure. The compiler uses each source's declared edition.
+compiler for INTERLIS 2.3 and 2.4. The compiler uses each source's declared
+edition.
 
 - \`compile(CompileRequest, Option<&[String]>)\` returns a compilation report. The
   \`compiled\` outcome contains a read-only \`CompiledSchema\` with the checked model
@@ -44,7 +44,8 @@ model names to `analyzeJson` or `probe --request`, or repeat `--root MODEL` in
 `probe` file mode. Omit the selection to analyze all supplied models.
 
 Rust 1.99.1 is pinned. Local package tests use Node 22.13.0 and wasm-pack 0.15.1.
-Build dependencies may be downloaded; analysis never downloads models or issuers.
+Rust, Wasm and CLI request mode use explicit sources. Native `check` and
+`compile` can also resolve missing models from local files and repositories.
 
 ```sh
 cargo test --locked
@@ -54,18 +55,36 @@ cargo build --locked
 cargo run -- version
 cargo run -- parse --json model.ili
 cargo run -- parse --request request.json --json
+cargo run -- check model.ili
+cargo run -- check --root Model --repository https://models.interlis.ch/
 cargo run -- compile --json --root Root base.ili model.ili
 cargo run -- compile --request request.json --json
 cargo run -- probe --json model.ili
 cargo run -- probe --request request.json --json
 ```
 
-The CLI compile command returns exit code 0 for a schema, 1 for a rejected
-model, 2 for a malformed request, 3 for an operational failure, 4 for an
-incomplete check, and 5 for a resource limit. For JavaScript, \`compile(request)\`
-accepts an object containing explicit sources, optional roots and optional limits.
-It returns the same report shape as \`compile --json\`, with the checked graph in
-\`schema\`. JSON is a host representation of the result.
+The CLI commands `check` and `compile` return exit code 0 for success, 1 for a
+rejected model, 2 for a malformed request, 3 for an operational failure, 4 for
+an incomplete check, and 5 for a resource limit. `check` is silent on success.
+`check --json` reports status (`ok` on success) and diagnostics. For JavaScript,
+`compile(request)` accepts explicit sources, optional roots and optional limits.
+It returns the same report shape as `compile --json`, with the checked graph in
+`schema`.
+
+Supply files, repeat `--root MODEL`, or combine the two to choose a closure.
+Explicit files take precedence. By default the CLI looks in the immediate
+directories of the supplied files and then in `https://models.interlis.ch/`.
+Use repeatable `--repository LOCATION` or `--repositories 'LOCATION;LOCATION'`
+to replace the default search with an ordered list of directories, repository
+URLs or direct index locations. Repository imports use the importing edition.
+An unqualified repository root tries 2.4 and then 2.3 at each repository.
+Translations request the exact version declared in the source.
+
+`--cache DIR` sets the content cache (default `~/.interlis-cache`).
+HTTP metadata are fresh for 24 hours and model files for seven days.
+`--offline` uses explicit or neighbouring files and verified cached HTTP
+content. Load directory repositories without `--offline`.
+`--no-cache` disables persistent cache reads and writes.
 
 Requests have `{"sources":[{"name":"memory:///a.ili","text":"INTERLIS 2.3; MODEL A AT \"https://example.invalid\" VERSION \"1\" = END A."}]}`;
 optional `limits` fields use the snake_case Rust field names. Unknown and duplicate
@@ -79,14 +98,14 @@ to the native CLI feature. Identity handles stay open for the read set; OS handl
 exhaustion is an operational error. Source paths must be valid Unicode and
 contents strict UTF-8.
 
-File-mode locations use `cli:///<source-number>/<percent-encoded-basename>`.
+Explicit file locations use `cli:///<source-number>/<percent-encoded-basename>`.
 Source numbers start at one and follow sorted canonical paths, so reordering the
 same file set preserves names and diagnostic order. Equal basenames remain
 distinct. Very long labels end with `~`, fitting the 1024-byte logical-name limit
 without splitting an encoded Unicode character; source numbers retain uniqueness.
-Absolute and relative spellings produce the same logical name. Local directory
-paths do not enter the analysis JSON. Request mode
-preserves the caller's exact logical names. Plain diagnostics show logical source,
+Absolute and relative spellings produce the same logical name. Discovered
+sources use their file or repository URI, with query strings removed. Request
+mode preserves the caller's exact logical names. Plain diagnostics show logical source,
 line and UTF-16 column; file I/O errors go to stderr.
 
 Default budgets: 2 MiB/source, 8 MiB total, 250,000 tokens, depth 128,

@@ -84,6 +84,21 @@ impl Diagnostics {
             primary,
             related,
         };
+        self.record(diagnostic);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+    pub fn warning(&mut self, code: &str, message: &str, primary: Option<Span>) {
+        self.record(Diagnostic {
+            code: code.into(),
+            severity: Severity::Warning,
+            message: message.into(),
+            primary,
+            related: Vec::new(),
+        });
+    }
+
+    fn record(&mut self, diagnostic: Diagnostic) {
         if self.entries.len() < self.cap {
             self.entries.push(diagnostic);
         } else {

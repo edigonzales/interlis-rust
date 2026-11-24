@@ -7,6 +7,9 @@ mod lexer;
 mod limits;
 mod model;
 mod number;
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+#[doc(hidden)]
+pub mod repository;
 mod semantic;
 mod source;
 mod syntax;
@@ -233,6 +236,8 @@ struct Frontend {
 }
 
 struct FailedSource {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+    source: u32,
     models: Vec<(String, Option<String>)>,
     diagnostics: diagnostic::Diagnostics,
 }
@@ -289,6 +294,8 @@ fn separate_model_diagnostics(
         position += 1;
         if let Some(diagnostics) = diagnostics {
             failures.push(FailedSource {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+                source: model.span.sort_key().0,
                 models: vec![(model.name.value.clone(), Some(model.version.value.clone()))],
                 diagnostics,
             });
@@ -373,6 +380,8 @@ fn frontend(
                     model_headers.sort_unstable();
                     model_headers.dedup();
                     failed_sources.push(FailedSource {
+                        #[cfg(all(not(target_arch = "wasm32"), feature = "native-cli"))]
+                        source: file as u32,
                         models: model_headers,
                         diagnostics: local,
                     });
@@ -431,6 +440,14 @@ pub fn compile(
     request: CompileRequest,
     roots: Option<&[String]>,
 ) -> Result<CompilationReport, RequestError> {
+    Ok(compilation_report(analyze_models(
+        request,
+        roots,
+        roots.is_some(),
+    )?))
+}
+
+fn compilation_report(report: AnalysisReport) -> CompilationReport {
     let AnalysisReport {
         sources,
         mut diagnostics,
@@ -438,7 +455,7 @@ pub fn compile(
         graph,
         unsupported_version,
         internal_error,
-    } = analyze_models(request, roots, roots.is_some())?;
+    } = report;
     let (status, schema) = match status {
         AnalysisStatus::CheckedSubset => (
             CompilationStatus::Compiled,
@@ -469,22 +486,18 @@ pub fn compile(
         }
         AnalysisStatus::Incomplete => (CompilationStatus::Incomplete, None),
     };
-    Ok(CompilationReport {
+    CompilationReport {
         sources,
         diagnostics,
         status,
         schema,
-    })
+    }
 }
 
-fn analyze_models(
-    request: CompileRequest,
-    roots: Option<&[String]>,
-    scoped: bool,
-) -> Result<AnalysisReport, RequestError> {
+fn validate_roots(roots: Option<&[String]>, limits: &Limits) -> Result<(), RequestError> {
     if let Some(roots) = roots
         && (roots.is_empty()
-            || roots.len() > request.limits.max_syntax_nodes as usize
+            || roots.len() > limits.max_syntax_nodes as usize
             || roots.iter().any(|name| {
                 name.len() > 255
                     || !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
@@ -501,12 +514,29 @@ fn analyze_models(
             "Expected a nonempty list of distinct model names",
         ));
     }
-    let mut frontend = frontend(request.sources, &request.limits, scoped)?;
-    let graph = if frontend.status() == SyntaxStatus::Parsed {
+    Ok(())
+}
+
+fn analyze_models(
+    request: CompileRequest,
+    roots: Option<&[String]>,
+    scoped: bool,
+) -> Result<AnalysisReport, RequestError> {
+    validate_roots(roots, &request.limits)?;
+    let frontend = frontend(request.sources, &request.limits, scoped)?;
+    Ok(analyze_frontend(frontend, roots, &request.limits))
+}
+
+fn analyze_frontend(
+    mut frontend: Frontend,
+    roots: Option<&[String]>,
+    limits: &Limits,
+) -> AnalysisReport {
+    let graph = if frontend.status() == SyntaxStatus::Parsed && !frontend.diagnostics.rejected {
         semantic::analyze(
             &frontend.documents,
             roots,
-            &request.limits,
+            limits,
             &mut frontend.diagnostics,
             frontend.failed_sources,
         )
@@ -526,14 +556,14 @@ fn analyze_models(
     } else {
         AnalysisStatus::Incomplete
     };
-    Ok(AnalysisReport {
+    AnalysisReport {
         sources: frontend.sources,
         status,
         unsupported_version: diagnostics.unsupported_version,
         internal_error: status == AnalysisStatus::Incomplete && !diagnostics.incomplete,
         diagnostics: diagnostics.into_sorted(),
         graph,
-    })
+    }
 }
 
 #[cfg(test)]

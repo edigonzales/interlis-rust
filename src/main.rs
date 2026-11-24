@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 use interlis::{
-    AnalysisStatus, CompilationStatus, CompileRequest, Limits, SourceInput, SourceSet, SyntaxStatus,
+    AnalysisStatus, CompilationStatus, CompileRequest, Limits, SourceInput, SourceSet,
+    SyntaxStatus,
+    repository::{self, LocalSource},
 };
 use std::{
     collections::HashSet,
@@ -11,7 +13,13 @@ use std::{
 };
 
 const HELP: &str = "interlis-compiler (experimental)\n\
-Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler compile [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler compile --request FILE.json --json\n  interlis-compiler probe [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
+Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler check [--json] [--root MODEL ...] [FILE.ili ...]\n  interlis-compiler compile [--json] [--root MODEL ...] [FILE.ili ...]\n  interlis-compiler compile --request FILE.json --json\n  interlis-compiler probe [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n\n\
+Repository options for check and compile:\n\
+  --repository LOCATION   Search a directory, base URL or XML index (repeatable)\n\
+  --repositories LIST     Search a semicolon-separated list of locations\n\
+  --cache DIRECTORY       Use this persistent repository cache\n\
+  --no-cache              Disable the persistent repository cache\n\
+  --offline               Use local files and verified cached HTTP sources\n";
 const MAX_HOST_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -107,7 +115,7 @@ fn logical_source_name(path: &Path, ordinal: usize) -> Result<String, CliError> 
     Ok(name)
 }
 
-fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
+fn read_sources(paths: &[PathBuf]) -> Result<Vec<LocalSource>, CliError> {
     let mut ordered_paths = paths
         .iter()
         .map(|path| {
@@ -141,7 +149,10 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceInput>, CliError> {
         if total > MAX_HOST_BYTES {
             return Err(operational("Files exceed 32 MiB host read limit"));
         }
-        sources.push(SourceInput { name, text });
+        sources.push(LocalSource {
+            path: canonical.clone(),
+            source: SourceInput { name, text },
+        });
     }
     Ok(sources)
 }
@@ -188,6 +199,7 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
             Ok(0)
         }
         Some("compile") => run_request(args, Operation::Compile),
+        Some("check") => run_request(args, Operation::Check),
         Some("probe") => run_request(args, Operation::Probe),
         Some("parse") => run_request(args, Operation::Parse),
         _ => Err(usage(HELP)),
@@ -196,12 +208,13 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
 
 enum Input {
     Json(String),
-    Sources(CompileRequest),
+    Files(Vec<LocalSource>),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Operation {
     Compile,
+    Check,
     Probe,
     Parse,
 }
@@ -214,6 +227,8 @@ fn run_request(
     let mut request = None;
     let mut paths = vec![];
     let mut roots = vec![];
+    let mut repositories = repository::Options::default();
+    let semantic = matches!(operation, Operation::Check | Operation::Compile);
     let mut literal_paths = false;
     while let Some(arg) = args.next() {
         if literal_paths {
@@ -230,6 +245,29 @@ fn run_request(
                         .ok_or_else(|| usage("--root requires a model name"))?,
                 );
             }
+            Some("--repository" | "--repositories") if semantic => {
+                let value = args
+                    .next()
+                    .and_then(|arg| arg.into_string().ok())
+                    .ok_or_else(|| usage("A repository option requires a location"))?;
+                if arg == "--repositories" {
+                    repositories
+                        .repositories
+                        .extend(value.split(';').map(|entry| entry.trim().to_owned()));
+                } else {
+                    repositories.repositories.push(value);
+                }
+            }
+            Some("--cache") if semantic && repositories.cache.is_none() => {
+                repositories.cache = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("--cache requires a directory"))?,
+                ));
+            }
+            Some("--no-cache") if semantic && !repositories.no_cache => {
+                repositories.no_cache = true
+            }
+            Some("--offline") if semantic && !repositories.offline => repositories.offline = true,
             Some("--request") if request.is_none() => {
                 request = Some(PathBuf::from(
                     args.next()
@@ -241,25 +279,34 @@ fn run_request(
         }
     }
     let input = if let Some(path) = request {
-        if !paths.is_empty() || !roots.is_empty() || !json {
+        if !paths.is_empty()
+            || !roots.is_empty()
+            || !json
+            || operation == Operation::Check
+            || !repositories.repositories.is_empty()
+            || repositories.cache.is_some()
+            || repositories.offline
+            || repositories.no_cache
+        {
             return Err(usage(
-                "--request requires --json without source or root arguments",
+                "--request requires --json without source, root or repository arguments",
             ));
         }
         Input::Json(read_bounded(&path)?)
     } else {
-        if paths.is_empty() || paths.len() > 4096 {
-            return Err(usage("Expected 1 to 4096 explicit source files"));
+        if paths.len() > 4096 || paths.is_empty() && (!semantic || roots.is_empty()) {
+            return Err(usage("Expected source files or a named root model"));
         }
-        Input::Sources(CompileRequest {
-            sources: read_sources(&paths)?,
-            limits: Limits::default(),
-        })
+        Input::Files(read_sources(&paths)?)
+    };
+    let explicit = |files: Vec<LocalSource>| CompileRequest {
+        sources: files.into_iter().map(|file| file.source).collect(),
+        limits: Limits::default(),
     };
     if operation == Operation::Parse {
         let report = match input {
             Input::Json(text) => interlis::parse_request_json(&text),
-            Input::Sources(request) => interlis::parse(request),
+            Input::Files(files) => interlis::parse(explicit(files)),
         }
         .map_err(|e| usage(&e.to_string()))?;
         if json {
@@ -278,18 +325,27 @@ fn run_request(
             SyntaxStatus::UnsupportedVersion | SyntaxStatus::LimitExceeded => 4,
         });
     }
-    if operation == Operation::Compile {
+    if semantic {
         let report = match input {
             Input::Json(text) => interlis::compile_request_json(&text),
-            Input::Sources(request) => {
-                interlis::compile(request, (!roots.is_empty()).then_some(roots.as_slice()))
-            }
+            Input::Files(files) => repository::compile(
+                files,
+                (!roots.is_empty()).then_some(roots.as_slice()),
+                repositories,
+            ),
         }
         .map_err(|e| usage(&e.to_string()))?;
         if json {
-            println!("{}", report.to_json().map_err(operational)?);
+            let output = if operation == Operation::Check {
+                repository::check_json(&report)
+            } else {
+                report.to_json()
+            };
+            println!("{}", output.map_err(operational)?);
         } else {
-            println!("{:?}", report.status());
+            if operation == Operation::Compile {
+                println!("{:?}", report.status());
+            }
             for diagnostic in report.diagnostics() {
                 eprintln!("{}", render_diagnostic(report.sources(), diagnostic));
             }
@@ -304,8 +360,10 @@ fn run_request(
     }
     let report = match input {
         Input::Json(text) => interlis::analyze_request_json(&text),
-        Input::Sources(request) if !roots.is_empty() => interlis::analyze_roots(request, &roots),
-        Input::Sources(request) => interlis::analyze(request),
+        Input::Files(files) if !roots.is_empty() => {
+            interlis::analyze_roots(explicit(files), &roots)
+        }
+        Input::Files(files) => interlis::analyze(explicit(files)),
     }
     .map_err(|e| usage(&e.to_string()))?;
     if json {
