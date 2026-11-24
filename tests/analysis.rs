@@ -3819,3 +3819,53 @@ fn coordinate_selections_check_cycles_with_one_alternative_per_generic() {
         Some("ILI-REFSYSTEM-CYCLE"),
     );
 }
+
+#[test]
+fn generic_uses_include_references_introduced_by_the_selected_coordinates() {
+    let domains = "DOMAIN First (GENERIC)=COORD NUMERIC; Second (GENERIC)=COORD NUMERIC;
+        A=COORD 0..9 <Second[1]>; B=COORD 0..9; C=COORD 10..19;
+        CONTEXT primary=First=A;";
+    for (selection, deferred, status, code) in [
+        (
+            "",
+            "",
+            Status::Rejected,
+            Some("ILI-GENERIC-CONTEXT-MISSING"),
+        ),
+        (
+            "CONTEXT alternatives=Second=B OR C;",
+            "",
+            Status::Rejected,
+            Some("ILI-GENERIC-DEFERRED-REQUIRED"),
+        ),
+        (
+            "CONTEXT alternatives=Second=B OR C;",
+            "DEFERRED GENERICS Second;",
+            Status::CheckedSubset,
+            None,
+        ),
+    ] {
+        let report = outcome(
+            single(&format!(
+                "{domains} {selection} TOPIC T={deferred} CLASS Item=value:First; END Item; END T;"
+            )),
+            status,
+            code,
+        );
+        if let Some(graph) = report.graph() {
+            let bindings = graph.declaration("M.T").unwrap().generic_bindings();
+            assert_eq!(bindings.len(), 2);
+            assert_eq!(bindings[1].generic_domain, "M.Second");
+            assert_eq!(bindings[1].concrete_domains, ["M.B", "M.C"]);
+            assert!(bindings[1].deferred);
+        }
+    }
+    outcome(
+        single(
+            "DOMAIN G (GENERIC)=COORD NUMERIC; Direct=0..9 <G[1]>; Indirect=0..9 <Direct>;
+                TOPIC T=CLASS Item=value:Indirect; END Item; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-GENERIC-CONTEXT-MISSING"),
+    );
+}

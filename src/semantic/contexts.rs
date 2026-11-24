@@ -12,6 +12,7 @@ struct Alternatives {
 }
 
 type ContextAlternatives = BTreeMap<usize, Alternatives>;
+type TypeUse = (usize, Option<usize>);
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_contexts(
@@ -330,6 +331,7 @@ impl Analyzer<'_, '_> {
                 &direct_viewables,
                 &derived_structures,
                 &visible[model],
+                &alternatives[model],
                 &span,
             )?;
             if let Some(base) = self.symbols[topic].base_scope {
@@ -397,7 +399,7 @@ impl Analyzer<'_, '_> {
                     for &type_use in &type_uses {
                         self.validate_context_use(type_use, generic, alternative, &span)?;
                         self.check_context_reference_cycles(
-                            type_use,
+                            type_use.0,
                             (generic, alternative),
                             &alternatives[model],
                             &span,
@@ -549,8 +551,9 @@ impl Analyzer<'_, '_> {
         direct: &[Vec<usize>],
         derived_structures: &[Vec<usize>],
         visible_models: &BTreeSet<usize>,
+        alternatives: &ContextAlternatives,
         span: &Span,
-    ) -> Option<BTreeMap<usize, BTreeSet<usize>>> {
+    ) -> Option<BTreeMap<usize, BTreeSet<TypeUse>>> {
         let mut scope = Some(topic);
         let mut containers = Vec::new();
         let mut visible_topics = BTreeSet::new();
@@ -570,7 +573,7 @@ impl Analyzer<'_, '_> {
         }
         let mut checked_containers = BTreeSet::new();
         let mut checked_types = BTreeSet::new();
-        let mut generic_domains = BTreeMap::<usize, BTreeSet<usize>>::new();
+        let mut generic_domains = BTreeMap::<usize, BTreeSet<TypeUse>>::new();
         let mut expanded_any = false;
         while let Some(container) = containers.pop() {
             if !self.step(1, span) {
@@ -586,19 +589,32 @@ impl Analyzer<'_, '_> {
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|&id| self.symbols[id].declaration.type_id)
+                .map(|id| (id, None))
                 .collect();
-            while let Some(id) = types.pop() {
+            while let Some((id, axis)) = types.pop() {
                 if !self.step(1, span) {
                     return None;
                 }
-                if !checked_types.insert(id) {
+                if !checked_types.insert((id, axis)) {
                     continue;
                 }
                 if let Some(&generic) = self.generic_types.get(&id) {
                     generic_domains.entry(generic).or_default();
+                    if let Some(choices) = alternatives.get(&generic) {
+                        if !self.step(choices.domains.len(), span) {
+                            return None;
+                        }
+                        types.extend(choices.domains.iter().filter_map(|&candidate| {
+                            self.symbols[candidate]
+                                .declaration
+                                .type_id
+                                .map(|ty| (ty, axis))
+                        }));
+                    }
+                    continue;
                 }
                 match &self.types[id] {
-                    TypeInfo::Collection(collection) => types.push(collection.element),
+                    TypeInfo::Collection(collection) => types.push((collection.element, None)),
                     TypeInfo::Structure(structure) => {
                         let targets = structure_targets(structure);
                         if targets.is_empty() && !expanded_any {
@@ -625,30 +641,36 @@ impl Analyzer<'_, '_> {
                         }
                     }
                     TypeInfo::Geometry(geometry) => {
-                        self.record_generic_reference(
-                            id,
-                            geometry.vertex.as_ref(),
-                            &mut generic_domains,
-                        );
-                        if let Some(ty) = geometry
-                            .vertex
-                            .as_ref()
-                            .and_then(|vertex| self.names.get(vertex.target_name()))
-                            .and_then(|&vertex| self.symbols[vertex].declaration.type_id)
+                        if let Some(vertex) = &geometry.vertex
+                            && let Some(ty) = self.referenced_context_type(
+                                (id, None),
+                                vertex,
+                                &mut generic_domains,
+                            )
                         {
-                            types.push(ty);
+                            types.push((ty, None));
                         }
                     }
                     ty => {
-                        for range in reference_ranges(ty) {
-                            self.record_generic_reference(
-                                id,
-                                range
-                                    .reference_system
-                                    .as_ref()
-                                    .map(|reference| &reference.domain),
+                        for (index, range) in reference_ranges(ty).iter().enumerate() {
+                            if axis.is_some_and(|axis| axis != index) {
+                                continue;
+                            }
+                            let Some(reference) = &range.reference_system else {
+                                continue;
+                            };
+                            let Some(ty) = self.referenced_context_type(
+                                (id, axis),
+                                &reference.domain,
                                 &mut generic_domains,
-                            );
+                            ) else {
+                                continue;
+                            };
+                            if let Some(axis) = reference.axis {
+                                types.push((ty, Some(usize::from(axis - 1))));
+                            } else if matches!(self.types[ty], TypeInfo::Numeric(_)) {
+                                types.push((ty, None));
+                            }
                         }
                     }
                 }
@@ -671,16 +693,17 @@ impl Analyzer<'_, '_> {
         Some(generic_domains)
     }
 
-    fn record_generic_reference(
+    fn referenced_context_type(
         &self,
-        use_type: usize,
-        reference: Option<&TypeReference>,
-        used: &mut BTreeMap<usize, BTreeSet<usize>>,
-    ) {
-        if let Some(id) = reference.and_then(|reference| self.names.get(reference.target_name()))
-            && self.symbols[*id].declaration.is_generic()
-        {
-            used.entry(*id).or_default().insert(use_type);
+        use_type: TypeUse,
+        reference: &TypeReference,
+        used: &mut BTreeMap<usize, BTreeSet<TypeUse>>,
+    ) -> Option<usize> {
+        let &id = self.names.get(reference.target_name())?;
+        let declaration = &self.symbols[id].declaration;
+        if declaration.is_generic() {
+            used.entry(id).or_default().insert(use_type);
         }
+        declaration.type_id
     }
 }

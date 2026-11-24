@@ -175,7 +175,7 @@ impl Analyzer<'_, '_> {
 
     pub(super) fn validate_context_use(
         &mut self,
-        use_type: usize,
+        (use_type, selected_axis): (usize, Option<usize>),
         generic: usize,
         concrete: usize,
         span: &Span,
@@ -193,7 +193,10 @@ impl Analyzer<'_, '_> {
             }
             return Some(());
         }
-        for range in reference_ranges(&self.types[use_type]) {
+        for (index, range) in reference_ranges(&self.types[use_type]).iter().enumerate() {
+            if selected_axis.is_some_and(|axis| axis != index) {
+                continue;
+            }
             let Some(reference) = &range.reference_system else {
                 continue;
             };
