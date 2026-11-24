@@ -226,14 +226,19 @@ pub(super) fn numeric_compatible(actual: &NumericRange, expected: &NumericRange)
         == expected.unit.as_ref().map(TypeReference::target_name)
         && actual.circular == expected.circular
         && actual.direction == expected.direction
-        && actual
-            .reference_system
-            .as_ref()
-            .map(|value| (value.domain.target_name(), value.axis))
-            == expected
-                .reference_system
-                .as_ref()
-                .map(|value| (value.domain.target_name(), value.axis))
+        && actual.reference_system.as_ref().map(|value| {
+            (
+                std::mem::discriminant(value),
+                value.target().target_name(),
+                value.axis(),
+            )
+        }) == expected.reference_system.as_ref().map(|value| {
+            (
+                std::mem::discriminant(value),
+                value.target().target_name(),
+                value.axis(),
+            )
+        })
 }
 
 fn text_compatible(actual: &TypeInfo, expected: &TypeInfo) -> bool {

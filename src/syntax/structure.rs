@@ -1322,7 +1322,7 @@ mod tests {
             ),
             (
                 "STRUCTURE S=PARAMETER p:BOOLEAN; END S;",
-                AnalysisStatus::Incomplete,
+                AnalysisStatus::Rejected,
             ),
             ("PARAMETER p:MANDATORY;", AnalysisStatus::Incomplete),
         ] {
@@ -1475,7 +1475,7 @@ mod review_regressions {
                 ),
                 (
                     "STRUCTURE S=PARAMETER p:MANDATORY; END S;",
-                    AnalysisStatus::Incomplete,
+                    AnalysisStatus::Rejected,
                 ),
                 ("PARAMETER p:MANDATORY;", AnalysisStatus::Incomplete),
             ] {
@@ -1675,9 +1675,7 @@ mod reference_and_type_start_regressions {
                     (format!("PARAMETER p:{ty};"), false),
                 ] {
                     let report = run(&body, version);
-                    let expected = if parameter_section {
-                        AnalysisStatus::Incomplete
-                    } else if ty.starts_with("ATTRIBUTE OF") {
+                    let expected = if parameter_section || ty.starts_with("ATTRIBUTE OF") {
                         AnalysisStatus::Rejected
                     } else {
                         AnalysisStatus::CheckedSubset

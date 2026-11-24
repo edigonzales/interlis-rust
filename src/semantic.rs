@@ -146,13 +146,6 @@ struct Analyzer<'a, 'd> {
     role_accesses: BTreeMap<(usize, String), usize>,
     generic_types: BTreeMap<usize, usize>,
 }
-fn supported_numeric(ty: &syntax::NumericSyntax) -> bool {
-    !matches!(
-        ty.reference_system,
-        Some(syntax::ReferenceSystemSyntax::Metaobject { .. })
-    )
-}
-
 fn supported_type(ty: &TypeSyntax) -> bool {
     match ty {
         TypeSyntax::Text(_)
@@ -162,13 +155,10 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Temporal { .. }
         | TypeSyntax::Blackbox { .. }
         | TypeSyntax::Enumeration { .. }
-        | TypeSyntax::EnumTree { .. } => true,
-        TypeSyntax::Numeric(n) => supported_numeric(n),
-        TypeSyntax::Coordinate(c) => c.axes.iter().all(supported_numeric),
-        TypeSyntax::Oid { carrier, .. } => match carrier {
-            syntax::OidSyntax::Numeric(range) => supported_numeric(range),
-            _ => true,
-        },
+        | TypeSyntax::EnumTree { .. }
+        | TypeSyntax::Numeric(_)
+        | TypeSyntax::Coordinate(_)
+        | TypeSyntax::Oid { .. } => true,
         TypeSyntax::Collection { element, .. } => supported_type(element),
         TypeSyntax::RestrictedStructure { .. }
         | TypeSyntax::Reference { .. }
@@ -254,7 +244,6 @@ fn ensure_supported_semantics(
                     properties,
                     parameters,
                     attributes,
-                    parameter_section,
                     span,
                     ..
                 } => {
@@ -265,9 +254,12 @@ fn ensure_supported_semantics(
                                 | syntax::Property::Final
                                 | syntax::Property::Extended
                         )
-                    }) || parameter_section.is_some()
-                        || !parameters.is_empty()
-                    {
+                    }) || parameters.iter().any(|parameter| match &parameter.ty {
+                        syntax::ParameterType::Attribute(value) => {
+                            value.ty.as_ref().is_some_and(|ty| !supported_type(ty))
+                        }
+                        syntax::ParameterType::Metaobject(_) => false,
+                    }) {
                         Some(span)
                     } else {
                         declarations(attributes, work, diagnostics)
@@ -394,9 +386,7 @@ fn ensure_supported_semantics(
                 | SyntaxDecl::Context(_)
                 | SyntaxDecl::Function(_)
                 | SyntaxDecl::LineForm(_) => true,
-                SyntaxDecl::MetadataBasket(basket) => {
-                    basket.kind.value == crate::MetadataBasketKind::ReferenceSystem
-                }
+                SyntaxDecl::MetadataBasket(_) => true,
                 SyntaxDecl::Container {
                     kind, properties, ..
                 } => {
@@ -928,14 +918,16 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         self.index_abstract_final(id, properties);
                         self.index_declarations(id, model, attributes);
                         for parameter in parameters {
-                            self.add(
+                            if let Some(parameter_id) = self.add(
                                 Kind::Parameter,
                                 &parameter.name,
                                 &parameter.span,
                                 Some(id),
                                 model,
                                 None,
-                            );
+                            ) {
+                                self.index_abstract_final(parameter_id, &parameter.properties);
+                            }
                         }
                     }
                 }
@@ -2004,6 +1996,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         for id in attributes {
             self.bind_attribute(id)?;
         }
+        self.bind_metadata_parameters(&viewables)?;
         self.validate_subdivisions(&viewables)?;
         self.check_role_names(&viewables)?;
         for id in 0..self.symbols.len() {

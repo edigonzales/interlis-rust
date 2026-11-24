@@ -24,12 +24,12 @@ pub use model::{
     EnumerationElement, EnumerationOrder, ExistenceTarget, ExpressionId, ExpressionType,
     FixedTextFormat, FormattedBound, FormattedPart, FormattedType, FunctionInfo, GeometryKind,
     GeometryType, InspectionInfo, LanguageVersion, LineForm, MetadataBasketKind, ModelGraph,
-    ModelInfo, ModelKind, NumericBounds, NumericDirection, NumericRange, ObjectSelection,
-    ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance, PathSelection,
-    PlausibilityDirection, ReferenceType, RoleInfo, RoleStrength, StructureType, TemporalBound,
-    TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator,
-    UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
-    ViewFormation, ViewInfo,
+    ModelInfo, ModelKind, NumericBounds, NumericDirection, NumericRange, NumericReferenceSystem,
+    ObjectSelection, ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance,
+    PathSelection, PlausibilityDirection, ReferenceType, RoleInfo, RoleStrength, StructureType,
+    TemporalBound, TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference,
+    UnaryOperator, UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale,
+    UnitTerm, ViewFormation, ViewInfo,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

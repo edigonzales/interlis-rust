@@ -29,7 +29,7 @@ impl Analyzer<'_, '_> {
         let ordered = self.inheritance_order(topics, "ILI-TOPIC-CYCLE")?;
         for &id in &ordered {
             let Some(SyntaxDecl::Topic { options, .. }) = self.symbols[id].ast else {
-                unreachable!("only topics have topic dependencies");
+                continue;
             };
             let mut targets = BTreeSet::new();
             let mut dependencies = Vec::new();
@@ -81,6 +81,10 @@ impl Analyzer<'_, '_> {
     ) -> Option<(usize, TypeReference)> {
         match self.lookup_name(owner, &name.segments, &name.span, &[Kind::Topic]) {
             Ok(bound @ BoundName::Declared(id)) => {
+                Some((id, self.bound_reference(owner, name, bound)?))
+            }
+            Ok(bound @ BoundName::Predefined("TIMESYSTEMS", Kind::Topic)) => {
+                let id = self.predefined_time_topic(owner, &name.span)?;
                 Some((id, self.bound_reference(owner, name, bound)?))
             }
             Ok(BoundName::Predefined(..)) => {

@@ -2104,9 +2104,7 @@ mod tests {
     #[test]
     fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
         for ty in [
-            "0..1 {Systems.R}",
             "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)",
-            "OID 0..1 {Systems.R}",
             "ATTRIBUTE OF @arg RESTRICTION (TEXT*4)",
         ] {
             let body = format!("DOMAIN New={ty};");
@@ -2134,6 +2132,13 @@ mod tests {
         let body = "DOMAIN D=MANDATORY;";
         clean("2.4", body);
         assert_eq!(report("2.4", body).status(), AnalysisStatus::Incomplete);
+        for ty in ["0..1 {Systems.R}", "OID 0..1 {Systems.R}"] {
+            let body = format!("DOMAIN D={ty};");
+            clean("2.4", &body);
+            let result = report("2.4", &body);
+            assert_eq!(result.status(), AnalysisStatus::Rejected);
+            assert_eq!(result.diagnostics()[0].code, "ILI-METAOBJECT-REFERENCE");
+        }
     }
     #[test]
     fn recursive_type_limits_precede_deeper_construction_and_recovery_keeps_later_declarations() {

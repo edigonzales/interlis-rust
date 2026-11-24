@@ -736,7 +736,7 @@ pub struct CoordinateType {
 pub struct NumericRange {
     pub bounds: Option<NumericBounds>,
     pub unit: Option<TypeReference>,
-    pub reference_system: Option<DomainReferenceSystem>,
+    pub reference_system: Option<NumericReferenceSystem>,
     pub circular: bool,
     pub direction: Option<NumericDirection>,
 }
@@ -745,6 +745,31 @@ pub struct NumericRange {
 pub struct DomainReferenceSystem {
     pub domain: TypeReference,
     pub axis: Option<u8>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum NumericReferenceSystem {
+    Domain(DomainReferenceSystem),
+    MetaObject {
+        object: TypeReference,
+        axis: Option<u8>,
+    },
+}
+
+impl NumericReferenceSystem {
+    pub fn target(&self) -> &TypeReference {
+        match self {
+            Self::Domain(reference) => &reference.domain,
+            Self::MetaObject { object, .. } => object,
+        }
+    }
+    pub fn axis(&self) -> Option<u8> {
+        match self {
+            Self::Domain(reference) => reference.axis,
+            Self::MetaObject { axis, .. } => *axis,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

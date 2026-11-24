@@ -4026,11 +4026,122 @@ fn numeric_reference_systems_bind_axes_and_exact_convertible_units() {
             };
             range.reference_system.as_ref().unwrap()
         };
-        assert_eq!(system("M.Height").domain.target_name(), "M.Scale");
-        assert_eq!(system("M.Restricted").domain.target_name(), "M.Pos");
-        assert_eq!(system("M.Restricted").axis, Some(1));
-        assert_eq!(system("M.Bearing").axis, None);
-        assert_eq!(system("M.Rate").domain.target_name(), "M.Velocity");
+        assert!(matches!(
+            system("M.Height"),
+            interlis::NumericReferenceSystem::Domain(_)
+        ));
+        assert_eq!(system("M.Height").target().target_name(), "M.Scale");
+        assert_eq!(system("M.Restricted").target().target_name(), "M.Pos");
+        assert_eq!(system("M.Restricted").axis(), Some(1));
+        assert_eq!(system("M.Bearing").axis(), None);
+        assert_eq!(system("M.Rate").target().target_name(), "M.Velocity");
+    }
+}
+
+#[test]
+fn numeric_metaobjects_bind_inherited_names_axis_cardinality_and_units() {
+    for version in ["2.3", "2.4"] {
+        let input = |axis: &str, unit: &str| {
+            request(vec![
+            ("systems", format!(
+                "INTERLIS {version}; REFSYSTEM MODEL Library AT \"x\" VERSION \"1\" =
+                    TOPIC Systems =
+                       STRUCTURE MetricAxis EXTENDS INTERLIS.AXIS =
+                         PARAMETER Unit(EXTENDED):NUMERIC [INTERLIS.m];
+                       END MetricAxis;
+                       CLASS Frame EXTENDS INTERLIS.COORDSYSTEM =
+                         Axis(EXTENDED): LIST {{1..2}} OF MetricAxis;
+                       END Frame;
+                       CLASS Time EXTENDS INTERLIS.SCALSYSTEM =
+                         PARAMETER Unit(EXTENDED):NUMERIC [INTERLIS.s];
+                       END Time;
+                    END Systems; END Library."
+            )),
+            ("use", format!(
+                "INTERLIS {version}; MODEL Use AT \"x\" VERSION \"1\" = IMPORTS Library;
+                 REFSYSTEM BASKET Catalog ~ Library.Systems OBJECTS OF Frame: Nearby OBJECTS OF Time: Clock;
+                 REFSYSTEM BASKET Local EXTENDS Catalog ~ Library.Systems;
+                 DOMAIN East=0..100 [{unit}] {{Local.Nearby[{axis}]}};
+                     Duration=0..10 [INTERLIS.s] {{Catalog.Clock}};
+                 END Use."
+            )),
+        ])
+        };
+        let report = outcome(input("2", "INTERLIS.m"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Numeric(range)) = graph.effective_type("Use.East") else {
+            panic!("expected numeric reference-system type");
+        };
+        let interlis::NumericReferenceSystem::MetaObject { object, axis } =
+            range.reference_system.as_ref().unwrap()
+        else {
+            panic!("expected a bound metadata object");
+        };
+        assert_eq!(object.target_name(), "Use.Catalog.Nearby");
+        assert_eq!(*axis, Some(2));
+        assert_eq!(
+            graph
+                .declaration("Library.Systems.MetricAxis.Unit")
+                .unwrap()
+                .base_reference()
+                .unwrap()
+                .target_name(),
+            "INTERLIS.AXIS.Unit"
+        );
+        outcome(
+            input("3", "INTERLIS.m"),
+            Status::Rejected,
+            Some("ILI-REFSYSTEM-AXIS"),
+        );
+        outcome(
+            input("2", "INTERLIS.s"),
+            Status::Rejected,
+            Some("ILI-REFSYSTEM-UNIT"),
+        );
+    }
+}
+
+#[test]
+fn predefined_time_baskets_support_inherited_metadata_and_type_model_rules() {
+    for version in ["2.3", "2.4"] {
+        let input = |kind: &str| {
+            request(vec![(
+            "time", format!(
+                "INTERLIS {version}; TYPE MODEL Times AT \"x\" VERSION \"1\" = IMPORTS UNQUALIFIED INTERLIS;
+                    {kind} BASKET Local EXTENDS BaseTimeSystems ~ TIMESYSTEMS;
+                    DOMAIN TimeOffset=0..10 [INTERLIS.h] {{Local.UTC}};
+                END Times."
+            ),
+        )])
+        };
+        let report = outcome(input("REFSYSTEM"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Numeric(range)) = graph.effective_type("Times.TimeOffset") else {
+            panic!("expected a bound time offset");
+        };
+        assert_eq!(
+            range
+                .reference_system
+                .as_ref()
+                .unwrap()
+                .target()
+                .target_name(),
+            "INTERLIS.BaseTimeSystems.UTC"
+        );
+        assert_eq!(
+            graph
+                .declaration("INTERLIS.BaseTimeSystems.UTC")
+                .unwrap()
+                .type_reference()
+                .unwrap()
+                .target_name(),
+            "INTERLIS.TIMESYSTEMS.TIMEOFDAYSYS"
+        );
+        outcome(
+            input("SIGN"),
+            Status::Rejected,
+            Some("ILI-TYPE-MODEL-METADATA"),
+        );
     }
 }
 

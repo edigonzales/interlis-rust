@@ -849,7 +849,7 @@ impl Analyzer<'_, '_> {
                         range
                             .reference_system
                             .iter()
-                            .map(|reference| &reference.domain),
+                            .map(crate::NumericReferenceSystem::target),
                     )
                     .map(|reference| {
                         reference.declared_name().len() + reference.target_name().len()

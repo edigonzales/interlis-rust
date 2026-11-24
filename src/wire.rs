@@ -776,7 +776,7 @@ impl<'report> Serialize for TypeOutput<'report> {
             #[serde(skip_serializing_if = "Option::is_none")]
             unit: Option<&'a crate::TypeReference>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            reference_system: Option<&'a crate::DomainReferenceSystem>,
+            reference_system: Option<&'a crate::NumericReferenceSystem>,
             circular: bool,
             direction: Option<crate::NumericDirection>,
         }

@@ -1,10 +1,11 @@
 use super::{
     Analyzer, Kind, LookupError, NumberError, Symbol,
+    collections::{compare_count, structure_targets},
     units::{unit_extends, units_convertible},
 };
 use crate::{
-    DomainReferenceSystem, LanguageVersion, NumericRange, OidType, RelatedLocation, Span, TypeInfo,
-    TypeReference, limits::WorkBudget, syntax,
+    DomainReferenceSystem, LanguageVersion, NumericRange, NumericReferenceSystem, OidType,
+    RelatedLocation, Span, TypeInfo, TypeReference, limits::WorkBudget, syntax,
 };
 use std::collections::BTreeMap;
 
@@ -13,12 +14,15 @@ impl Analyzer<'_, '_> {
         &mut self,
         owner: usize,
         syntax: Option<&syntax::ReferenceSystemSyntax>,
-    ) -> Option<Option<DomainReferenceSystem>> {
-        let Some(syntax::ReferenceSystemSyntax::Domain {
-            reference, axis, ..
-        }) = syntax
-        else {
-            return Some(None);
+    ) -> Option<Option<NumericReferenceSystem>> {
+        let (reference, axis, domain) = match syntax {
+            Some(syntax::ReferenceSystemSyntax::Domain {
+                reference, axis, ..
+            }) => (reference, axis, true),
+            Some(syntax::ReferenceSystemSyntax::Metaobject {
+                reference, axis, ..
+            }) => (reference, axis, false),
+            None => return Some(None),
         };
         let axis = if let Some(axis) = axis {
             let Some(index) = axis
@@ -38,6 +42,12 @@ impl Analyzer<'_, '_> {
         } else {
             None
         };
+        if !domain {
+            return Some(Some(NumericReferenceSystem::MetaObject {
+                object: self.metaobject_reference(owner, reference)?,
+                axis,
+            }));
+        }
         let target =
             match self.lookup_name(owner, &reference.segments, &reference.span, &[Kind::Domain]) {
                 Ok(target) => target,
@@ -51,10 +61,12 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
             };
-        Some(Some(DomainReferenceSystem {
-            domain: self.bound_reference(owner, reference, target)?,
-            axis,
-        }))
+        Some(Some(NumericReferenceSystem::Domain(
+            DomainReferenceSystem {
+                domain: self.bound_reference(owner, reference, target)?,
+                axis,
+            },
+        )))
     }
 
     pub(super) fn validate_domain_reference_systems(&mut self) -> Option<()> {
@@ -66,11 +78,24 @@ impl Analyzer<'_, '_> {
                 let Some(reference) = &range.reference_system else {
                     continue;
                 };
-                if !self.step(1, &reference.domain.span.clone()) {
+                if !self.step(1, &reference.target().span.clone()) {
                     return None;
                 }
                 let range = &reference_ranges(&self.types[id])[index];
-                let reference = range.reference_system.as_ref().unwrap();
+                let reference = match range.reference_system.as_ref().unwrap() {
+                    NumericReferenceSystem::Domain(reference) => reference,
+                    NumericReferenceSystem::MetaObject { object, axis } => {
+                        let class = self.names[self.symbols[self.names[object.target_name()]]
+                            .declaration
+                            .type_reference()?
+                            .target_name()];
+                        let at = object.source_span().clone();
+                        let axis = *axis;
+                        let given = range.unit.clone();
+                        self.validate_metadata_reference(class, axis, given.as_ref(), &at)?;
+                        continue;
+                    }
+                };
                 let at = reference.domain.span.clone();
                 let source = (id, index);
                 let target = self
@@ -197,7 +222,7 @@ impl Analyzer<'_, '_> {
             if selected_axis.is_some_and(|axis| axis != index) {
                 continue;
             }
-            let Some(reference) = &range.reference_system else {
+            let Some(NumericReferenceSystem::Domain(reference)) = &range.reference_system else {
                 continue;
             };
             if self.names.get(reference.domain.target_name()) != Some(&generic) {
@@ -234,6 +259,96 @@ impl Analyzer<'_, '_> {
                 Err(error) => {
                     self.number_error(error, span);
                     return None;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn validate_metadata_reference(
+        &mut self,
+        class: usize,
+        axis: Option<u8>,
+        given: Option<&TypeReference>,
+        at: &Span,
+    ) -> Option<()> {
+        if !self.specializes_metadata_family(class, "INTERLIS.REFSYSTEM", at)? {
+            self.diagnostics.push(
+                "ILI-REFSYSTEM-METAOBJECT",
+                "The numeric reference must name a reference-system metaobject",
+                Some(at.clone()),
+            );
+            return None;
+        }
+        let owners = if let Some(axis) = axis {
+            if !self.specializes_metadata_family(class, "INTERLIS.COORDSYSTEM", at)? {
+                self.diagnostics.push(
+                    "ILI-REFSYSTEM-AXIS",
+                    "An axis reference requires a coordinate-system metaobject",
+                    Some(at.clone()),
+                );
+                return None;
+            }
+            let attribute = self
+                .visible_name(class, "Axis", Some(&[Kind::Attribute]), at)
+                .ok()??;
+            let TypeInfo::Collection(axes) =
+                &self.types[self.symbols[attribute].declaration.type_id?]
+            else {
+                unreachable!("the predefined Axis attribute has a collection type");
+            };
+            if axes.cardinality.upper.as_ref().is_some_and(|upper| {
+                compare_count(&axis.to_string(), upper) == std::cmp::Ordering::Greater
+            }) {
+                self.diagnostics.push(
+                    "ILI-REFSYSTEM-AXIS",
+                    "The referenced axis exceeds the coordinate-system axis cardinality",
+                    Some(at.clone()),
+                );
+                return None;
+            }
+            let TypeInfo::Structure(element) = &self.types[axes.element] else {
+                unreachable!("coordinate axes are structures");
+            };
+            structure_targets(element)
+                .iter()
+                .map(|target| self.names[target.target_name()])
+                .collect::<Vec<_>>()
+        } else {
+            vec![class]
+        };
+        for owner in owners {
+            let Some(parameter) = self
+                .visible_name(owner, "Unit", Some(&[Kind::Parameter]), at)
+                .ok()?
+            else {
+                continue;
+            };
+            let TypeInfo::Numeric(ty) = &self.types[self.symbols[parameter].declaration.type_id?]
+            else {
+                unreachable!("metadata unit parameters are numeric");
+            };
+            if let Some(required) = ty.unit.as_ref() {
+                match compatible_reference_unit(
+                    &self.symbols,
+                    &self.names,
+                    given,
+                    required,
+                    &mut self.work,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.diagnostics.push(
+                            "ILI-REFSYSTEM-UNIT",
+                            "The numeric unit must be compatible with the selected metadata parameter",
+                            Some(at.clone()),
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        self.number_error(error, at);
+                        return None;
+                    }
                 }
             }
         }

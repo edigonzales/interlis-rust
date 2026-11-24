@@ -131,6 +131,7 @@ pub(crate) enum Declaration {
         oid: OidRule,
         #[allow(dead_code)] // Preserved section spelling; semantically inert.
         attribute_section: Option<Span>,
+        #[allow(dead_code)] // Preserve the section marker in the syntax tree.
         parameter_section: Option<Span>,
         parameters: Vec<ParameterDecl>,
         constraints: Vec<ConstraintSyntax>,
@@ -1099,7 +1100,7 @@ mod unsupported_regressions {
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
             for body in [
-                "STRUCTURE S=value:0..100 {Systems.Position}; END S;",
+                "STRUCTURE Inner=n:0..10; END Inner; DOMAIN Code=FORMAT BASED ON Inner (n); STRUCTURE Outer=part:Inner; END Outer; DOMAIN Nested=FORMAT BASED ON Outer (part/Code);",
                 "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
             ] {
                 let text = format!(

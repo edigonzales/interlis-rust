@@ -976,7 +976,10 @@ impl Comparison<'_> {
             return Ok(false);
         }
         if let (Some(a), Some(b)) = (&a.reference_system, &b.reference_system) {
-            if a.axis != b.axis || !self.reference(Some(&a.domain), Some(&b.domain))? {
+            if std::mem::discriminant(a) != std::mem::discriminant(b)
+                || a.axis() != b.axis()
+                || !self.reference(Some(a.target()), Some(b.target()))?
+            {
                 return Ok(false);
             }
         } else if a.reference_system.is_some() != b.reference_system.is_some() {

@@ -554,7 +554,7 @@ impl Analyzer<'_, '_> {
                         return None;
                     }
                     pending.push(Walk::Leave(node));
-                    let Some(reference) =
+                    let Some(crate::NumericReferenceSystem::Domain(reference)) =
                         &reference_ranges(&self.types[node.0])[node.1].reference_system
                     else {
                         continue;

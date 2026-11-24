@@ -381,7 +381,7 @@ impl Analyzer<'_, '_> {
                             .flatten()
                     })
                     .map(|reference| {
-                        reference.domain.declared.len() + reference.domain.target.len()
+                        reference.target().declared.len() + reference.target().target.len()
                     })
                     .sum::<usize>();
                 let crs_bytes = match (own_type, base_type) {
@@ -757,9 +757,10 @@ fn numeric_extension(
     }
     if let Some(reference) = &base.reference_system
         && own.reference_system.as_ref().map_or(!inline, |own| {
-            own.domain.target_name() != reference.domain.target_name()
-                || own.domain.predefined_language() != reference.domain.predefined_language()
-                || own.axis != reference.axis
+            std::mem::discriminant(own) != std::mem::discriminant(reference)
+                || own.target().target_name() != reference.target().target_name()
+                || own.target().predefined_language() != reference.target().predefined_language()
+                || own.axis() != reference.axis()
         })
     {
         return Ok(Some((

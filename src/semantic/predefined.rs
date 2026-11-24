@@ -139,6 +139,10 @@ impl Analyzer<'_, '_> {
         name: &str,
         at: &Span,
     ) -> Option<usize> {
+        if matches!(name, "TIMESYSTEMS.CALENDAR" | "TIMESYSTEMS.TIMEOFDAYSYS") {
+            self.predefined_time_topic(owner, at)?;
+            return self.names.get(&format!("INTERLIS.{name}")).copied();
+        }
         let (kind, base, abstract_declaration) = match name {
             "AXIS" => (Kind::Structure, None, false),
             "METAOBJECT" => (Kind::Class, None, true),
@@ -272,7 +276,95 @@ impl Analyzer<'_, '_> {
         Some(id)
     }
 
-    fn predefined_reference(&self, owner: usize, name: &str) -> TypeReference {
+    pub(super) fn predefined_time_topic(&mut self, owner: usize, at: &Span) -> Option<usize> {
+        if let Some(&id) = self.names.get("INTERLIS.TIMESYSTEMS") {
+            return Some(id);
+        }
+        let model = self.symbols[owner].model;
+        let namespace = self.predefined_namespace(model)?;
+        let name = Name {
+            value: "TIMESYSTEMS".into(),
+            span: Span::predefined(),
+        };
+        let topic = self.add(Kind::Topic, &name, &name.span, Some(namespace), model, None)?;
+        self.symbols[topic].declaration.predefined = true;
+        let base = self.predefined_metadata(owner, "SCALSYSTEM", at)?;
+        let unit = self
+            .visible_name(base, "Unit", Some(&[Kind::Parameter]), at)
+            .ok()??;
+        for name in ["CALENDAR", "TIMEOFDAYSYS"] {
+            let name = Name {
+                value: name.into(),
+                span: Span::predefined(),
+            };
+            let id = self.add(Kind::Class, &name, &name.span, Some(topic), model, None)?;
+            self.symbols[id].base_scope = Some(base);
+            self.symbols[id].declaration.predefined = true;
+            self.symbols[id].declaration.base_reference =
+                Some(self.predefined_reference(owner, "SCALSYSTEM"));
+            self.symbols[id].declaration.effective_attributes =
+                self.symbols[base].declaration.effective_attributes.clone();
+            let ty = self.types.len();
+            self.types.push(TypeInfo::Numeric(NumericRange {
+                bounds: None,
+                unit: Some(self.predefined_reference(owner, "TIME")),
+                reference_system: None,
+                circular: false,
+                direction: None,
+            }));
+            let parameter = self.predefined_member(id, Kind::Parameter, "Unit", ty, false, None)?;
+            let name = Name {
+                value: "Unit".into(),
+                span: Span::predefined(),
+            };
+            self.symbols[parameter].base_scope = Some(unit);
+            self.symbols[parameter].declaration.base_reference =
+                Some(self.reference_to_symbol(owner, unit, &name)?);
+        }
+        Some(topic)
+    }
+
+    pub(super) fn predefined_time_basket(&mut self, owner: usize, at: &Span) -> Option<usize> {
+        if let Some(&id) = self.names.get("INTERLIS.BaseTimeSystems") {
+            return Some(id);
+        }
+        self.predefined_time_topic(owner, at)?;
+        let model = self.symbols[owner].model;
+        let namespace = self.predefined_namespace(model)?;
+        let name = Name {
+            value: "BaseTimeSystems".into(),
+            span: Span::predefined(),
+        };
+        let id = self.add(
+            Kind::MetadataBasket,
+            &name,
+            &name.span,
+            Some(namespace),
+            model,
+            None,
+        )?;
+        self.symbols[id].declaration.predefined = true;
+        self.symbols[id].declaration.metadata_kind =
+            Some(crate::MetadataBasketKind::ReferenceSystem);
+        self.symbols[id].declaration.reference =
+            Some(self.predefined_reference(owner, "TIMESYSTEMS"));
+        for (name, class) in [
+            ("GregorianCalendar", "TIMESYSTEMS.CALENDAR"),
+            ("UTC", "TIMESYSTEMS.TIMEOFDAYSYS"),
+        ] {
+            let name = Name {
+                value: name.into(),
+                span: Span::predefined(),
+            };
+            let object = self.add(Kind::MetaObject, &name, &name.span, Some(id), model, None)?;
+            self.symbols[object].declaration.predefined = true;
+            self.symbols[object].declaration.reference =
+                Some(self.predefined_reference(owner, class));
+        }
+        Some(id)
+    }
+
+    pub(super) fn predefined_reference(&self, owner: usize, name: &str) -> TypeReference {
         TypeReference {
             declared: name.into(),
             target: format!("INTERLIS.{name}"),
