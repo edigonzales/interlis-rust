@@ -5401,6 +5401,16 @@ fn attribute_path_assignment_distinguishes_the_object_instances_of_its_selector(
         Status::Rejected,
         Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
     );
+    outcome(
+        single(
+            "TOPIC T=STRUCTURE Scope=selector:CLASS; chosen:ATTRIBUTE OF selector; END Scope;
+              CLASS Item=entries:LIST {1..2} OF Scope;
+                 copy:ATTRIBUTE OF entries[FIRST]->selector := entries[1]->chosen;
+              END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
 }
 
 #[test]

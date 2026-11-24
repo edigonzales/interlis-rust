@@ -294,7 +294,10 @@ impl Analyzer<'_, '_> {
                                 .zip(target)
                                 .all(|(source, target)| {
                                     source.reference.target_name() == target.reference.target_name()
-                                        && source.selection == target.selection
+                                        && equivalent_selector(
+                                            source.selection.as_ref(),
+                                            target.selection.as_ref(),
+                                        )
                                 })
                     }
                     _ => false,
@@ -920,4 +923,13 @@ impl Analyzer<'_, '_> {
         self.diagnostics.push(code, message, Some(at.clone()));
         None
     }
+}
+
+fn equivalent_selector(source: Option<&PathSelection>, target: Option<&PathSelection>) -> bool {
+    source == target
+        || match (source, target) {
+            (Some(PathSelection::First), Some(PathSelection::Index(index)))
+            | (Some(PathSelection::Index(index)), Some(PathSelection::First)) => index == "1",
+            _ => false,
+        }
 }
