@@ -144,6 +144,16 @@ fn check_uses_explicit_and_neighbour_models_and_leaves_request_mode_explicit() {
         "ILI-IMPORT-NOT-FOUND"
     );
     assert_eq!(explicit_request["diagnostics"][0]["source"], "original");
+
+    write(dir, "broken.ili", [0xff]);
+    let broken = report(cli().args(["check", "--offline"]).arg(&main), 3);
+    assert_eq!(broken["diagnostics"][0]["code"], "ILI-RES-INVALID-SOURCE");
+    assert!(
+        broken["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/broken.ili")
+    );
 }
 
 #[test]
@@ -264,6 +274,48 @@ fn repository_order_editions_version_chains_and_exact_translations() {
         0,
     );
     expect_model(&earlier, "Base", "old-edition", "/base23.ili");
+}
+
+#[test]
+fn a_new_file_can_make_an_already_selected_root_ambiguous() {
+    let repository = tempfile::tempdir().unwrap();
+    let dir = repository.path();
+    write(
+        dir,
+        "ilimodels.xml",
+        index(&[
+            model_entry("Base", "4", "bundle.ili", "old", ""),
+            model_entry(
+                "Base",
+                "4",
+                "new.ili",
+                "new",
+                "<precursorVersion>old</precursorVersion>",
+            ),
+            model_entry("Other", "4", "bundle.ili", "1", ""),
+        ]),
+    );
+    write(
+        dir,
+        "bundle.ili",
+        format!(
+            "{}MODEL Other AT \"{ISSUER}\" VERSION \"1\" = END Other.",
+            ili("2.4", "Base", "old", "")
+        ),
+    );
+    write(dir, "new.ili", ili("2.4", "Base", "new", ""));
+
+    let compile = |first, second| {
+        let mut command = cli();
+        command
+            .args(["compile", "--root", first, "--root", second, "--repository"])
+            .arg(dir);
+        command
+    };
+    let ambiguous = report(&mut compile("Base", "Other"), 1);
+    assert_eq!(ambiguous["diagnostics"][0]["code"], "ILI-RES-AMBIGUOUS");
+    let shared = report(&mut compile("Other", "Base"), 0);
+    expect_model(&shared, "Base", "old", "/bundle.ili");
 }
 
 #[test]

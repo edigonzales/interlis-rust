@@ -208,6 +208,8 @@ impl Resolver {
                 place: None,
             }));
         }
+        let initial_models = self.selected.clone();
+        let initial_needs = self.pending.clone();
         while !self.limited
             && let Some(need) = self.pending.pop_front()
         {
@@ -215,11 +217,19 @@ impl Resolver {
                 self.limited = true;
                 break;
             }
+            let available = self.sources.len();
             let result = self.resolve(&need);
             for message in std::mem::take(&mut self.search.warnings) {
                 self.say("ILI-RES-WARNING", message, need.place, false, true);
             }
             match result {
+                Ok(_) if self.sources.len() != available => {
+                    // A file can introduce further models at the same or a
+                    // better priority. Reconsider existing bindings before
+                    // validating the now available closure.
+                    self.selected.clone_from(&initial_models);
+                    self.pending.clone_from(&initial_needs);
+                }
                 Ok(selected) => self.select(selected),
                 Err(SearchError::Limit) => self.limited = true,
                 Err(error) => {
@@ -382,7 +392,7 @@ impl Resolver {
             return Ok(id);
         }
         if self.default_search && !self.directories.is_empty() {
-            self.neighbours()?;
+            self.neighbours(need.place)?;
             if let Some(id) = self.local_candidate(need)? {
                 return Ok(id);
             }
@@ -395,7 +405,7 @@ impl Resolver {
         self.load_model(need, selected)
     }
 
-    fn neighbours(&mut self) -> Result<(), SearchError> {
+    fn neighbours(&mut self, place: Option<Place>) -> Result<(), SearchError> {
         let mut paths = BTreeSet::new();
         for directory in std::mem::take(&mut self.directories) {
             for entry in fs::read_dir(directory).map_err(|e| SearchError::Load(e.into()))? {
@@ -417,7 +427,19 @@ impl Resolver {
             if self.loaded.contains_key(&uri) {
                 continue;
             }
-            let payload = read_local(&uri).map_err(SearchError::Load)?;
+            let payload = match read_local(&uri) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.say(
+                        load_code(error),
+                        format!("Neighbour source {}: {error}", safe_uri(&uri)),
+                        place,
+                        true,
+                        false,
+                    );
+                    return Err(SearchError::Reported);
+                }
+            };
             self.fetched_source(uri, payload.text, Origin::Neighbour);
             if self.limited {
                 return Err(SearchError::Limit);
