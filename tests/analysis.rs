@@ -8167,7 +8167,7 @@ fn standard_area_functions_bind_attribute_and_text_paths_in_the_population_scope
                 Boundary=SURFACE WITH (STRAIGHTS) VERTEX Vertex2 WITHOUT OVERLAPS >0.010;
             STRUCTURE Part=surface:Boundary; END Part;
             STRUCTURE Container=parts:BAG OF Part; END Container;
-            TOPIC T=CLASS Item=surface:Boundary; pieces:BAG OF Part; nested:Container; label:TEXT;
+            TOPIC T=CLASS Item=surface:Boundary; pieces:LIST OF Part; nested:BAG OF Container; label:TEXT;
                 SET CONSTRAINT {condition};
             END Item; END T; END M."#
             ),
@@ -8195,9 +8195,10 @@ fn standard_area_functions_bind_attribute_and_text_paths_in_the_population_scope
             .expressions()
             .iter()
             .filter_map(|expression| match &expression.kind {
-                interlis::BoundExpressionKind::TextPath { binding, .. } => {
-                    graph.expression(*binding)
-                }
+                interlis::BoundExpressionKind::TextPath {
+                    binding: Some(binding),
+                    ..
+                } => graph.expression(*binding),
                 _ => None,
             })
             .collect();
@@ -8219,6 +8220,23 @@ fn standard_area_functions_bind_attribute_and_text_paths_in_the_population_scope
         Status::CheckedSubset,
         None,
     );
+    let mut singleton = input("2.4", r#"INTERLIS.areAreas2(THIS, UNDEFINED, "surface")"#);
+    singleton.sources[0].text = singleton.sources[0]
+        .text
+        .replace("SET CONSTRAINT", "MANDATORY CONSTRAINT");
+    outcome(singleton, Status::CheckedSubset, None);
+    let mut generic = input(
+        "2.4",
+        r#"INTERLIS.areAreas3(objects(#true), UNDEFINED, "surface")"#,
+    );
+    generic.sources[0].text = generic.sources[0].text.replace(
+        "STRUCTURE Part",
+        "FUNCTION objects(test:BOOLEAN):OBJECTS OF ANYCLASS; STRUCTURE Part",
+    );
+    let report = outcome(generic, Status::CheckedSubset, None);
+    assert!(report.graph().unwrap().expressions().iter().any(|expression| {
+        matches!(&expression.kind, interlis::BoundExpressionKind::TextPath { binding: None, value } if value == "surface")
+    }));
     for (condition, code) in [
         (
             "INTERLIS.areAreas(ALL, >>label, >>surface)",
@@ -8238,5 +8256,48 @@ fn standard_area_functions_bind_attribute_and_text_paths_in_the_population_scope
         ),
     ] {
         outcome(input("2.4", condition), Status::Rejected, Some(code));
+    }
+}
+
+#[test]
+fn derived_association_checks_the_fallback_of_an_optional_override() {
+    for edition in ["2.3", "2.4"] {
+        let input = |prior, mandatory| {
+            request(vec![(
+                "fallback.ili",
+                format!(
+                    r#"INTERLIS {edition}; MODEL M AT "x" VERSION "1" =
+                TOPIC T=
+                  CLASS A=oldRank:0..{prior}; actualRank:{mandatory} 0..5; END A;
+                  CLASS B=END B;
+                  VIEW Rows JOIN OF a~A,b~B;=END Rows;
+                  ASSOCIATION Base DERIVED FROM row~Rows=
+                    left -- A := row->a; right -- B := row->b;
+                    rank:0..10 := row->a->oldRank;
+                  END Base;
+                  ASSOCIATION Child EXTENDS Base=
+                    rank (EXTENDED):0..5 := row->a->actualRank;
+                  END Child;
+                END T; END M."#
+                ),
+            )])
+        };
+        outcome(input(5, ""), Status::CheckedSubset, None);
+        outcome(input(10, "MANDATORY"), Status::CheckedSubset, None);
+        let failed = outcome(
+            input(10, ""),
+            Status::Rejected,
+            Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+        );
+        let diagnostic = &failed.diagnostics()[0];
+        let inherited = failed
+            .sources()
+            .location(&diagnostic.related[0].span)
+            .unwrap();
+        let text = failed.sources().files()[0].text();
+        assert_eq!(
+            &text[inherited.start_byte as usize..inherited.end_byte as usize],
+            "row->a->oldRank"
+        );
     }
 }

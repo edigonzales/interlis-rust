@@ -20,6 +20,7 @@ use std::cmp::Ordering;
 pub(super) enum PathContext {
     Object,
     RoleSet,
+    AreaArgument,
     UniquePrefix(LanguageVersion),
 }
 
@@ -486,6 +487,15 @@ impl Analyzer<'_, '_> {
         owner: usize,
         path: &ObjectPath,
     ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
+        self.expression_path_with_context(owner, path, PathContext::Object)
+    }
+
+    pub(super) fn expression_path_with_context(
+        &mut self,
+        owner: usize,
+        path: &ObjectPath,
+        context: PathContext,
+    ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
         let mut scope = self.expression_object(owner, &path.span)?;
         let mut steps = Vec::with_capacity(path.elements.len());
         let elements = match path.elements.split_first() {
@@ -803,7 +813,9 @@ impl Analyzer<'_, '_> {
                     Some(value),
                 ));
             }
-            let context = if matches!(&self.types[value], TypeInfo::ObjectSelection(selection) if selection.plural)
+            let context = if context == PathContext::AreaArgument {
+                context
+            } else if matches!(&self.types[value], TypeInfo::ObjectSelection(selection) if selection.plural)
             {
                 plural_origin.get_or_insert_with(|| name.span.clone());
                 PathContext::RoleSet
@@ -1079,7 +1091,9 @@ impl Analyzer<'_, '_> {
                 self.path_targets(object_targets(&reference.target).iter())
             }
             TypeInfo::ObjectSelection(selection) => {
-                if selection.plural && context != PathContext::RoleSet {
+                if selection.plural
+                    && !matches!(context, PathContext::RoleSet | PathContext::AreaArgument)
+                {
                     return self.path_error(
                         "ILI-PATH-MULTIPLICITY",
                         "A path through a role requires a single related object",

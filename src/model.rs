@@ -357,7 +357,7 @@ pub enum BoundExpressionKind {
     },
     TextPath {
         value: String,
-        binding: ExpressionId,
+        binding: Option<ExpressionId>,
     },
     Temporal {
         value: String,

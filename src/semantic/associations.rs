@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     AssociationInfo, BoundExpressionKind, Cardinality, ExpressionId, ObjectTarget, OidKind,
-    RelatedLocation, RoleInfo, RoleStrength, Span, syntax,
+    PathSelection, RelatedLocation, RoleInfo, RoleStrength, Span, TypeInfo, ViewFormation, syntax,
 };
 use std::{
     cmp::Ordering,
@@ -196,31 +196,14 @@ impl Analyzer<'_, '_> {
                 }
                 let mut assignments = self.symbols[member].declaration.derivations().to_vec();
                 if self.symbols[member].declaration.kind == Kind::Attribute
-                    && assignments.is_empty()
-                    && let Some(base) = self.symbols[member].base_scope
+                    && self.symbols[member].base_scope.is_some()
                 {
-                    assignments.extend_from_slice(self.symbols[base].declaration.derivations());
-                    let ty = self.symbols[member].declaration.type_id?;
-                    let mandatory = self.symbols[member].declaration.mandatory() == Some(true);
-                    for &assignment in &assignments {
-                        if !self.value_fits(
-                            owner,
-                            assignment,
-                            ty,
-                            mandatory,
-                            AssignmentContext::Attribute,
-                        )? {
-                            self.diagnostics.push(
-                                "ILI-ATTRIBUTE-DERIVATION-TYPE",
-                                "The inherited derivation must satisfy the overriding attribute type",
-                                Some(at.clone()),
-                            );
-                            return None;
-                        }
-                    }
-                    if !assignments.is_empty() {
+                    let inherited =
+                        self.check_association_fallback(owner, member, &assignments, &at)?;
+                    if assignments.is_empty() && !inherited.is_empty() {
                         self.symbols[member].declaration.derivations =
-                            Some(assignments.clone().into_boxed_slice());
+                            Some(inherited.clone().into_boxed_slice());
+                        assignments = inherited;
                     }
                 }
                 if assignments.is_empty() {
@@ -237,6 +220,94 @@ impl Analyzer<'_, '_> {
             }
         }
         Some(())
+    }
+
+    fn check_association_fallback(
+        &mut self,
+        owner: usize,
+        member: usize,
+        local: &[ExpressionId],
+        at: &Span,
+    ) -> Option<Vec<ExpressionId>> {
+        for &value in local.iter().rev() {
+            if self.association_path_is_defined(value, at)? {
+                return Some(Vec::new());
+            }
+        }
+        let declaration = &self.symbols[member].declaration;
+        let ty = declaration.type_id?;
+        let mandatory = declaration.mandatory() == Some(true);
+        let mut inherited = Vec::new();
+        let mut ancestor = self.symbols[member].base_scope;
+        while let Some(base) = ancestor {
+            let len = self.symbols[base].declaration.derivations().len();
+            if !self.step(len + 1, at) {
+                return None;
+            }
+            let values = self.symbols[base].declaration.derivations().to_vec();
+            if inherited.is_empty() {
+                inherited.extend_from_slice(&values);
+            }
+            for value in values.into_iter().rev() {
+                if !self.value_fits(owner, value, ty, mandatory, AssignmentContext::Attribute)? {
+                    self.diagnostics.push_related(
+                        "ILI-ATTRIBUTE-DERIVATION-TYPE",
+                        "The inherited fallback must satisfy the overriding attribute type",
+                        Some(at.clone()),
+                        vec![RelatedLocation {
+                            span: self.expressions[value.0 as usize].source_span().clone(),
+                            message: "Inherited assignment".into(),
+                        }],
+                    );
+                    return None;
+                }
+                if self.association_path_is_defined(value, at)? {
+                    return Some(inherited);
+                }
+            }
+            ancestor = self.symbols[base].base_scope;
+        }
+        Some(inherited)
+    }
+
+    fn association_path_is_defined(&mut self, value: ExpressionId, at: &Span) -> Option<bool> {
+        let expression = underlying_expression(&self.expressions, value);
+        let BoundExpressionKind::Path { steps } = &expression.kind else {
+            return Some(false);
+        };
+        if self.work.charge(u32::try_from(steps.len()).ok()?).is_err() {
+            self.diagnostics
+                .limit("Semantic work budget exceeded", Some(at.clone()));
+            return None;
+        }
+        Some(steps.iter().all(|step| {
+            if let Some(access) = &step.association_access {
+                return compare_count(&access.cardinality.lower, "0") == Ordering::Greater;
+            }
+            let Some(&id) = self.names.get(step.reference.target_name()) else {
+                return false;
+            };
+            let decl = &self.symbols[id].declaration;
+            let defined = match decl.kind {
+                Kind::ViewBase => {
+                    !decl.is_nullable_view_base()
+                        && !decl.parent.and_then(|parent| self.symbols[parent].declaration.view())
+                            .is_some_and(|view| view.formation == ViewFormation::Union)
+                }
+                Kind::Role => decl.role().is_some_and(|role| compare_count(&role.cardinality.lower, "0") == Ordering::Greater),
+                Kind::Attribute => decl.mandatory() == Some(true),
+                _ => false,
+            };
+            let minimum = match &step.selection {
+                Some(PathSelection::First | PathSelection::Last) => Some("1"),
+                Some(PathSelection::Index(minimum)) => Some(minimum.as_str()),
+                Some(PathSelection::Axis(_)) | None => None,
+            };
+            defined && minimum.is_none_or(|minimum| {
+                matches!(decl.type_id.map(|ty| &self.types[ty]), Some(TypeInfo::Collection(collection))
+                    if compare_count(&collection.cardinality.lower, minimum) != Ordering::Less)
+            })
+        }))
     }
 
     fn require_association_view_path(&mut self, value: ExpressionId, at: &Span) -> Option<()> {

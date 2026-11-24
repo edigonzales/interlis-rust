@@ -1,3 +1,4 @@
+use super::functions::area_function;
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
     BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ClassValueKind,
@@ -94,7 +95,9 @@ impl Analyzer<'_, '_> {
                             && context != ExpressionContext::Value
                             && self.has_objects_parameter(target, &function.span)?
                         {
-                            if context == ExpressionContext::IndividualConstraint {
+                            if context == ExpressionContext::IndividualConstraint
+                                && !matches!(target, BoundName::Predefined(name, _) if area_function(name))
+                            {
                                 self.diagnostics.push(
                                     "ILI-CONSTRAINT-OBJECTS",
                                     "An individual constraint cannot call a function with an OBJECTS parameter in INTERLIS 2.4",

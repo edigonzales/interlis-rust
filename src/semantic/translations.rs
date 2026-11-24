@@ -789,9 +789,22 @@ impl Comparison<'_> {
                     self.work.charge((a.len() + b.len()) as u32)?;
                     a == b
                 }
-                (TextPath { binding: left, .. }, TextPath { binding: right, .. }) => {
-                    pending.push((*left, *right));
-                    true
+                (
+                    TextPath {
+                        value: a,
+                        binding: left,
+                    },
+                    TextPath {
+                        value: b,
+                        binding: right,
+                    },
+                ) => {
+                    if left.is_none() && right.is_none() {
+                        self.work.charge((a.len() + b.len()) as u32)?;
+                        a == b
+                    } else {
+                        pair_optional(&mut pending, *left, *right)
+                    }
                 }
                 (Temporal { components: a, .. }, Temporal { components: b, .. }) => a == b,
                 (Formatted { components: a, .. }, Formatted { components: b, .. }) => {
