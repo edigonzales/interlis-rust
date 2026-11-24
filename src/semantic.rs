@@ -142,6 +142,7 @@ struct Analyzer<'a, 'd> {
     expression_boolean_type: Option<usize>,
     enum_bases: BTreeMap<usize, usize>,
     temporal_languages: BTreeMap<usize, crate::LanguageVersion>,
+    line_coord_type: Option<usize>,
     constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
     constraint_topic: Option<usize>,
     associations_by_role: BTreeMap<String, Vec<usize>>,
@@ -419,6 +420,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             expression_boolean_type: None,
             enum_bases: BTreeMap::new(),
             temporal_languages: BTreeMap::new(),
+            line_coord_type: None,
             constraint_blocks: vec![],
             constraint_topic: None,
             associations_by_role: BTreeMap::new(),
@@ -1422,6 +1424,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 mandatory: false,
             });
         }
+        if name == "LineCoord"
+            && let Some(ty) = self.line_coord_type
+        {
+            return Some(Effective {
+                ty,
+                mandatory: false,
+            });
+        }
         let ty = match name {
             "URI" => TypeInfo::FixedText {
                 format: FixedTextFormat::Uri,
@@ -1492,6 +1502,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         };
         let id = self.types.len();
+        if name == "LineCoord" {
+            self.line_coord_type = Some(id);
+        }
         if matches!(ty, TypeInfo::Temporal(_)) {
             self.temporal_languages
                 .insert(id, self.models[self.symbols[owner].model].language());

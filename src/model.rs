@@ -241,7 +241,7 @@ impl FormattedBound {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FormattedType {
     pub structure: TypeReference,
     pub parts: Vec<FormattedPart>,

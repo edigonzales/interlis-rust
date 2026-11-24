@@ -1,14 +1,411 @@
 use super::{
-    Analyzer, Kind, LookupError, NumberError, QualifiedName, SyntaxDecl, domains::scalar_extension,
-    units::unit_extends,
+    Analyzer, Kind, LookupError, Name, NumberError, QualifiedName, SyntaxDecl,
+    domains::scalar_extension, units::unit_extends,
 };
 use crate::{
-    CoordinateKind, DecimalInfo, GeometryKind, GeometryType, LanguageVersion, LineForm,
-    OverlapTolerance, Span, TypeInfo, TypeReference, syntax,
+    AttributePathOwner, AttributePathType, ClassValueType, CollectionType, CoordinateKind,
+    CoordinateType, DecimalInfo, FormattedPart, GeometryKind, GeometryType, LanguageVersion,
+    LineForm, NumericRange, NumericReferenceSystem, ObjectSelection, ObjectTarget,
+    OverlapTolerance, ReferenceType, Span, StructureType, TypeInfo, TypeReference, syntax,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
+    pub(super) fn contextual_line_segments(
+        &mut self,
+        row: usize,
+        forms: &[usize],
+        mut symbols: BTreeMap<usize, usize>,
+        vertex: &TypeReference,
+        coordinates: usize,
+        at: &Span,
+    ) -> Option<()> {
+        let placeholder = self.line_coord_type?;
+        let mut pending = Vec::new();
+        for form in forms {
+            let segment = self.symbols[*form].declaration.type_reference()?;
+            pending.push(self.names[segment.target_name()]);
+        }
+        let mut users: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+        let mut affected = BTreeSet::new();
+        while let Some(structure) = pending.pop() {
+            if !visited.insert(structure) || symbols.contains_key(&structure) {
+                continue;
+            }
+            if !self.step(1, at) {
+                return None;
+            }
+            let mut structures = BTreeSet::new();
+            structures.extend(self.symbols[structure].base_scope);
+            let mut types = self.symbols[structure]
+                .declaration
+                .effective_attributes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&member| self.symbols[member].declaration.type_id)
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            while let Some(ty) = types.pop() {
+                if !seen.insert(ty) {
+                    continue;
+                }
+                if !self.step(1, at) {
+                    return None;
+                }
+                if ty == placeholder {
+                    affected.insert(structure);
+                }
+                let (links, children) = segment_type_links(&self.types[ty]);
+                types.extend(children);
+                for link in links {
+                    if self.is_line_coord_reference(link, placeholder) {
+                        affected.insert(structure);
+                    }
+                    if let Some(&target) = self.names.get(link.target_name())
+                        && self.symbols[target].declaration.kind == Kind::Structure
+                    {
+                        structures.insert(target);
+                    }
+                }
+            }
+            for target in structures {
+                users.entry(target).or_default().push(structure);
+                if symbols.contains_key(&target) {
+                    affected.insert(structure);
+                } else {
+                    pending.push(target);
+                }
+            }
+        }
+        pending.extend(&affected);
+        while let Some(target) = pending.pop() {
+            for &owner in users.get(&target).into_iter().flatten() {
+                if !self.step(1, at) {
+                    return None;
+                }
+                if affected.insert(owner) {
+                    pending.push(owner);
+                }
+            }
+        }
+        let mut members = Vec::new();
+        for &original in &affected {
+            let name = self.symbols[original].declaration.name.clone();
+            let contextual = self.geometry_structure(
+                row,
+                &format!("$Segment{original}"),
+                &name,
+                Some(original),
+            )?;
+            symbols.insert(original, contextual);
+            self.symbols[contextual].model = self.symbols[original].model;
+            self.symbols[contextual].ast = self.symbols[original].ast;
+            self.symbols[contextual].declaration.final_declaration =
+                self.symbols[original].declaration.is_final();
+            self.symbols[contextual].declaration.abstract_declaration =
+                self.symbols[original].declaration.is_abstract();
+            self.symbols[contextual].declaration.source_metadata =
+                self.symbols[original].declaration.source_metadata.clone();
+            let local = self.symbols[original]
+                .declaration
+                .effective_attributes
+                .as_deref()?
+                .to_vec();
+            for member in local {
+                let declaration = &self.symbols[member].declaration;
+                if declaration.parent != Some(original) {
+                    continue;
+                }
+                let (kind, mandatory, model) = (
+                    declaration.kind,
+                    declaration.declared_mandatory,
+                    self.symbols[member].model,
+                );
+                let name = Name {
+                    value: declaration.name.clone(),
+                    span: Span::predefined(),
+                };
+                let copied =
+                    self.add(kind, &name, &name.span, Some(contextual), model, mandatory)?;
+                symbols.insert(member, copied);
+                members.push((member, copied));
+            }
+        }
+        let mut needed = BTreeSet::new();
+        let mut pending: Vec<_> = members
+            .iter()
+            .filter_map(|&(original, _)| self.symbols[original].declaration.type_id)
+            .collect();
+        while let Some(ty) = pending.pop() {
+            if needed.insert(ty) {
+                if !self.step(1, at) {
+                    return None;
+                }
+                pending.extend(segment_type_links(&self.types[ty]).1);
+            }
+        }
+        let mut types = BTreeMap::from([(placeholder, coordinates)]);
+        for ty in needed {
+            if ty == placeholder {
+                continue;
+            }
+            let (links, children) = segment_type_links(&self.types[ty]);
+            let changed = children.iter().any(|id| types.contains_key(id))
+                || links.iter().any(|link| {
+                    self.is_line_coord_reference(link, placeholder)
+                        || self
+                            .names
+                            .get(link.target_name())
+                            .is_some_and(|id| symbols.contains_key(id))
+                });
+            if !self.step(links.len() + children.len(), at) {
+                return None;
+            }
+            if changed {
+                let replacement =
+                    self.rewrite_segment_type(ty, &types, &symbols, vertex, placeholder, at)?;
+                let id = self.types.len();
+                self.types.push(replacement);
+                types.insert(ty, id);
+            }
+        }
+        for &(original, copied) in &members {
+            let from = &self.symbols[original];
+            let declaration = &from.declaration;
+            let ty = declaration.type_id?;
+            let ty = *types.get(&ty).unwrap_or(&ty);
+            let reference = declaration
+                .reference
+                .as_ref()
+                .map(|link| self.segment_reference(link, &symbols, vertex, placeholder));
+            let base = from.base_scope.map(|id| *symbols.get(&id).unwrap_or(&id));
+            let source = self.geometry_symbol_reference(row, original)?;
+            let base_reference = if let Some(base) = base {
+                Some(self.geometry_symbol_reference(row, base)?)
+            } else {
+                None
+            };
+            let declaration = &self.symbols[original].declaration;
+            let data = (
+                declaration.effective_mandatory,
+                declaration.is_final(),
+                declaration.is_abstract(),
+                declaration.is_transient(),
+                declaration.subdivision.clone(),
+                declaration.source_metadata.clone(),
+            );
+            let ast = self.symbols[original].ast;
+            let syntax = self.symbols[original].syntax;
+            let target = &mut self.symbols[copied];
+            target.ast = ast;
+            target.syntax = syntax;
+            target.base_scope = base;
+            target.declaration.type_id = Some(ty);
+            target.declaration.reference = reference;
+            target.declaration.base_reference = base_reference;
+            target.declaration.derived_from = Some(source);
+            (
+                target.declaration.effective_mandatory,
+                target.declaration.final_declaration,
+                target.declaration.abstract_declaration,
+                target.declaration.transient,
+                target.declaration.subdivision,
+                target.declaration.source_metadata,
+            ) = data;
+        }
+        for original in affected {
+            let copied = symbols[&original];
+            let base = self.symbols[original]
+                .base_scope
+                .map(|id| *symbols.get(&id).unwrap_or(&id));
+            self.symbols[copied].base_scope = base;
+            if let Some(base) = base {
+                self.symbols[copied].declaration.base_reference =
+                    Some(self.geometry_symbol_reference(row, base)?);
+            }
+            let members = self.symbols[original]
+                .declaration
+                .effective_attributes
+                .as_deref()?
+                .iter()
+                .map(|id| *symbols.get(id).unwrap_or(id))
+                .collect::<Box<[_]>>();
+            self.symbols[copied].declaration.effective_attributes = Some(members);
+        }
+        for (original, copied) in members {
+            let base = self.symbols[copied].base_scope;
+            let ty = self.symbols[copied].declaration.type_id?;
+            if let Some(base) = base {
+                let base_ty = self.symbols[base].declaration.type_id;
+                if let Some(base_ty) = base_ty
+                    && matches!(
+                        (&self.types[ty], &self.types[base_ty]),
+                        (TypeInfo::Coordinate(_), TypeInfo::Coordinate(_))
+                    )
+                    && !self.coordinate_value_fits(
+                        ty,
+                        base_ty,
+                        self.expression_language(copied),
+                        at,
+                    )?
+                {
+                    self.diagnostics.push_related(
+                        "ILI-LINE-FORM-VERTEX",
+                        "The segment coordinate does not fit the geometry's vertex type",
+                        Some(at.clone()),
+                        vec![crate::RelatedLocation {
+                            span: self.symbols[original].name_span.clone(),
+                            message: "Segment attribute".into(),
+                        }],
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn is_line_coord_reference(&self, reference: &TypeReference, placeholder: usize) -> bool {
+        reference.target_name() == "INTERLIS.LineCoord"
+            || self.names.get(reference.target_name()).is_some_and(|&id| {
+                self.symbols[id].declaration.kind == Kind::Domain
+                    && self.symbols[id].declaration.type_id == Some(placeholder)
+            })
+    }
+
+    fn segment_reference(
+        &self,
+        reference: &TypeReference,
+        symbols: &BTreeMap<usize, usize>,
+        vertex: &TypeReference,
+        placeholder: usize,
+    ) -> TypeReference {
+        let mut result = reference.clone();
+        if self.is_line_coord_reference(reference, placeholder) {
+            result.target = vertex.target.clone();
+            result.predefined_language = vertex.predefined_language;
+        } else if let Some(&id) = self
+            .names
+            .get(reference.target_name())
+            .and_then(|id| symbols.get(id))
+        {
+            result.target = self.symbols[id].declaration.qualified.clone();
+            result.predefined_language = None;
+        }
+        result
+    }
+
+    fn rewrite_segment_type(
+        &mut self,
+        ty: usize,
+        types: &BTreeMap<usize, usize>,
+        symbols: &BTreeMap<usize, usize>,
+        vertex: &TypeReference,
+        placeholder: usize,
+        at: &Span,
+    ) -> Option<TypeInfo> {
+        let reference =
+            |link: &TypeReference| self.segment_reference(link, symbols, vertex, placeholder);
+        let id = |ty: usize| *types.get(&ty).unwrap_or(&ty);
+        let target = |target: &ObjectTarget| ObjectTarget {
+            target: target.target.as_ref().map(reference),
+            restrictions: target.restrictions.iter().map(reference).collect(),
+        };
+        let numeric = |value: &NumericRange| {
+            let mut value = value.clone();
+            if let Some(NumericReferenceSystem::Domain(system)) = &mut value.reference_system {
+                system.domain = reference(&system.domain);
+            }
+            value
+        };
+        let result = match &self.types[ty] {
+            TypeInfo::Numeric(value) => TypeInfo::Numeric(numeric(value)),
+            TypeInfo::Coordinate(value) => TypeInfo::Coordinate(CoordinateType {
+                kind: value.kind,
+                axes: value.axes.iter().map(numeric).collect(),
+                rotation: value.rotation,
+                reference_system: value.reference_system.clone(),
+            }),
+            TypeInfo::Structure(value) => TypeInfo::Structure(StructureType {
+                target: value.target.as_ref().map(reference),
+                restrictions: value.restrictions.iter().map(reference).collect(),
+            }),
+            TypeInfo::Collection(value) => TypeInfo::Collection(CollectionType {
+                kind: value.kind,
+                cardinality: value.cardinality.clone(),
+                element: id(value.element),
+            }),
+            TypeInfo::ClassValue(value) => TypeInfo::ClassValue(ClassValueType {
+                kind: value.kind,
+                restrictions: value.restrictions.iter().map(reference).collect(),
+            }),
+            TypeInfo::Reference(value) => TypeInfo::Reference(ReferenceType {
+                external: value.external,
+                target: target(&value.target),
+            }),
+            TypeInfo::ObjectSelection(value) => TypeInfo::ObjectSelection(ObjectSelection {
+                plural: value.plural,
+                targets: value.targets.iter().map(target).collect(),
+            }),
+            TypeInfo::Geometry(value) => {
+                let mut value = value.clone();
+                value.vertex = value.vertex.as_ref().map(reference);
+                value.base_vertex = value.base_vertex.as_ref().map(reference);
+                value.line_attributes = value.line_attributes.as_ref().map(reference);
+                if let Some(OverlapTolerance::TrackWidth(link)) = &mut value.tolerance {
+                    *link = link.as_ref().map(reference);
+                }
+                TypeInfo::Geometry(value)
+            }
+            TypeInfo::AttributePath(value) => TypeInfo::AttributePath(AttributePathType {
+                owner: value.owner.as_ref().map(|owner| match owner {
+                    AttributePathOwner::Viewable(link) => {
+                        AttributePathOwner::Viewable(reference(link))
+                    }
+                    AttributePathOwner::ClassAttribute(id) => {
+                        AttributePathOwner::ClassAttribute(*id)
+                    }
+                    AttributePathOwner::Argument(link) => {
+                        AttributePathOwner::Argument(reference(link))
+                    }
+                }),
+                restrictions: value
+                    .restrictions
+                    .iter()
+                    .map(|rule| crate::model::AttributeRestriction {
+                        ty: id(rule.ty),
+                        mandatory: rule.mandatory,
+                    })
+                    .collect(),
+            }),
+            TypeInfo::Formatted(value) => {
+                let mut value = value.clone();
+                value.structure = reference(&value.structure);
+                value.base = value.base.map(id);
+                for part in &mut value.parts {
+                    match part {
+                        FormattedPart::Literal { .. } => {}
+                        FormattedPart::Numeric { attribute, .. } => {
+                            *attribute = reference(attribute)
+                        }
+                        FormattedPart::Structure(part) => {
+                            part.attribute = reference(&part.attribute);
+                            part.type_id = id(part.type_id);
+                        }
+                    }
+                }
+                TypeInfo::Formatted(value)
+            }
+            _ => {
+                self.unsupported_expression(at);
+                return None;
+            }
+        };
+        Some(result)
+    }
+
     pub(super) fn bind_line_forms(&mut self) -> Option<()> {
         for owner in 0..self.symbols.len() {
             let Some(SyntaxDecl::LineForm(form)) = self.symbols[owner].ast else {
@@ -662,6 +1059,64 @@ impl Analyzer<'_, '_> {
         }
         Some(())
     }
+}
+
+fn segment_type_links(ty: &TypeInfo) -> (Vec<&TypeReference>, Vec<usize>) {
+    let mut links = Vec::new();
+    let mut children = Vec::new();
+    fn reference_system(value: &NumericRange) -> Option<&TypeReference> {
+        match &value.reference_system {
+            Some(NumericReferenceSystem::Domain(system)) => Some(&system.domain),
+            _ => None,
+        }
+    }
+    match ty {
+        TypeInfo::Numeric(value) => links.extend(reference_system(value)),
+        TypeInfo::Coordinate(value) => links.extend(value.axes.iter().filter_map(reference_system)),
+        TypeInfo::Structure(value) => {
+            links.extend(value.target.iter());
+            links.extend(value.restrictions.iter());
+        }
+        TypeInfo::ClassValue(value) => links.extend(value.restrictions.iter()),
+        TypeInfo::Reference(value) => {
+            links.extend(value.target.target.iter());
+            links.extend(value.target.restrictions.iter());
+        }
+        TypeInfo::ObjectSelection(value) => {
+            for target in &value.targets {
+                links.extend(target.target.iter());
+                links.extend(target.restrictions.iter());
+            }
+        }
+        TypeInfo::Collection(value) => children.push(value.element),
+        TypeInfo::Geometry(value) => {
+            links.extend(value.vertex.iter());
+            links.extend(value.base_vertex.iter());
+            links.extend(value.line_attributes.iter());
+        }
+        TypeInfo::AttributePath(value) => {
+            if let Some(AttributePathOwner::Viewable(link)) = &value.owner {
+                links.push(link);
+            }
+            children.extend(value.restrictions.iter().map(|rule| rule.ty));
+        }
+        TypeInfo::Formatted(value) => {
+            links.push(&value.structure);
+            children.extend(value.base);
+            for part in &value.parts {
+                match part {
+                    FormattedPart::Literal { .. } => {}
+                    FormattedPart::Numeric { attribute, .. } => links.push(attribute),
+                    FormattedPart::Structure(part) => {
+                        links.push(&part.attribute);
+                        children.push(part.type_id);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    (links, children)
 }
 
 fn form_name(form: &LineForm) -> &str {

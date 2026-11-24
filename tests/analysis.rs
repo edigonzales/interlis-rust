@@ -2119,6 +2119,100 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
 }
 
 #[test]
+fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
+    for (edition, prefix) in [("2.3", "CONTRACTED"), ("2.4", "")] {
+        let report = outcome(
+            request(vec![(
+                "segments.ili",
+                format!(
+                    r#"INTERLIS {edition}; {prefix} MODEL M AT "x" VERSION "1" =
+                STRUCTURE External=label:TEXT; END External;
+                STRUCTURE Point (ABSTRACT)=position (ABSTRACT):INTERLIS.LineCoord; END Point;
+                STRUCTURE Bend EXTENDS INTERLIS.LineSegment=
+                    control:Point;
+                    caption:External;
+                    MANDATORY CONSTRAINT DEFINED(control->position);
+                END Bend;
+                LINE FORM Custom:Bend;
+                DOMAIN LocalVertex=COORD 0.0..100.0,0.0..200.0;
+                    OtherVertex=COORD 10.0..20.0,30.0..40.0;
+                TOPIC T=
+                    CLASS Track=
+                        local:POLYLINE WITH (STRAIGHTS,Custom) VERTEX LocalVertex;
+                        other:POLYLINE WITH (Custom) VERTEX OtherVertex;
+                    END Track;
+                    VIEW LocalLine INSPECTION OF line~Track->local; =
+                        endPoint := line->Segments[FIRST]->SegmentEndPoint;
+                    END LocalLine;
+                    VIEW OtherLine INSPECTION OF line~Track->other; =
+                        endPoint := line->Segments[FIRST]->SegmentEndPoint;
+                    END OtherLine;
+                END T; END M."#
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        for (view, vertex, lower) in [
+            ("M.T.LocalLine", "M.LocalVertex", "0.0"),
+            ("M.T.OtherLine", "M.OtherVertex", "10.0"),
+        ] {
+            let contextual = graph
+                .declarations()
+                .iter()
+                .find(|entry| {
+                    entry.qualified_name().starts_with(view)
+                        && entry
+                            .derived_from()
+                            .is_some_and(|origin| origin.target_name() == "M.Bend")
+                })
+                .unwrap();
+            let attributes: Vec<_> = graph
+                .effective_attributes(contextual.qualified_name())
+                .unwrap()
+                .collect();
+            assert_eq!(
+                attributes[0].type_reference().unwrap().target_name(),
+                vertex
+            );
+            assert_eq!(
+                attributes[2].type_reference().unwrap().target_name(),
+                "M.External"
+            );
+            let control = attributes[1].type_reference().unwrap().target_name();
+            let position = graph.effective_attributes(control).unwrap().next().unwrap();
+            let TypeInfo::Coordinate(ty) = graph.effective_type(position.qualified_name()).unwrap()
+            else {
+                panic!("expected the contextual coordinate");
+            };
+            assert_eq!(ty.axes[0].bounds.as_ref().unwrap().lower.original(), lower);
+            let bound = graph
+                .expression(contextual.constraints()[0].expression.unwrap())
+                .unwrap();
+            let interlis::BoundExpressionKind::Defined { expression } = bound.kind else {
+                panic!("expected DEFINED")
+            };
+            let interlis::BoundExpressionKind::Path { steps } =
+                &graph.expression(expression).unwrap().kind
+            else {
+                panic!("expected contextual path")
+            };
+            assert_eq!(steps[1].reference.target_name(), position.qualified_name());
+        }
+        assert_eq!(
+            graph
+                .declaration("M.Point.position")
+                .unwrap()
+                .type_reference()
+                .unwrap()
+                .target_name(),
+            "INTERLIS.LineCoord"
+        );
+    }
+}
+
+#[test]
 fn metadata_baskets_bind_the_topic_class_and_ordered_external_object_names() {
     for version in ["2.3", "2.4"] {
         let input = |kind: &str, finality: &str, topic: &str| {

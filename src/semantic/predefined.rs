@@ -5,6 +5,7 @@ use crate::{
     NumericBounds, NumericRange, NumericReferenceSystem, Span, StructureType, TypeInfo,
     TypeReference,
 };
+use std::collections::BTreeMap;
 
 impl Analyzer<'_, '_> {
     pub(super) fn materialized_class_value(
@@ -204,18 +205,14 @@ impl Analyzer<'_, '_> {
         let TypeInfo::Geometry(descriptor) = &self.types[geometry] else {
             unreachable!("line inspections use a geometry");
         };
-        if descriptor
+        let forms = descriptor
             .line_forms
             .iter()
-            .any(|form| matches!(form, crate::LineForm::Named(_)))
-        {
-            self.diagnostics.push(
-                "ILI-UNSUPPORTED",
-                "Geometry inspection of a custom line form requires contextual segment binding",
-                Some(at.clone()),
-            );
-            return None;
-        }
+            .filter_map(|form| match form {
+                crate::LineForm::Named(reference) => Some(self.names[reference.target_name()]),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let vertex = descriptor.vertex.as_ref()?.clone();
         let Some(coordinates) = self.geometry_coordinate(&vertex)? else {
             self.unsupported_expression(at);
@@ -231,6 +228,7 @@ impl Analyzer<'_, '_> {
         if self.symbols[row].declaration.effective_attributes.is_none() {
             let mut base_segment = None;
             let mut start = None;
+            let mut contextual = BTreeMap::new();
             for family in [
                 "LineSegment",
                 "StartSegment",
@@ -239,6 +237,7 @@ impl Analyzer<'_, '_> {
             ] {
                 let template = self.predefined_segment(owner, family, at)?;
                 let segment = self.geometry_structure(row, family, family, Some(template))?;
+                contextual.insert(template, segment);
                 let mut members = Vec::new();
                 if let Some(base) = base_segment {
                     let reference = self.geometry_symbol_reference(owner, base)?;
@@ -272,6 +271,7 @@ impl Analyzer<'_, '_> {
                         self.symbols[original].declaration.type_id?
                     };
                     let attr = self.contextual_geometry_attribute(segment, template, &name, ty)?;
+                    contextual.insert(original, attr);
                     if specialize {
                         self.symbols[attr].declaration.reference = Some(vertex.clone());
                     }
@@ -284,6 +284,9 @@ impl Analyzer<'_, '_> {
                 } else if family == "StartSegment" {
                     start = Some(segment);
                 }
+            }
+            if !forms.is_empty() {
+                self.contextual_line_segments(row, &forms, contextual, &vertex, coordinates, at)?;
             }
             let segment = base_segment?;
             let list = self.geometry_structure_list(owner, segment)?;
