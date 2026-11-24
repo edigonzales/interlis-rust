@@ -319,6 +319,32 @@ fn a_new_file_can_make_an_already_selected_root_ambiguous() {
 }
 
 #[test]
+fn a_long_chain_of_distinct_models_completes_within_the_default_budget() {
+    let repository = tempfile::tempdir().unwrap();
+    let dir = repository.path();
+    let mut entries = Vec::new();
+    for number in 0..1100 {
+        let name = format!("Model{number}");
+        let file = format!("{name}.ili");
+        let body = if number == 1099 {
+            String::new()
+        } else {
+            format!("IMPORTS Model{};", number + 1)
+        };
+        write(dir, &file, ili("2.4", &name, "1", &body));
+        entries.push(model_entry(&name, "4", &file, "1", ""));
+    }
+    write(dir, "ilimodels.xml", index(&entries));
+    let compiled = report(
+        cli()
+            .args(["compile", "--root", "Model0", "--repository"])
+            .arg(dir),
+        0,
+    );
+    expect_model(&compiled, "Model1099", "1", "/Model1099.ili");
+}
+
+#[test]
 fn an_indexed_checksum_mismatch_has_the_same_status_when_a_file_is_already_loaded() {
     let repository = tempfile::tempdir().unwrap();
     let dir = repository.path();

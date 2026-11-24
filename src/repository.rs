@@ -222,8 +222,12 @@ impl Resolver {
             for message in std::mem::take(&mut self.search.warnings) {
                 self.say("ILI-RES-WARNING", message, need.place, false, true);
             }
+            let new_competitors = self.sources[available..]
+                .iter()
+                .flat_map(|source| &source.headers)
+                .any(|header| self.catalog[&header.name].len() > 1);
             match result {
-                Ok(_) if self.sources.len() != available => {
+                Ok(_) if new_competitors => {
                     // A file can introduce further models at the same or a
                     // better priority. Reconsider existing bindings before
                     // validating the now available closure.
