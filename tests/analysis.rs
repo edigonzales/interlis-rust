@@ -4991,6 +4991,82 @@ fn temporal_expressions_check_layout_bounds_and_type_compatibility() {
 }
 
 #[test]
+fn geometry_measurements_require_matching_family_and_multiplicity() {
+    let declarations = "DOMAIN Vertex=COORD 0.000..100.000,0.000..100.000;
+        TOPIC T=CLASS Item=
+            line:POLYLINE WITH (STRAIGHTS) VERTEX Vertex;
+            lines:MULTIPOLYLINE WITH (STRAIGHTS) VERTEX Vertex;
+            area:AREA WITH (STRAIGHTS) VERTEX Vertex WITHOUT OVERLAPS > 0.005;
+            surfaces:MULTISURFACE WITH (STRAIGHTS) VERTEX Vertex WITHOUT OVERLAPS > 0.005;";
+    let report = outcome(
+        single(&format!("{declarations}
+            MANDATORY CONSTRAINT INTERLIS.length(line) >= 0 AND INTERLIS.multilength(lines) >= 0;
+            MANDATORY CONSTRAINT INTERLIS.surface(area) >= 0 AND INTERLIS.multisurface(surfaces) >= 0;
+            MANDATORY CONSTRAINT line != UNDEFINED;
+            END Item; END T;")),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    assert!(graph.expressions().iter().any(|expression| matches!(&expression.kind,
+        interlis::BoundExpressionKind::Call { function, .. }
+        if function.target_name() == "INTERLIS.multisurface" && function.predefined_language() == Some(LanguageVersion::V24))
+        && expression.value_type == interlis::ExpressionType::Numeric));
+    for call in [
+        "length(lines)",
+        "multilength(line)",
+        "surface(line)",
+        "multisurface(area)",
+    ] {
+        outcome(
+            single(&format!(
+                "{declarations} MANDATORY CONSTRAINT INTERLIS.{call} >= 0; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some("ILI-FUNCTION-ARGUMENT"),
+        );
+    }
+    outcome(
+        single(&format!(
+            "{declarations} MANDATORY CONSTRAINT line == line; END Item; END T;"
+        )),
+        Status::Rejected,
+        Some("ILI-EXPRESSION-OPERANDS"),
+    );
+}
+
+#[test]
+fn coordinate_and_oid_comparisons_distinguish_shapes_and_ordering() {
+    let declarations = "DOMAIN TextId=OID TEXT*16;
+        TOPIC T=CLASS Item=
+            a:COORD 0..10,0..10; b:COORD 0..20,0..20; c:COORD 0..10,0..10,0..10;
+            multiple:MULTICOORD 0..10,0..10;
+            id:INTERLIS.I32OID; other:INTERLIS.ANYOID; textId:TextId; standard:INTERLIS.STANDARDOID;";
+    outcome(
+        single(&format!(
+            "{declarations} MANDATORY CONSTRAINT a == b AND id != other AND textId == standard; END Item; END T;"
+        )),
+        Status::CheckedSubset,
+        None,
+    );
+    for condition in [
+        "a == c",
+        "a == multiple",
+        "a < b",
+        "id < other",
+        "id == textId",
+    ] {
+        outcome(
+            single(&format!(
+                "{declarations} MANDATORY CONSTRAINT {condition}; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some("ILI-EXPRESSION-OPERANDS"),
+        );
+    }
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (

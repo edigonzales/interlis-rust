@@ -7,7 +7,8 @@ use super::{
 };
 use crate::{
     BoundExpressionKind, ClassValueKind, ClassValueType, DecimalInfo, ExpressionId, ExpressionType,
-    FunctionInfo, NumericRange, ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
+    FunctionInfo, GeometryKind, NumericRange, ObjectSelection, ObjectTarget, RelatedLocation, Span,
+    UnitConstant,
     limits::WorkBudget,
     number::{DecimalLiteral, NumberError},
     syntax::ArgumentType,
@@ -165,6 +166,7 @@ impl Analyzer<'_, '_> {
                 "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount" | "myClass",
                 _,
             ) => 1,
+            BoundName::Predefined("length" | "multilength" | "surface" | "multisurface", _) => 1,
             BoundName::Predefined("isEnumSubVal" | "isSubClass" | "isOfClass", _) => 2,
             BoundName::Predefined("inEnumRange", _) => 3,
             BoundName::Predefined(..) => {
@@ -197,6 +199,31 @@ impl Analyzer<'_, '_> {
         }
         let argument = arguments[0];
         let at = self.expressions[argument.0 as usize].span.clone();
+        if matches!(name, "length" | "multilength" | "surface" | "multisurface") {
+            let value = &self.expressions[argument.0 as usize];
+            let accepted = match value.type_id.map(|ty| &self.types[ty]) {
+                Some(TypeInfo::Geometry(geometry)) => {
+                    use GeometryKind::*;
+                    matches!(
+                        (name, geometry.geometry_kind),
+                        ("length", Polyline)
+                            | ("multilength", MultiPolyline)
+                            | ("surface", Surface | Area)
+                            | ("multisurface", MultiSurface | MultiArea)
+                    )
+                }
+                _ => value.value_type == ExpressionType::Undefined,
+            };
+            if !accepted {
+                self.diagnostics.push(
+                    "ILI-FUNCTION-ARGUMENT",
+                    "The argument must have the geometry family and multiplicity declared by the measurement function",
+                    Some(at),
+                );
+                return None;
+            }
+            return Some(self.unbounded_numeric_type());
+        }
         if name == "elementCount" {
             let value = &self.expressions[argument.0 as usize];
             if value.value_type != ExpressionType::Undefined

@@ -237,7 +237,7 @@ fn text_compatible(actual: &TypeInfo, expected: &TypeInfo) -> bool {
     scalar_type(actual) == ExpressionType::Text && scalar_type(expected) == ExpressionType::Text
 }
 
-fn oid_compatible(actual: &OidType, expected: &OidType) -> bool {
+pub(super) fn oid_compatible(actual: &OidType, expected: &OidType) -> bool {
     match (actual, expected) {
         (OidType::Any, _)
         | (_, OidType::Any)

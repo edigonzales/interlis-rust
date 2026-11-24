@@ -447,6 +447,23 @@ impl Analyzer<'_, '_> {
         if a == Numeric && b == Numeric && !logical {
             return Some(if arithmetic { Numeric } else { Boolean });
         }
+        if equality
+            && let (Some(left), Some(right)) = (
+                self.expressions[left.0 as usize].type_id,
+                self.expressions[right.0 as usize].type_id,
+            )
+            && match (&self.types[left], &self.types[right]) {
+                (TypeInfo::Coordinate(left), TypeInfo::Coordinate(right)) => {
+                    left.kind == right.kind && left.axes.len() == right.axes.len()
+                }
+                (TypeInfo::Oid(left), TypeInfo::Oid(right)) => {
+                    super::existence::oid_compatible(left, right)
+                }
+                _ => false,
+            }
+        {
+            return Some(Boolean);
+        }
         if a == Boolean && b == Boolean && !arithmetic
             || a == Text && b == Text && equality
             || a == Object && b == Object && equality
@@ -587,6 +604,9 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::ObjectSelection(_) => ValueType::Object,
         TypeInfo::ClassValue(_) => ValueType::Class,
         TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_) => ValueType::Temporal,
+        TypeInfo::Coordinate(_) => ValueType::Coordinate,
+        TypeInfo::Geometry(_) => ValueType::Geometry,
+        TypeInfo::Oid(_) => ValueType::Oid,
         TypeInfo::Enumeration { .. }
         | TypeInfo::EnumTree { .. }
         | TypeInfo::EnumArgument { .. }
