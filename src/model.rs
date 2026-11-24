@@ -244,6 +244,7 @@ pub enum ExpressionType {
     Undefined,
     Object,
     ObjectSet,
+    Enumeration,
     Other,
 }
 
@@ -286,6 +287,9 @@ pub enum BoundExpressionKind {
         value: String,
         #[serde(rename = "canonicalLength")]
         canonical_length: usize,
+    },
+    Enumeration {
+        path: Vec<String>,
     },
     This,
     ObjectSet {

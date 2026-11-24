@@ -204,9 +204,13 @@ impl Analyzer<'_, '_> {
             (TypeInfo::TemporalRange(range), TypeInfo::Temporal(kind))
             | (TypeInfo::Temporal(kind), TypeInfo::TemporalRange(range)) => range.kind == *kind,
             (source, target) if text_compatible(source, target) => true,
+            (
+                TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. },
+                TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. },
+            ) => {
+                return self.enum_existence_compatible(actual, expected, at);
+            }
             (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_))
-            | (TypeInfo::Enumeration { .. }, TypeInfo::Enumeration { .. })
-            | (TypeInfo::EnumTree { .. }, TypeInfo::EnumTree { .. })
             | (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
                 self.unsupported_expression(at);
                 return None;

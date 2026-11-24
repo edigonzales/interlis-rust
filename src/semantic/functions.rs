@@ -104,6 +104,9 @@ impl Analyzer<'_, '_> {
                     let ty = declaration.type_id?;
                     let mandatory = declaration.mandatory() == Some(true);
                     let at = self.expressions[argument.0 as usize].span.clone();
+                    if self.is_enum_type(ty) {
+                        self.bind_enum_literal(argument, ty)?;
+                    }
                     match self.argument_fits(owner, argument, ty, mandatory) {
                         Ok(Some(true)) => {}
                         Ok(Some(false)) => {
@@ -318,6 +321,15 @@ impl Analyzer<'_, '_> {
         match expected {
             ExpressionType::Boolean => Ok(Some(true)),
             ExpressionType::Text => Ok(text_argument_fits(actual, ty, formal_type)),
+            ExpressionType::Enumeration => {
+                let Some(source) = actual.type_id else {
+                    return Ok(Some(false));
+                };
+                let at = actual.span.clone();
+                self.enum_specializes(source, formal, &at)
+                    .map(Some)
+                    .ok_or(NumberError::Work)
+            }
             ExpressionType::Numeric => {
                 let TypeInfo::Numeric(target) = formal_type else {
                     unreachable!("the expected type is numeric");

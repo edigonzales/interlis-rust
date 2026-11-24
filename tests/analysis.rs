@@ -4471,6 +4471,75 @@ fn object_formals_use_contextual_reference_targets_and_role_chains_keep_multipli
 }
 
 #[test]
+fn enumeration_literals_bind_to_leaf_tree_and_formal_types() {
+    let report = outcome(
+        single(
+            "DOMAIN Colour=(green, group(red)) ORDERED;
+             Extended EXTENDS Colour=(group(blue)) ORDERED;
+             Tree=ALL OF Extended;
+             FUNCTION accepts(value:Extended):BOOLEAN;
+             TOPIC T=CLASS C=colour:Colour; extension:Extended; tree:Tree;
+                 MANDATORY CONSTRAINT colour <= extension;
+                 MANDATORY CONSTRAINT tree < (#group);
+                 MANDATORY CONSTRAINT accepts(#group.blue);
+             END C; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let constraints = graph.declaration("M.T.C").unwrap().constraints();
+    let interlis::BoundExpressionKind::Binary { right, .. } = graph
+        .expression(constraints[1].expression.unwrap())
+        .unwrap()
+        .kind
+    else {
+        panic!("expected enumeration comparison");
+    };
+    assert!(matches!(graph.expression_declared_type(right),
+        Some(TypeInfo::EnumTree { domain }) if domain == "M.Extended"));
+    let interlis::BoundExpressionKind::Group { expression } = graph.expression(right).unwrap().kind
+    else {
+        panic!("expected group");
+    };
+    assert!(matches!(&graph.expression(expression).unwrap().kind,
+        interlis::BoundExpressionKind::Enumeration { path } if path == &["group"]));
+}
+
+#[test]
+fn enumeration_comparisons_distinguish_bad_values_and_unrelated_or_unordered_types() {
+    for (condition, code) in [
+        ("leaf == #group", "ILI-ENUM-CONSTANT"),
+        ("leaf == #group.absent", "ILI-ENUM-CONSTANT"),
+        ("leaf == separate", "ILI-EXPRESSION-OPERANDS"),
+        ("unordered <= #a", "ILI-EXPRESSION-OPERANDS"),
+        ("circular > #a", "ILI-EXPRESSION-OPERANDS"),
+        ("flag == #yes", "ILI-ENUM-CONSTANT"),
+    ] {
+        outcome(
+            single(&format!(
+                "DOMAIN Values=(a, group(b)) ORDERED;
+                 TOPIC T=CLASS C=leaf:Values; separate:(a,group(b)) ORDERED;
+                     unordered:(a,b); circular:(a,b) CIRCULAR; flag:BOOLEAN;
+                     MANDATORY CONSTRAINT {condition};
+                 END C; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS Lookup=v:(a, group(b)); END Lookup;
+             CLASS Source=v:(a, group(b)); EXISTENCE CONSTRAINT v REQUIRED IN Lookup:v;
+             END Source; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (

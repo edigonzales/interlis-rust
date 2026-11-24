@@ -313,6 +313,12 @@ impl Analyzer<'_, '_> {
                     ValueType::Boolean,
                 )
             }
+            LiteralSyntax::Enumeration { path, others: None } => (
+                BoundKind::Enumeration {
+                    path: path.iter().map(|name| name.value.clone()).collect(),
+                },
+                ValueType::Enumeration,
+            ),
             _ => {
                 self.unsupported_expression(span);
                 return None;
@@ -378,6 +384,17 @@ impl Analyzer<'_, '_> {
             self.unsupported_expression(at);
             return None;
         }
+        if (a == Enumeration || b == Enumeration) && !logical && !arithmetic {
+            if self.enum_comparable(left, right, equality, at)? {
+                return Some(Boolean);
+            }
+            self.invalid_operands(
+                at,
+                &[left, right],
+                "The operands must use related enumerations and ordered comparisons require ORDERED",
+            );
+            return None;
+        }
         if a == Numeric && b == Numeric && !logical {
             if arithmetic
                 && [left, right]
@@ -401,6 +418,43 @@ impl Analyzer<'_, '_> {
             "The operand types do not support this operator",
         );
         None
+    }
+
+    fn enum_comparable(
+        &mut self,
+        left: ExpressionId,
+        right: ExpressionId,
+        equality: bool,
+        at: &Span,
+    ) -> Option<bool> {
+        let left_type = self.expressions[left.0 as usize]
+            .type_id
+            .filter(|&ty| self.is_enum_type(ty));
+        let right_type = self.expressions[right.0 as usize]
+            .type_id
+            .filter(|&ty| self.is_enum_type(ty));
+        if let Some(ty) = left_type {
+            self.bind_enum_literal(right, ty)?;
+        }
+        if let Some(ty) = right_type {
+            self.bind_enum_literal(left, ty)?;
+        }
+        let Some(a) = self.expressions[left.0 as usize]
+            .type_id
+            .filter(|&ty| self.is_enum_type(ty))
+        else {
+            return Some(false);
+        };
+        let Some(b) = self.expressions[right.0 as usize]
+            .type_id
+            .filter(|&ty| self.is_enum_type(ty))
+        else {
+            return Some(false);
+        };
+        if !equality && !(self.enum_is_ordered(a) && self.enum_is_ordered(b)) {
+            return Some(false);
+        }
+        Some(self.enum_specializes(a, b, at)? || self.enum_specializes(b, a, at)?)
     }
 
     fn invalid_operands(&mut self, at: &Span, operands: &[ExpressionId], message: &str) {
@@ -438,6 +492,9 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::Structure(_) | TypeInfo::Reference(_) => ValueType::Object,
         TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
         TypeInfo::ObjectSelection(_) => ValueType::Object,
+        TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. } | TypeInfo::Alignment(_) => {
+            ValueType::Enumeration
+        }
         _ => ValueType::Other,
     }
 }

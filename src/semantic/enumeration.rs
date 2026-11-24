@@ -1,7 +1,7 @@
 use super::{Analyzer, Effective};
 use crate::{
-    Enumeration, EnumerationElement, EnumerationOrder, RelatedLocation, Span, TypeInfo,
-    syntax::EnumerationSyntax,
+    AlignmentKind, BoundExpressionKind, Enumeration, EnumerationElement, EnumerationOrder,
+    ExpressionId, ExpressionType, RelatedLocation, Span, TypeInfo, syntax::EnumerationSyntax,
 };
 use std::collections::BTreeMap;
 
@@ -98,6 +98,7 @@ impl Analyzer<'_, '_> {
         };
         self.merge_enumeration(&mut values, syntax, &mut extension, 0)?;
         let ty = self.types.len();
+        self.enum_bases.insert(ty, base.ty);
         self.types.push(TypeInfo::Enumeration {
             values,
             order: declared_order.or(order),
@@ -263,6 +264,7 @@ impl Analyzer<'_, '_> {
             .as_ref()
             .expect("enumeration domain reference has been bound");
         let ty = self.types.len();
+        self.enum_bases.insert(ty, base.ty);
         self.types.push(TypeInfo::EnumTree {
             domain: reference.target.clone(),
         });
@@ -271,4 +273,209 @@ impl Analyzer<'_, '_> {
             mandatory: false,
         })
     }
+
+    fn enum_root(&self, ty: usize) -> (usize, bool) {
+        if matches!(self.types[ty], TypeInfo::EnumTree { .. }) {
+            (self.enum_bases[&ty], true)
+        } else {
+            (ty, false)
+        }
+    }
+
+    pub(super) fn is_enum_type(&self, ty: usize) -> bool {
+        matches!(
+            self.types[ty],
+            TypeInfo::Enumeration { .. }
+                | TypeInfo::EnumTree { .. }
+                | TypeInfo::Alignment(_)
+                | TypeInfo::Boolean
+        )
+    }
+
+    pub(super) fn enum_is_ordered(&self, ty: usize) -> bool {
+        matches!(
+            self.types[self.enum_root(ty).0],
+            TypeInfo::Enumeration {
+                order: Some(EnumerationOrder::Ordered),
+                ..
+            } | TypeInfo::Alignment(_)
+                | TypeInfo::Boolean
+        )
+    }
+
+    pub(super) fn enum_specializes(
+        &mut self,
+        source: usize,
+        target: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        let (mut source, source_tree) = self.enum_root(source);
+        let (target, target_tree) = self.enum_root(target);
+        if source_tree && !target_tree {
+            return Some(false);
+        }
+        loop {
+            if !self.step(1, at) {
+                return None;
+            }
+            if source == target
+                || match (&self.types[source], &self.types[target]) {
+                    (TypeInfo::Boolean, TypeInfo::Boolean) => true,
+                    (TypeInfo::Alignment(a), TypeInfo::Alignment(b)) => a == b,
+                    _ => false,
+                }
+            {
+                return Some(true);
+            }
+            let Some(&base) = self.enum_bases.get(&source) else {
+                return Some(false);
+            };
+            source = base;
+        }
+    }
+
+    pub(super) fn enum_existence_compatible(
+        &mut self,
+        source: usize,
+        target: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        if self.enum_specializes(source, target, at)? {
+            return Some(true);
+        }
+        let (source, source_tree) = self.enum_root(source);
+        let (target, target_tree) = self.enum_root(target);
+        if source_tree && !target_tree {
+            return Some(false);
+        }
+        let (
+            TypeInfo::Enumeration {
+                values: source,
+                order: a,
+                ..
+            },
+            TypeInfo::Enumeration {
+                values: target,
+                order: b,
+                ..
+            },
+        ) = (&self.types[source], &self.types[target])
+        else {
+            return Some(false);
+        };
+        if a != b {
+            return Some(false);
+        }
+        match same_enum_values(source, target, &mut self.work) {
+            Ok(equal) => Some(equal),
+            Err(()) => {
+                self.diagnostics
+                    .limit("Semantic work budget exceeded", Some(at.clone()));
+                None
+            }
+        }
+    }
+
+    pub(super) fn bind_enum_literal(&mut self, expression: ExpressionId, ty: usize) -> Option<()> {
+        let actual = super::expressions::underlying_expression(&self.expressions, expression);
+        if actual.type_id.is_some() {
+            return Some(());
+        }
+        let path = match &actual.kind {
+            BoundExpressionKind::Enumeration { path } => path.clone(),
+            BoundExpressionKind::Boolean { value } => vec![value.to_string()],
+            _ => return Some(()),
+        };
+        let at = actual.span.clone();
+        let matches = self.enum_contains(ty, &path, &at)?;
+        if !matches {
+            self.diagnostics.push(
+                "ILI-ENUM-CONSTANT",
+                "The constant is not a member of the expected enumeration",
+                Some(at),
+            );
+            return None;
+        }
+        let value_type = super::expressions::scalar_type(&self.types[ty]);
+        let mut id = expression;
+        loop {
+            let value = &mut self.expressions[id.0 as usize];
+            value.type_id = Some(ty);
+            value.value_type = value_type;
+            if let BoundExpressionKind::Group { expression } = value.kind {
+                id = expression;
+            } else {
+                if value_type == ExpressionType::Boolean {
+                    value.kind = BoundExpressionKind::Boolean {
+                        value: path[0] == "true",
+                    };
+                } else {
+                    value.kind = BoundExpressionKind::Enumeration { path };
+                }
+                return Some(());
+            }
+        }
+    }
+
+    pub(super) fn enum_contains(&mut self, ty: usize, path: &[String], at: &Span) -> Option<bool> {
+        let (base, tree_values) = self.enum_root(ty);
+        let names: &[&str] = match &self.types[base] {
+            TypeInfo::Enumeration { values, .. } => {
+                let mut tree = values;
+                for (index, name) in path.iter().enumerate() {
+                    let comparisons = tree.elements.len().saturating_mul(name.len() + 1);
+                    if self
+                        .work
+                        .charge(u32::try_from(comparisons).unwrap_or(u32::MAX))
+                        .is_err()
+                    {
+                        self.diagnostics
+                            .limit("Semantic work budget exceeded", Some(at.clone()));
+                        return None;
+                    }
+                    let Some(element) = tree.elements.iter().find(|element| element.name == *name)
+                    else {
+                        return Some(false);
+                    };
+                    if index + 1 == path.len() {
+                        return Some(tree_values || element.children.is_none());
+                    }
+                    let Some(children) = &element.children else {
+                        return Some(false);
+                    };
+                    tree = children;
+                }
+                return Some(false);
+            }
+            TypeInfo::Boolean => &["false", "true"],
+            TypeInfo::Alignment(AlignmentKind::Horizontal) => &["Left", "Center", "Right"],
+            TypeInfo::Alignment(AlignmentKind::Vertical) => {
+                &["Top", "Cap", "Half", "Base", "Bottom"]
+            }
+            _ => return Some(false),
+        };
+        Some(path.len() == 1 && names.contains(&path[0].as_str()))
+    }
+}
+
+fn same_enum_values(
+    left: &Enumeration,
+    right: &Enumeration,
+    work: &mut crate::limits::WorkBudget,
+) -> Result<bool, ()> {
+    if left.elements.len() != right.elements.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.elements.iter().zip(&right.elements) {
+        work.charge((left.name.len() + right.name.len()) as u32)?;
+        if left.name != right.name {
+            return Ok(false);
+        }
+        match (&left.children, &right.children) {
+            (None, None) => {}
+            (Some(left), Some(right)) if same_enum_values(left, right, work)? => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
 }
