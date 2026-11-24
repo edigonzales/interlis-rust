@@ -522,6 +522,13 @@ impl Analyzer<'_, '_> {
         {
             return Some(Boolean);
         }
+        if (a == Formatted || b == Formatted)
+            && !logical
+            && !arithmetic
+            && self.formatted_comparable(left, right, at)?
+        {
+            return Some(Boolean);
+        }
         if (a == Enumeration || b == Enumeration) && !logical && !arithmetic {
             if self.enum_comparable(left, right, equality, at)? {
                 return Some(Boolean);
@@ -748,6 +755,7 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::ClassValue(_) => ValueType::Class,
         TypeInfo::AttributePath(_) => ValueType::AttributePath,
         TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_) => ValueType::Temporal,
+        TypeInfo::Formatted(_) => ValueType::Formatted,
         TypeInfo::Coordinate(_) => ValueType::Coordinate,
         TypeInfo::Geometry(_) => ValueType::Geometry,
         TypeInfo::Oid(_) => ValueType::Oid,

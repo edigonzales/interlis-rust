@@ -743,6 +743,7 @@ impl Analyzer<'_, '_> {
             }
         } else {
             self.bind_temporal_literal(expression, target)?;
+            self.bind_formatted_literal(expression, target)?;
         }
         if matches!(self.types[target], TypeInfo::AttributePath(_)) {
             let actual = underlying_expression(&self.expressions, expression);
@@ -764,6 +765,9 @@ impl Analyzer<'_, '_> {
         if let Some(source) = actual.type_id {
             let at = actual.span.clone();
             match (&self.types[source], &self.types[target]) {
+                (TypeInfo::Formatted(_), TypeInfo::Formatted(_)) => {
+                    return self.formatted_assignment(source, target, &at);
+                }
                 (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
                     return self.geometry_value_fits(source, target, &at);
                 }

@@ -2102,21 +2102,7 @@ mod tests {
         }
     }
     #[test]
-    fn new_type_semantics_are_explicitly_gated_and_descending_plain_bounds_stay_syntax() {
-        {
-            let ty = "FORMAT BASED ON INTERLIS.GregorianDate (Year/4)";
-            let body = format!("DOMAIN New={ty};");
-            clean("2.4", &body);
-            let result = report("2.4", &body);
-            assert_eq!(
-                result.status(),
-                AnalysisStatus::Incomplete,
-                "{ty}: {:?}",
-                result.diagnostics()
-            );
-            assert!(result.graph().is_none());
-            assert!(!result.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"));
-        }
+    fn descending_plain_bounds_parse_and_are_rejected_semantically() {
         clean("2.4", "DOMAIN N=10.00..1.00;");
         let result = report("2.4", "DOMAIN N=10.00..1.00;");
         assert_eq!(result.status(), AnalysisStatus::Rejected);

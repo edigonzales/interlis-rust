@@ -7708,7 +7708,9 @@ fn compile_only_exposes_a_schema_for_a_successfully_checked_closure() {
     );
     for (input, expected, diagnostic) in [
         (
-            single("DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate (Year/INTERLIS.XMLDate);"),
+            single(
+                "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
+            ),
             CompilationStatus::Incomplete,
             "ILI-UNSUPPORTED",
         ),
@@ -7816,6 +7818,19 @@ fn compile_scopes_syntax_errors_to_selected_models_and_versioned_originals() {
         report.diagnostics()
     );
     assert_eq!(report.schema().unwrap().graph().models().len(), 2);
+    let malformed_version =
+        r#"INTERLIS 2.4; MODEL Original AT "x" VERSION = VERSION "2"; END Original."#;
+    let report = compile(
+        request(vec![
+            ("malformed.ili", malformed_version.into()),
+            ("old.ili", original.into()),
+            ("translated.ili", translated.into()),
+        ]),
+        Some(&["Local".into()]),
+    )
+    .unwrap();
+    assert_eq!(report.status(), CompilationStatus::Rejected);
+    assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
 
     let requiring = selected.replace("= END Selected", "= IMPORTS Other; END Selected");
     let report = compile(
@@ -7935,6 +7950,7 @@ fn nested_formats_preserve_the_structure_path_and_its_own_bounds() {
                     MODEL Layout AT "x" VERSION "1" =
                       STRUCTURE Part=first:0..9; second:0..9; END Part;
                       STRUCTURE Other=first:0..9; second:0..9; END Other;
+                      STRUCTURE Narrow EXTENDS Part=first (EXTENDED):3..5; END Narrow;
                       DOMAIN PairCode=FORMAT BASED ON Part (first/2 ":" second/2)
                         "02:00".."07:00";
                     END Layout."#
@@ -7980,5 +7996,124 @@ fn nested_formats_preserve_the_structure_path_and_its_own_bounds() {
             Status::Rejected,
             Some("ILI-FORMAT-STRUCTURE"),
         );
+        outcome(
+            model("v02:00/00", "LIST {1} OF Layout.Part"),
+            Status::CheckedSubset,
+            None,
+        );
+        outcome(
+            model("v02:00/00", "Layout.Narrow"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+    }
+}
+
+#[test]
+fn nested_predefined_temporal_formats_preserve_layouts_and_reference_systems() {
+    for edition in ["2.3", "2.4"] {
+        let model = |first, lower| {
+            request(vec![(
+                "temporal.ili",
+                format!(
+                    r#"
+                INTERLIS {edition}; MODEL A AT "x" VERSION "1" =
+                DOMAIN LocalDate=FORMAT INTERLIS.XMLDate "2000-01-01".."2001-12-31";
+                STRUCTURE Pair=start:INTERLIS.GregorianDate; at:INTERLIS.UTC; END Pair;
+                DOMAIN Stamp=FORMAT BASED ON Pair (start/LocalDate "@" at/INTERLIS.XMLTime)
+                    "{first}@{lower}".."2001-12-31@23:59:59.999";
+                END A.
+                "#
+                ),
+            )])
+        };
+        let report = outcome(
+            model("2000-01-02", "00:00:00.123"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let TypeInfo::Formatted(stamp) = graph.effective_type("A.Stamp").unwrap() else {
+            panic!("expected the nested format");
+        };
+        assert_eq!(stamp.bounds.as_ref().unwrap().0.components.len(), 6);
+        let TypeInfo::Numeric(year) = graph.effective_type("INTERLIS.GregorianYear").unwrap()
+        else {
+            panic!("expected the predefined year range");
+        };
+        assert_eq!(year.bounds.as_ref().unwrap().lower.original(), "1582");
+        assert_eq!(
+            year.reference_system
+                .as_ref()
+                .unwrap()
+                .target()
+                .target_name(),
+            "INTERLIS.BaseTimeSystems.GregorianCalendar"
+        );
+        outcome(
+            model("1999-12-31", "00:00:00.000"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+        outcome(
+            model("2000-01-02", "00:0:0.123"),
+            if edition == "2.3" {
+                Status::CheckedSubset
+            } else {
+                Status::Rejected
+            },
+            (edition == "2.4").then_some("ILI-FORMAT-BOUNDS"),
+        );
+    }
+}
+
+#[test]
+fn formatted_constants_and_assignments_use_the_bound_components_and_ranges() {
+    let input = |condition: &str, assignment: &str| {
+        single(&format!(
+            r#"
+            STRUCTURE Pair=major:0..99; minor:0..99; END Pair;
+            DOMAIN Full=FORMAT BASED ON Pair (major/2 ":" minor/2) "10:00".."19:99";
+            DOMAIN Small=FORMAT BASED ON Pair ("p" major/2 "/" minor/2) "p12/10".."p15/80";
+            DOMAIN Wide=FORMAT BASED ON Pair (major "-" minor);
+            FUNCTION accepts(arg:Full):BOOLEAN;
+            TOPIC T=CLASS Item=
+               state:Full; small:Small; wide:Wide;
+               derived:Full := {assignment};
+               MANDATORY CONSTRAINT {condition};
+            END Item; END T;
+            "#
+        ))
+    };
+    let report = outcome(
+        input(r#"state >= ("12:23") AND accepts(small)"#, r#"("10:02")"#),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let member = graph.declaration("M.T.Item.derived").unwrap();
+    let expr = graph.expression(member.derivations()[0]).unwrap();
+    let interlis::BoundExpressionKind::Group { expression } = expr.kind else {
+        panic!("expected a grouped constant");
+    };
+    let interlis::BoundExpressionKind::Formatted { value, components } =
+        &graph.expression(expression).unwrap().kind
+    else {
+        panic!("expected a formatted constant");
+    };
+    assert_eq!(value, "10:02");
+    assert_eq!(
+        components
+            .iter()
+            .map(|value| value.original())
+            .collect::<Vec<_>>(),
+        ["10", "02"]
+    );
+    for (condition, expected) in [
+        (r#"state >= "20:00""#, "ILI-FORMAT-CONSTANT"),
+        (r#"accepts("12:3")"#, "ILI-FORMAT-CONSTANT"),
+        ("accepts(wide)", "ILI-FUNCTION-ARGUMENT"),
+    ] {
+        outcome(input(condition, "small"), Status::Rejected, Some(expected));
     }
 }

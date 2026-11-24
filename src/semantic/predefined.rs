@@ -2,7 +2,8 @@ use super::{Analyzer, BoundName, Kind, Name};
 use crate::{
     BoundConstraint, BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind,
     CollectionType, ConstraintRule, ExpressionType, GeometryKind, GeometryType, LanguageVersion,
-    NumericRange, Span, StructureType, TypeInfo, TypeReference,
+    NumericBounds, NumericRange, NumericReferenceSystem, Span, StructureType, TypeInfo,
+    TypeReference,
 };
 
 impl Analyzer<'_, '_> {
@@ -13,7 +14,8 @@ impl Analyzer<'_, '_> {
         at: &Span,
     ) -> Option<BoundName> {
         if let BoundName::Predefined(
-            "SurfaceEdge" | "SurfaceBoundary" | "LineGeometry",
+            "SurfaceEdge" | "SurfaceBoundary" | "LineGeometry" | "TimeOfDay" | "UTC"
+            | "GregorianDate" | "GregorianDateTime",
             Kind::Structure,
         ) = target
         {
@@ -721,6 +723,162 @@ impl Analyzer<'_, '_> {
         }
     }
 
+    pub(super) fn predefined_year(&mut self, owner: usize, at: &Span) -> Option<usize> {
+        if let Some(&id) = self.names.get("INTERLIS.GregorianYear") {
+            return self.symbols[id].declaration.type_id;
+        }
+        let model = self.symbols[owner].model;
+        let namespace = self.predefined_namespace(model)?;
+        let name = Name {
+            value: "GregorianYear".into(),
+            span: Span::predefined(),
+        };
+        let id = self.add(
+            Kind::Domain,
+            &name,
+            &name.span,
+            Some(namespace),
+            model,
+            None,
+        )?;
+        let ty = self.predefined_time_range(
+            owner,
+            ("1582", "2999"),
+            "Y",
+            false,
+            Some("GregorianCalendar"),
+            at,
+        )?;
+        self.symbols[id].declaration.predefined = true;
+        self.symbols[id].declaration.type_id = Some(ty);
+        self.symbols[id].declaration.effective_mandatory = Some(false);
+        Some(ty)
+    }
+
+    fn predefined_time_range(
+        &mut self,
+        owner: usize,
+        (lower, upper): (&str, &str),
+        unit: &str,
+        circular: bool,
+        system: Option<&str>,
+        at: &Span,
+    ) -> Option<usize> {
+        let decimal = |value: &str| crate::DecimalInfo {
+            original: value.into(),
+            coefficient: value.replace('.', ""),
+            fractional_digits: value
+                .split_once('.')
+                .map_or(0, |(_, digits)| digits.len() as u32),
+            exponent: 0,
+            scaled: false,
+            computed: false,
+        };
+        let lower = decimal(lower);
+        let upper = decimal(upper);
+        let reference_system = if let Some(name) = system {
+            self.predefined_time_basket(owner, at)?;
+            Some(NumericReferenceSystem::MetaObject {
+                object: self.predefined_reference(owner, &format!("BaseTimeSystems.{name}")),
+                axis: None,
+            })
+        } else {
+            None
+        };
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Numeric(NumericRange {
+            bounds: Some(NumericBounds { lower, upper }),
+            unit: Some(self.predefined_reference(owner, unit)),
+            reference_system,
+            circular,
+            direction: None,
+        }));
+        Some(ty)
+    }
+
+    fn predefined_time_structure(&mut self, owner: usize, name: &str, at: &Span) -> Option<usize> {
+        let (base, fields) = match name {
+            "GregorianDate" => (None, &["Year", "Month", "Day"][..]),
+            "GregorianDateTime" => (Some("GregorianDate"), &["Hours", "Minutes", "Seconds"][..]),
+            "TimeOfDay" => (None, &["Hours", "Minutes", "Seconds"][..]),
+            "UTC" => (Some("TimeOfDay"), &["Hours"][..]),
+            _ => return None,
+        };
+        if let Some(&id) = self.names.get(&format!("INTERLIS.{name}")) {
+            return Some(id);
+        }
+        let parent = if let Some(base) = base {
+            Some((
+                self.predefined_time_structure(owner, base, at)?,
+                self.predefined_reference(owner, base),
+            ))
+        } else {
+            None
+        };
+        let namespace = self.predefined_namespace(self.symbols[owner].model)?;
+        let id = self.geometry_structure(namespace, name, name, None)?;
+        self.symbols[id].declaration.abstract_declaration = name == "TimeOfDay";
+        let mut members = Vec::new();
+        if let Some((base, reference)) = parent {
+            self.symbols[id].base_scope = Some(base);
+            self.symbols[id].declaration.base_reference = Some(reference);
+            members.extend_from_slice(
+                self.symbols[base]
+                    .declaration
+                    .effective_attributes
+                    .as_deref()?,
+            );
+        }
+        for &field in fields {
+            let reference =
+                (field == "Year").then(|| self.predefined_reference(owner, "GregorianYear"));
+            let (ty, subdivision) = match field {
+                "Year" => (self.predefined_year(owner, at)?, None),
+                "Month" => (
+                    self.predefined_time_range(owner, ("1", "12"), "M", false, None, at)?,
+                    Some(false),
+                ),
+                "Day" => (
+                    self.predefined_time_range(owner, ("1", "31"), "d", false, None, at)?,
+                    Some(false),
+                ),
+                "Hours" => {
+                    let system = (name != "TimeOfDay").then_some("UTC");
+                    (
+                        self.predefined_time_range(owner, ("0", "23"), "h", true, system, at)?,
+                        (name == "GregorianDateTime").then_some(false),
+                    )
+                }
+                "Minutes" => (
+                    self.predefined_time_range(owner, ("0", "59"), "min", true, None, at)?,
+                    Some(true),
+                ),
+                "Seconds" => (
+                    self.predefined_time_range(owner, ("0.000", "59.999"), "s", true, None, at)?,
+                    Some(true),
+                ),
+                _ => unreachable!(),
+            };
+            let member = self.predefined_attribute(id, field, ty, false, reference)?;
+            self.symbols[member].declaration.subdivision =
+                subdivision.map(|continuous| crate::AttributeSubdivision {
+                    continuous,
+                    span: Span::predefined(),
+                });
+            if name == "UTC" {
+                let base = members[0];
+                self.symbols[member].base_scope = Some(base);
+                self.symbols[member].declaration.base_reference =
+                    Some(self.geometry_symbol_reference(owner, base)?);
+                members[0] = member;
+            } else {
+                members.push(member);
+            }
+        }
+        self.symbols[id].declaration.effective_attributes = Some(members.into_boxed_slice());
+        Some(id)
+    }
+
     pub(super) fn bound_structure(
         &mut self,
         owner: usize,
@@ -734,6 +892,7 @@ impl Analyzer<'_, '_> {
                     .predefined_segment(owner, name, at)
                     .or_else(|| self.predefined_metadata(owner, name, at))
                     .or_else(|| self.predefined_geometry_structure(owner, name, at))
+                    .or_else(|| self.predefined_time_structure(owner, name, at))
                 {
                     Some(id)
                 } else {

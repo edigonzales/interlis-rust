@@ -1,5 +1,5 @@
 use super::{
-    Analyzer, Kind, LookupError, NumberError, Symbol,
+    Analyzer, BoundName, Kind, LookupError, NumberError, Symbol,
     collections::{compare_count, structure_targets},
     units::{unit_extends, units_convertible},
 };
@@ -61,6 +61,9 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
             };
+        if matches!(target, BoundName::Predefined("GregorianYear", Kind::Domain)) {
+            self.predefined_year(owner, &reference.span)?;
+        }
         Some(Some(NumericReferenceSystem::Domain(
             DomainReferenceSystem {
                 domain: self.bound_reference(owner, reference, target)?,
@@ -126,14 +129,6 @@ impl Analyzer<'_, '_> {
                     {
                         // The predefined axes have no reference or fixed unit.
                         continue;
-                    }
-                    (None, None) if reference.domain.target_name() == "INTERLIS.GregorianYear" => {
-                        self.diagnostics.push(
-                            "ILI-UNSUPPORTED",
-                            "The predefined year domain requires its full definition",
-                            Some(at),
-                        );
-                        return None;
                     }
                     _ => None,
                 };

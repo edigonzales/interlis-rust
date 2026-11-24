@@ -1,6 +1,7 @@
 use super::{
     Analyzer, Kind, SyntaxDecl,
     expressions::{numeric_operand, underlying_expression},
+    formats::compare_components,
     functions::compare_decimal,
     paths::equivalent_selector,
 };
@@ -789,6 +790,10 @@ impl Comparison<'_> {
                     a == b
                 }
                 (Temporal { components: a, .. }, Temporal { components: b, .. }) => a == b,
+                (Formatted { components: a, .. }, Formatted { components: b, .. }) => {
+                    a.len() == b.len()
+                        && compare_components(a, b, self.work).map_err(|_| ())? == Ordering::Equal
+                }
                 (Enumeration { path: ap }, Enumeration { path: bp }) => {
                     let x = self.enum_positions(a.type_id, ap)?;
                     let y = self.enum_positions(b.type_id, bp)?;

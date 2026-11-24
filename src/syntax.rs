@@ -811,6 +811,7 @@ pub(crate) fn parse_source(
         let source = sources.files()[file].text();
         let tokens = &lexed.tokens;
         let text = |token: &Token| &source[token.range.clone()];
+        let mut version_seen = false;
         for (position, token) in tokens.iter().enumerate() {
             if token.kind == Kind::Word
                 && text(token) == "MODEL"
@@ -819,16 +820,20 @@ pub(crate) fn parse_source(
                     .filter(|name| name.kind == Kind::Word)
             {
                 catalog.push((text(name).to_owned(), None));
+                version_seen = false;
             } else if token.kind == Kind::Word
                 && text(token) == "VERSION"
-                && let Some((_, version)) =
-                    catalog.last_mut().filter(|(_, version)| version.is_none())
-                && let Some(Token {
+                && !version_seen
+                && let Some((_, version)) = catalog.last_mut()
+            {
+                version_seen = true;
+                if let Some(Token {
                     kind: Kind::String(value),
                     ..
                 }) = tokens.get(position + 1)
-            {
-                *version = Some(value.clone());
+                {
+                    *version = Some(value.clone());
+                }
             }
         }
     }
@@ -1157,38 +1162,34 @@ mod unsupported_regressions {
     #[test]
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
-            for body in [
-                "STRUCTURE Outer=date:INTERLIS.GregorianDate; END Outer; DOMAIN Nested=FORMAT BASED ON Outer (date/INTERLIS.XMLDate);",
-                "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
-            ] {
-                let text = format!(
-                    "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
-                );
-                let report = analyze(CompileRequest {
-                    sources: vec![SourceInput {
-                        name: "a".into(),
-                        text,
-                    }],
-                    limits: Limits::default(),
-                })
-                .unwrap();
-                assert_eq!(
-                    report.status(),
-                    AnalysisStatus::Incomplete,
-                    "{body}: {:?}",
-                    report.diagnostics()
-                );
-                assert!(
-                    report
-                        .diagnostics()
-                        .iter()
-                        .any(|d| d.code == "ILI-UNSUPPORTED" && d.primary.is_some())
-                );
-                assert!(
-                    !report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"),
-                    "{body}"
-                );
-            }
+            let body = "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;";
+            let text = format!(
+                "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
+            );
+            let report = analyze(CompileRequest {
+                sources: vec![SourceInput {
+                    name: "a".into(),
+                    text,
+                }],
+                limits: Limits::default(),
+            })
+            .unwrap();
+            assert_eq!(
+                report.status(),
+                AnalysisStatus::Incomplete,
+                "{body}: {:?}",
+                report.diagnostics()
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == "ILI-UNSUPPORTED" && d.primary.is_some())
+            );
+            assert!(
+                !report.diagnostics().iter().any(|d| d.code == "ILI-SYNTAX"),
+                "{body}"
+            );
         }
     }
     #[test]

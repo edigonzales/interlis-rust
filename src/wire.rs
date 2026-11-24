@@ -387,6 +387,7 @@ impl Serialize for ExpressionsOutput<'_> {
                 expression.value_type,
                 crate::ExpressionType::Class
                     | crate::ExpressionType::Temporal
+                    | crate::ExpressionType::Formatted
                     | crate::ExpressionType::AttributePath
             ) || matches!(
                 expression.kind,

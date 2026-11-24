@@ -19,7 +19,7 @@ Model queries expose resolved declarations, member order, types, references,
 constraints, units, metadata and original locations. Compilation checks model
 definitions. Transfer-object validation and geometry topology belong to
 downstream components. Some features still report \`incomplete\`, including
-nested predefined date and time formats and custom-segment geometry inspections.
+standard area-check calls and custom-segment geometry inspections.
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,

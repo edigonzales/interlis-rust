@@ -1374,6 +1374,7 @@ impl Analyzer<'_, '_> {
                         | BoundExpressionKind::Number { .. }
                         | BoundExpressionKind::Text { .. }
                         | BoundExpressionKind::Temporal { .. }
+                        | BoundExpressionKind::Formatted { .. }
                         | BoundExpressionKind::Enumeration { .. }
                         | BoundExpressionKind::Class { .. }
                         | BoundExpressionKind::AttributePath { .. }

@@ -6,7 +6,7 @@ const syntaxRequest = (text) => JSON.stringify({ sources: [{ name: 'syntax', tex
 export const compileCases = [
   [request, 'compiled', 0],
   [syntaxRequest('INTERLIS 2.4; MODEL Broken AT "x" VERSION "1" = IMPORTS Missing; END Broken.'), 'rejected', 1],
-  [syntaxRequest('INTERLIS 2.4; MODEL Model AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate (Year/INTERLIS.XMLDate); END Model.'), 'incomplete', 4],
+  [syntaxRequest('INTERLIS 2.4; MODEL Model AT "x" VERSION "1" = TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T; END Model.'), 'incomplete', 4],
   [limited, 'limit_exceeded', 5],
 ];
 export const parseCases = [
@@ -56,7 +56,7 @@ export const syntaxCases = [
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[INTERLIS.rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [INTERLIS.m] {M.T.B.System[2]}; END M.', 'rejected', 'ILI-METAOBJECT-REFERENCE'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'rejected', 'ILI-DOMAIN-ABSTRACT'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'rejected', 'ILI-GEOMETRY-ABSTRACT'],
-  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate ("😀" Year/4 "-" Month/INTERLIS.XMLDate); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate ("😀" Year/4 "-" Month/INTERLIS.XMLDate); END M.', 'rejected', 'ILI-FORMAT-ATTRIBUTE'],
   [classValues, 'checked_subset'],
   [population, 'checked_subset'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],

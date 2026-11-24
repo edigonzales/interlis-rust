@@ -228,7 +228,7 @@ pub struct FormattedStructurePart {
     pub(crate) type_id: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FormattedBound {
     pub original: String,
     pub components: Vec<DecimalInfo>,
@@ -302,6 +302,7 @@ pub enum ExpressionType {
     Numeric,
     Text,
     Temporal,
+    Formatted,
     Coordinate,
     Geometry,
     Oid,
@@ -357,6 +358,10 @@ pub enum BoundExpressionKind {
     Temporal {
         value: String,
         components: Vec<u16>,
+    },
+    Formatted {
+        value: String,
+        components: Vec<DecimalInfo>,
     },
     Enumeration {
         path: Vec<String>,

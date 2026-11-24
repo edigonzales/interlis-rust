@@ -40,7 +40,7 @@ use crate::{
     number::{DecimalLiteral, NumberError},
     syntax::{self, Declaration as SyntaxDecl, Name, QualifiedName, TypeSyntax},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
 struct Effective {
@@ -1416,6 +1416,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         );
     }
     fn predefined_type(&mut self, owner: usize, name: &str, span: &Span) -> Option<Effective> {
+        if name == "GregorianYear" {
+            return Some(Effective {
+                ty: self.predefined_year(owner, span)?,
+                mandatory: false,
+            });
+        }
         let ty = match name {
             "URI" => TypeInfo::FixedText {
                 format: FixedTextFormat::Uri,
@@ -2065,8 +2071,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
             .collect();
         self.bind_association_view_bases(&viewables)?;
+        let mut abstract_formats = BTreeSet::new();
+        self.validate_formatted_types(0, &mut abstract_formats)?;
+        let first_view_type = self.types.len();
         viewables.extend(self.bind_views(&expressions)?);
-        self.validate_formatted_types()?;
+        self.validate_formatted_types(first_view_type, &mut abstract_formats)?;
         self.validate_reference_types(&viewables)?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;

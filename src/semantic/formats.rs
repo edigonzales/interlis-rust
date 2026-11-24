@@ -1,16 +1,21 @@
 use super::{
-    Analyzer, BoundName, Effective, Kind, TypeInfo,
+    Analyzer, BoundName, Effective, Kind, Symbol, TypeInfo,
     collections::{compare_count, structure_targets},
+    expressions::underlying_expression,
     functions::compare_decimal,
 };
 use crate::{
-    DecimalInfo, FormattedBound, FormattedPart, FormattedStructurePart, FormattedType, Limits,
-    NumericBounds, Span, TypeReference,
+    BoundExpressionKind, DecimalInfo, ExpressionId, ExpressionType, FormattedBound, FormattedPart,
+    FormattedStructurePart, FormattedType, LanguageVersion, Limits, NumericBounds, Span,
+    TemporalKind, TypeReference,
     limits::WorkBudget,
     number::{DecimalLiteral, NumberError},
     syntax::{FormatAttribute, FormatDefinition, FormatPart, Name, QualifiedName, StringRange},
 };
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 impl Analyzer<'_, '_> {
     pub(super) fn structure_format(
@@ -109,25 +114,32 @@ impl Analyzer<'_, '_> {
                     let attribute = self.format_member(scope, name)?;
                     let target =
                         self.expression_name(owner, domain, &[Kind::Domain], "ILI-FORMAT-DOMAIN")?;
-                    let BoundName::Declared(id) = target else {
-                        self.unsupported_expression(&domain.span);
-                        return None;
+                    let ty = match target {
+                        BoundName::Declared(id) => {
+                            if !self.check_domain_order(owner, id, &domain.span) {
+                                return None;
+                            }
+                            self.resolve_domain(id)?.ty
+                        }
+                        BoundName::Predefined(builtin, _) => {
+                            self.predefined_type(owner, builtin, &domain.span)?.ty
+                        }
                     };
-                    if !self.check_domain_order(owner, id, &domain.span) {
-                        return None;
-                    }
-                    let selected = self.resolve_domain(id)?;
-                    if !matches!(self.types[selected.ty], TypeInfo::Formatted(_)) {
+                    let type_id = if matches!(self.types[ty], TypeInfo::Formatted(_)) {
+                        ty
+                    } else if let Some((kind, language)) = self.temporal_profile(ty) {
+                        self.temporal_structure_format(owner, ty, kind, language, &domain.span)?
+                    } else {
                         return self.format_error(
                             "ILI-FORMAT-DOMAIN",
                             "A structure component requires a formatted domain",
                             &domain.span,
                         );
-                    }
+                    };
                     parts.push(FormattedPart::Structure(FormattedStructurePart {
                         attribute,
                         format: self.bound_reference(owner, domain, target)?,
-                        type_id: selected.ty,
+                        type_id,
                     }));
                 }
             }
@@ -150,6 +162,79 @@ impl Analyzer<'_, '_> {
             }
         }
         self.store_format(structure, parts, range, base, at)
+    }
+
+    fn temporal_structure_format(
+        &mut self,
+        owner: usize,
+        ty: usize,
+        kind: TemporalKind,
+        language: LanguageVersion,
+        at: &Span,
+    ) -> Option<usize> {
+        let span = Span::predefined();
+        let name = match kind {
+            TemporalKind::Date => "GregorianDate",
+            TemporalKind::DateTime => "GregorianDateTime",
+            TemporalKind::TimeOfDay => "UTC",
+        };
+        let scope =
+            self.bound_structure(owner, BoundName::Predefined(name, Kind::Structure), at)?;
+        let mut fields = Vec::new();
+        if kind != TemporalKind::TimeOfDay {
+            fields.extend([("", "Year", 4), ("-", "Month", 2), ("-", "Day", 2)]);
+        }
+        if kind != TemporalKind::Date {
+            let preceding = if kind == TemporalKind::DateTime {
+                "T"
+            } else {
+                ""
+            };
+            fields.extend([
+                (preceding, "Hours", 2),
+                (":", "Minutes", 2),
+                (":", "Seconds", 2),
+            ]);
+        }
+        let mut parts = Vec::new();
+        for (separator, field, width) in fields {
+            if !separator.is_empty() {
+                parts.push(FormattedPart::Literal {
+                    value: separator.into(),
+                    span: span.clone(),
+                });
+            }
+            let field_name = Name {
+                value: field.into(),
+                span: span.clone(),
+            };
+            parts.push(FormattedPart::Numeric {
+                attribute: self.format_member(scope, &field_name)?,
+                width: (language == LanguageVersion::V24 || field == "Hours")
+                    .then(|| width.to_string()),
+            });
+        }
+        let bounds = if let TypeInfo::TemporalRange(range) = &self.types[ty] {
+            let part = |bound: &crate::TemporalBound| FormattedBound {
+                original: bound.original.clone(),
+                components: Vec::new(),
+                span: bound.span.clone(),
+            };
+            Some((part(&range.lower), part(&range.upper)))
+        } else {
+            None
+        };
+        let id = self.types.len();
+        let mut structure = self.predefined_reference(owner, name);
+        structure.predefined_language = Some(language);
+        self.types.push(TypeInfo::Formatted(Box::new(FormattedType {
+            structure,
+            parts,
+            bounds,
+            base: None,
+            span,
+        })));
+        Some(id)
     }
 
     pub(super) fn restrict_format(
@@ -272,9 +357,12 @@ impl Analyzer<'_, '_> {
         Some(false)
     }
 
-    pub(super) fn validate_formatted_types(&mut self) -> Option<()> {
-        let mut abstract_types = BTreeSet::new();
-        for ty in 0..self.types.len() {
+    pub(super) fn validate_formatted_types(
+        &mut self,
+        start: usize,
+        abstract_types: &mut BTreeSet<usize>,
+    ) -> Option<()> {
+        for ty in start..self.types.len() {
             let TypeInfo::Formatted(format) = &self.types[ty] else {
                 continue;
             };
@@ -402,6 +490,208 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
+    pub(super) fn bind_formatted_literal(&mut self, mut id: ExpressionId, ty: usize) -> Option<()> {
+        if !matches!(self.types[ty], TypeInfo::Formatted(_)) {
+            return Some(());
+        }
+        let actual = underlying_expression(&self.expressions, id);
+        let BoundExpressionKind::Text { value, .. } = &actual.kind else {
+            return Some(());
+        };
+        if actual.value_type != ExpressionType::Text {
+            return Some(());
+        }
+        let at = actual.span.clone();
+        let value = value.clone();
+        let parsed = self.parse_formatted(ty, &value, &at)?;
+        let Some(components) = parsed else {
+            return self.format_constant_error(&at);
+        };
+        for (lower, upper) in self.formatted_ranges(ty, &at)? {
+            let result = (|| {
+                Ok(
+                    compare_components(&components, &lower.components, &mut self.work)?
+                        != Ordering::Less
+                        && compare_components(&components, &upper.components, &mut self.work)?
+                            != Ordering::Greater,
+                )
+            })();
+            match result {
+                Ok(true) => {}
+                Ok(false) => return self.format_constant_error(&at),
+                Err(error) => {
+                    self.number_error(error, &at);
+                    return None;
+                }
+            }
+        }
+        loop {
+            let bound = &mut self.expressions[id.0 as usize];
+            bound.type_id = Some(ty);
+            bound.value_type = ExpressionType::Formatted;
+            if let BoundExpressionKind::Group { expression } = bound.kind {
+                id = expression;
+            } else {
+                bound.kind = BoundExpressionKind::Formatted { value, components };
+                return Some(());
+            }
+        }
+    }
+
+    fn format_constant_error(&mut self, at: &Span) -> Option<()> {
+        self.format_error(
+            "ILI-FORMAT-CONSTANT",
+            "The constant must match the formatted layout and its declared ranges",
+            at,
+        )
+    }
+
+    pub(super) fn formatted_comparable(
+        &mut self,
+        left: ExpressionId,
+        right: ExpressionId,
+        at: &Span,
+    ) -> Option<bool> {
+        for (typed, candidate) in [(left, right), (right, left)] {
+            if let Some(ty) = self.expressions[typed.0 as usize].type_id {
+                self.bind_formatted_literal(candidate, ty)?;
+            }
+        }
+        let Some((left, right)) = self.expressions[left.0 as usize]
+            .type_id
+            .zip(self.expressions[right.0 as usize].type_id)
+        else {
+            return Some(false);
+        };
+        Some(
+            self.format_extends(left, right, at)?
+                || self.format_extends(right, left, at)?
+                || formats_share_members(&self.types[left], &self.types[right], &mut self.work)
+                    .map_err(|error| self.number_error(error, at))
+                    .ok()?,
+        )
+    }
+
+    pub(super) fn formatted_assignment(
+        &mut self,
+        source: usize,
+        target: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        if self.format_extends(source, target, at)? {
+            return Some(true);
+        }
+        let result = (|| {
+            if !formats_share_members(&self.types[source], &self.types[target], &mut self.work)? {
+                return Ok(false);
+            }
+            let (TypeInfo::Formatted(a), TypeInfo::Formatted(b)) =
+                (&self.types[source], &self.types[target])
+            else {
+                unreachable!()
+            };
+            Ok(a.structure.target_name() == b.structure.target_name())
+        })();
+        match result {
+            Ok(true) => {}
+            Ok(false) => return Some(false),
+            Err(error) => {
+                self.number_error(error, at);
+                return None;
+            }
+        }
+        let source = self.formatted_interval(source, at)?;
+        let target = self.formatted_interval(target, at)?;
+        let result = (|| {
+            Ok(
+                compare_extrema(&source.lower, &target.lower, Ordering::Less, &mut self.work)?
+                    != Ordering::Less
+                    && compare_extrema(
+                        &source.upper,
+                        &target.upper,
+                        Ordering::Greater,
+                        &mut self.work,
+                    )? != Ordering::Greater,
+            )
+        })();
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.number_error(error, at);
+                None
+            }
+        }
+    }
+
+    fn formatted_interval(&mut self, ty: usize, at: &Span) -> Option<FormatInterval> {
+        let ranges = self.formatted_ranges(ty, at)?;
+        let result = (|| {
+            let operations =
+                format_operations(ty, &self.types, &self.symbols, &self.names, &mut self.work)?;
+            let mut interval = FormatInterval::default();
+            for operation in operations {
+                self.work.charge(1).map_err(|_| NumberError::Work)?;
+                match operation {
+                    FormatOperation::Literal(_) => {}
+                    FormatOperation::Numeric(number, _) => {
+                        interval
+                            .lower
+                            .push(number.bounds.as_ref().map(|range| range.lower.clone()));
+                        interval
+                            .upper
+                            .push(number.bounds.as_ref().map(|range| range.upper.clone()));
+                    }
+                    FormatOperation::Bounds {
+                        first,
+                        lower,
+                        upper,
+                    } => {
+                        interval.narrow(first, lower, upper, &mut self.work)?;
+                    }
+                }
+            }
+            for (min, max) in &ranges {
+                interval.narrow(0, &min.components, &max.components, &mut self.work)?;
+            }
+            Ok(interval)
+        })();
+        match result {
+            Ok(interval) => Some(interval),
+            Err(error) => {
+                self.number_error(error, at);
+                None
+            }
+        }
+    }
+
+    fn formatted_ranges(
+        &mut self,
+        mut ty: usize,
+        at: &Span,
+    ) -> Option<Vec<(FormattedBound, FormattedBound)>> {
+        let mut result = Vec::new();
+        while let TypeInfo::Formatted(format) = &self.types[ty] {
+            let base = format.base;
+            if let Some((min, max)) = &format.bounds {
+                let (mut min, mut max) = (min.clone(), max.clone());
+                if !self.step(min.original.len() + max.original.len(), at) {
+                    return None;
+                }
+                if min.components.is_empty() {
+                    min.components = self.format_value(ty, &min.original, &min.span)?;
+                    max.components = self.format_value(ty, &max.original, &max.span)?;
+                }
+                result.push((min, max));
+            }
+            let Some(parent) = base else { break };
+            if !self.step(1, at) {
+                return None;
+            }
+            ty = parent;
+        }
+        Some(result)
+    }
+
     fn check_formatted_component(
         &mut self,
         attribute: &TypeReference,
@@ -409,11 +699,19 @@ impl Analyzer<'_, '_> {
     ) -> Option<()> {
         let at = attribute.source_span();
         let owner = self.names[attribute.target_name()];
-        let Some(TypeInfo::Structure(structure)) = self.symbols[owner]
+        let source = self.symbols[owner]
             .declaration
             .type_id
-            .map(|ty| &self.types[ty])
-        else {
+            .map(|ty| &self.types[ty]);
+        let source = match source {
+            Some(TypeInfo::Collection(collection))
+                if collection.cardinality.upper.as_deref() == Some("1") =>
+            {
+                Some(&self.types[collection.element])
+            }
+            value => value,
+        };
+        let Some(TypeInfo::Structure(structure)) = source else {
             return self.format_error(
                 "ILI-FORMAT-ATTRIBUTE",
                 "A nested format requires a structure-valued attribute",
@@ -448,32 +746,44 @@ impl Analyzer<'_, '_> {
     }
 
     fn format_value(&mut self, ty: usize, text: &str, at: &Span) -> Option<Vec<DecimalInfo>> {
-        if !self.step(text.len(), at) {
-            return None;
-        }
-        let parts = match format_operations(ty, &self.types, &mut self.work) {
-            Ok(parts) => parts,
-            Err(error) => {
-                self.number_error(error, at);
-                return None;
-            }
-        };
-        let result = parse_value(&parts, text, self.limits, &mut self.work, |attribute| {
-            let ty = self.symbols[self.names[attribute.target_name()]]
-                .declaration
-                .type_id?;
-            match &self.types[ty] {
-                TypeInfo::Numeric(number) => Some(number),
-                _ => None,
-            }
-        });
-        match result {
-            Ok(Some(values)) => Some(values),
-            Ok(None) | Err(NumberError::Form) => self.format_error(
+        match self.parse_formatted(ty, text, at)? {
+            Some(value) => Some(value),
+            None => self.format_error(
                 "ILI-FORMAT-BOUNDS",
                 "The formatted value must match the layout and the numeric component ranges",
                 at,
             ),
+        }
+    }
+
+    fn parse_formatted(
+        &mut self,
+        ty: usize,
+        text: &str,
+        at: &Span,
+    ) -> Option<Option<Vec<DecimalInfo>>> {
+        if !self.step(text.len(), at) {
+            return None;
+        }
+        let parts =
+            match format_operations(ty, &self.types, &self.symbols, &self.names, &mut self.work) {
+                Ok(parts) => parts,
+                Err(NumberError::Form) => {
+                    return self.format_error(
+                        "ILI-FORMAT-ATTRIBUTE",
+                        "The formatted layout requires compatible component attributes",
+                        at,
+                    );
+                }
+                Err(error) => {
+                    self.number_error(error, at);
+                    return None;
+                }
+            };
+        let result = parse_value(&parts, text, self.limits, &mut self.work);
+        match result {
+            Ok(values) => Some(values),
+            Err(NumberError::Form) => Some(None),
             Err(error) => {
                 self.number_error(error, at);
                 None
@@ -487,9 +797,84 @@ impl Analyzer<'_, '_> {
     }
 }
 
+fn formats_share_members(
+    a: &TypeInfo,
+    b: &TypeInfo,
+    work: &mut WorkBudget,
+) -> Result<bool, NumberError> {
+    fn component(part: &FormattedPart) -> Option<(&str, Option<&str>)> {
+        match part {
+            FormattedPart::Literal { .. } => None,
+            FormattedPart::Numeric { attribute, .. } => Some((attribute.target_name(), None)),
+            FormattedPart::Structure(part) => Some((
+                part.attribute.target_name(),
+                Some(part.format.target_name()),
+            )),
+        }
+    }
+    let (TypeInfo::Formatted(a), TypeInfo::Formatted(b)) = (a, b) else {
+        return Ok(false);
+    };
+    let work_count = u32::try_from(a.parts.len().saturating_add(b.parts.len()))
+        .map_err(|_| NumberError::Limit)?;
+    work.charge(work_count).map_err(|_| NumberError::Work)?;
+    let left = a.parts.iter().filter_map(component);
+    let right = b.parts.iter().filter_map(component);
+    Ok(left.clone().next().is_some() && left.eq(right))
+}
+
+#[derive(Default)]
+struct FormatInterval {
+    lower: Vec<Option<DecimalInfo>>,
+    upper: Vec<Option<DecimalInfo>>,
+}
+
+impl FormatInterval {
+    fn narrow(
+        &mut self,
+        first: usize,
+        lower: &[DecimalInfo],
+        upper: &[DecimalInfo],
+        work: &mut WorkBudget,
+    ) -> Result<(), NumberError> {
+        for (values, bound, unbounded) in [
+            (&mut self.lower, lower, Ordering::Less),
+            (&mut self.upper, upper, Ordering::Greater),
+        ] {
+            let prefix = &mut values[first..first + bound.len()];
+            let bound: Vec<_> = bound.iter().cloned().map(Some).collect();
+            if compare_extrema(prefix, &bound, unbounded, work)? == unbounded {
+                prefix.clone_from_slice(&bound);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn compare_extrema(
+    left: &[Option<DecimalInfo>],
+    right: &[Option<DecimalInfo>],
+    unbounded: Ordering,
+    work: &mut WorkBudget,
+) -> Result<Ordering, NumberError> {
+    for (left, right) in left.iter().zip(right) {
+        work.charge(1).map_err(|_| NumberError::Work)?;
+        let result = match (left, right) {
+            (None, None) => return Ok(Ordering::Equal),
+            (None, Some(_)) => unbounded,
+            (Some(_), None) => unbounded.reverse(),
+            (Some(left), Some(right)) => compare_decimal(left, right, work)?,
+        };
+        if result != Ordering::Equal {
+            return Ok(result);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
 enum FormatOperation<'a> {
     Literal(&'a str),
-    Numeric(&'a TypeReference, Option<&'a str>),
+    Numeric(&'a crate::NumericRange, Option<&'a str>),
     Bounds {
         first: usize,
         lower: &'a [DecimalInfo],
@@ -500,12 +885,14 @@ enum FormatOperation<'a> {
 fn format_operations<'a>(
     root: usize,
     types: &'a [TypeInfo],
+    symbols: &[Symbol],
+    names: &BTreeMap<String, usize>,
     work: &mut WorkBudget,
 ) -> Result<Vec<FormatOperation<'a>>, NumberError> {
-    let mut pending = vec![(root, 0, 0)];
+    let mut pending = vec![(root, 0, 0, None)];
     let mut operations = Vec::new();
     let mut components = 0;
-    while let Some((ty, position, _)) = pending.last_mut() {
+    while let Some((ty, position, _, structure)) = pending.last_mut() {
         work.charge(1).map_err(|_| NumberError::Work)?;
         let TypeInfo::Formatted(format) = &types[*ty] else {
             unreachable!()
@@ -518,14 +905,32 @@ fn format_operations<'a>(
             Some(FormattedPart::Numeric { attribute, width }) => {
                 *position += 1;
                 components += 1;
-                operations.push(FormatOperation::Numeric(attribute, width.as_deref()));
+                let ty = format_attribute_type(attribute, *structure, symbols, names, work)?
+                    .ok_or(NumberError::Form)?;
+                let TypeInfo::Numeric(range) = &types[ty] else {
+                    return Err(NumberError::Form);
+                };
+                operations.push(FormatOperation::Numeric(range, width.as_deref()));
             }
             Some(FormattedPart::Structure(part)) => {
                 *position += 1;
-                pending.push((part.type_id, 0, components));
+                let ty = format_attribute_type(&part.attribute, *structure, symbols, names, work)?
+                    .ok_or(NumberError::Form)?;
+                let ty = match &types[ty] {
+                    TypeInfo::Collection(collection) => collection.element,
+                    _ => ty,
+                };
+                let TypeInfo::Structure(actual) = &types[ty] else {
+                    return Err(NumberError::Form);
+                };
+                let scope = match structure_targets(actual) {
+                    [single] => Some(names[single.target_name()]),
+                    _ => None,
+                };
+                pending.push((part.type_id, 0, components, scope));
             }
             None => {
-                let (ty, _, first) = pending.pop().expect("frame is active");
+                let (ty, _, first, _) = pending.pop().expect("frame is active");
                 // Root bounds are handled by the caller. Nested bounds narrow
                 // each occurrence independently.
                 if !pending.is_empty() {
@@ -551,12 +956,36 @@ fn format_operations<'a>(
     Ok(operations)
 }
 
-fn parse_value<'a>(
+fn format_attribute_type(
+    reference: &TypeReference,
+    structure: Option<usize>,
+    symbols: &[Symbol],
+    names: &BTreeMap<String, usize>,
+    work: &mut WorkBudget,
+) -> Result<Option<usize>, NumberError> {
+    let declared = &symbols[names[reference.target_name()]].declaration;
+    if let Some(scope) = structure.filter(|scope| Some(*scope) != declared.parent) {
+        for &id in symbols[scope]
+            .declaration
+            .effective_attributes
+            .as_deref()
+            .unwrap_or_default()
+        {
+            work.charge(1).map_err(|_| NumberError::Work)?;
+            let member = &symbols[id].declaration;
+            if member.name == declared.name {
+                return Ok(member.type_id);
+            }
+        }
+    }
+    Ok(declared.type_id)
+}
+
+fn parse_value(
     operations: &[FormatOperation<'_>],
     text: &str,
     limits: &Limits,
     work: &mut WorkBudget,
-    component_type: impl Fn(&TypeReference) -> Option<&'a crate::NumericRange>,
 ) -> Result<Option<Vec<DecimalInfo>>, NumberError> {
     struct Visit<'a> {
         part: usize,
@@ -614,10 +1043,7 @@ fn parse_value<'a>(
                     });
                 }
             }
-            FormatOperation::Numeric(attribute, width) => {
-                let Some(range) = component_type(attribute) else {
-                    return Ok(None);
-                };
+            FormatOperation::Numeric(range, width) => {
                 let Some((digits, ends)) =
                     component_prefixes(visit.remaining, range.bounds.as_ref())
                 else {
