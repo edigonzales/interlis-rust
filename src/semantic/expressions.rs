@@ -109,10 +109,14 @@ impl Analyzer<'_, '_> {
                 }
                 ExpressionKind::ObjectSet(target) => {
                     let selected = if let Some(target) = target {
-                        self.bind_object_target(owner, target)?
+                        self.bind_object_target(
+                            owner,
+                            target,
+                            &[Kind::Class, Kind::Association, Kind::View],
+                        )?
                     } else if matches!(
                         self.symbols[owner].declaration.kind,
-                        Kind::Class | Kind::Association
+                        Kind::Class | Kind::Association | Kind::View
                     ) {
                         self.current_object_target(owner, "ALL", &expression.span)?
                     } else {

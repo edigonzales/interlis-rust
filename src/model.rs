@@ -37,6 +37,7 @@ pub enum DeclarationKind {
     Parameter,
     Context,
     View,
+    ViewBase,
     Graphic,
     DrawingRule,
     MetadataBasket,
@@ -234,7 +235,7 @@ pub struct Cardinality {
     pub upper: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AttributeSubdivision {
     pub continuous: bool,
     pub(crate) span: Span,
@@ -907,7 +908,26 @@ pub struct Declaration {
     pub(crate) context: Option<Box<[ContextMapping]>>,
     pub(crate) generic_bindings: Option<Box<[TopicGenericBinding]>>,
     pub(crate) deferred_generics: Option<Box<[TypeReference]>>,
+    pub(crate) view: Option<Box<ViewInfo>>,
+    pub(crate) view_topic: bool,
+    pub(crate) nullable_view_base: bool,
+    pub(crate) derived_from: Option<TypeReference>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewFormation {
+    Projection,
+    Join,
+}
+
+#[derive(Debug)]
+pub struct ViewInfo {
+    pub formation: ViewFormation,
+    pub selections: Vec<ExpressionId>,
+    pub(crate) bases: Vec<usize>,
+}
+
 impl Declaration {
     pub fn name(&self) -> &str {
         &self.name
@@ -952,6 +972,18 @@ impl Declaration {
     }
     pub fn is_transient(&self) -> bool {
         self.transient
+    }
+    pub fn is_view_topic(&self) -> bool {
+        self.view_topic
+    }
+    pub fn is_nullable_view_base(&self) -> bool {
+        self.nullable_view_base
+    }
+    pub fn view(&self) -> Option<&ViewInfo> {
+        self.view.as_deref()
+    }
+    pub fn derived_from(&self) -> Option<&TypeReference> {
+        self.derived_from.as_ref()
     }
     pub fn derivations(&self) -> &[ExpressionId] {
         self.derivations.as_deref().unwrap_or_default()
@@ -1004,6 +1036,15 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn view_bases(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        Some(
+            self.declaration(name)?
+                .view()?
+                .bases
+                .iter()
+                .map(|&id| &self.declarations[id]),
+        )
+    }
     pub fn expressions(&self) -> &[BoundExpression] {
         &self.expressions
     }
@@ -1088,7 +1129,10 @@ impl ModelGraph {
         let declaration = self.declaration(name)?;
         if !matches!(
             declaration.kind,
-            DeclarationKind::Class | DeclarationKind::Structure | DeclarationKind::Association
+            DeclarationKind::Class
+                | DeclarationKind::Structure
+                | DeclarationKind::Association
+                | DeclarationKind::View
         ) {
             return None;
         }

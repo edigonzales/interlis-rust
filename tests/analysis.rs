@@ -737,7 +737,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
         "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
-        "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
+        "TOPIC T = CLASS X=END X; CLASS Y=END Y; VIEW V UNION OF X,Y; = END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
@@ -1496,6 +1496,115 @@ fn translations_compare_geometry_units_and_association_roles() {
 }
 
 #[test]
+fn projection_and_join_views_bind_ordered_members_selections_and_basis_origins() {
+    for version in ["2.3", "2.4"] {
+        let input = |dependency: &str, mandatory: &str, selection: &str| {
+            request(vec![(
+                "views",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                    TOPIC Source =
+                        CLASS Item=amount:MANDATORY 0..20; label:TEXT*20; END Item;
+                        CLASS Other=code:MANDATORY TEXT*10; END Other;
+                        ASSOCIATION Link = item -- {{0..1}} Item; other -- {{0..*}} Other; END Link;
+                    END Source;
+                    VIEW TOPIC Result =
+                        {dependency}
+                        VIEW Project PROJECTION OF p~M.Source.Item;
+                            WHERE {selection};
+                            = first := p->amount; ALL OF p;
+                            MANDATORY CONSTRAINT first <= amount;
+                        END Project;
+                        VIEW Joined JOIN OF Project, q~M.Source.Other (OR NULL);
+                            = ALL OF Project; ALL OF q; optional:{mandatory} TEXT*10 := q->code;
+                        END Joined;
+                        VIEW Endpoints PROJECTION OF M.Source.Link; = ALL OF Link; END Endpoints;
+                    END Result; END M."
+                ),
+            )])
+        };
+        let report = outcome(
+            input("DEPENDS ON M.Source;", "", "p->amount > 0"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let project = graph.declaration("M.Result.Project").unwrap();
+        assert_eq!(
+            project.view().unwrap().formation,
+            interlis::ViewFormation::Projection
+        );
+        assert_eq!(project.view().unwrap().selections.len(), 1);
+        assert_eq!(project.constraints().len(), 1);
+        assert!(graph.declaration("M.Result").unwrap().is_view_topic());
+        let members = graph
+            .effective_attributes("M.Result.Joined")
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.name())
+                .collect::<Vec<_>>(),
+            ["first", "amount", "label", "code", "optional"]
+        );
+        assert_eq!(members[1].mandatory(), Some(true));
+        assert_eq!(members[3].mandatory(), Some(false));
+        assert_eq!(
+            members[3].derived_from().unwrap().target_name(),
+            "M.Source.Other.code"
+        );
+        assert!(
+            graph
+                .view_bases("M.Result.Joined")
+                .unwrap()
+                .nth(1)
+                .unwrap()
+                .is_nullable_view_base()
+        );
+        let roles = graph
+            .effective_attributes("M.Result.Endpoints")
+            .unwrap()
+            .collect::<Vec<_>>();
+        if version == "2.4" {
+            assert_eq!(
+                roles[0].derived_from().unwrap().target_name(),
+                "M.Source.Link.item"
+            );
+            let TypeInfo::ObjectSelection(selection) =
+                graph.effective_type(roles[1].qualified_name()).unwrap()
+            else {
+                panic!("expected the association participant type");
+            };
+            assert!(!selection.plural);
+        } else {
+            assert!(roles.is_empty());
+        }
+        for (dependency, mandatory, selection, code) in [
+            ("", "", "p->amount > 0", "ILI-VIEW-TOPIC-DEPENDENCY"),
+            (
+                "DEPENDS ON M.Source;",
+                "MANDATORY",
+                "p->amount > 0",
+                "ILI-VIEW-NULLABLE-ATTRIBUTE",
+            ),
+            (
+                "DEPENDS ON M.Source;",
+                "",
+                "p->amount",
+                "ILI-VIEW-SELECTION",
+            ),
+        ] {
+            outcome(
+                input(dependency, mandatory, selection),
+                Status::Rejected,
+                Some(code),
+            );
+        }
+    }
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(
@@ -1521,10 +1630,18 @@ fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
         let text = format!(
             "INTERLIS {language}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S; DOMAIN KindOfViewable=CLASS RESTRICTION (S); TOPIC T=CLASS C=END C; VIEW V PROJECTION OF C; = END V; END T; DOMAIN KindOfStructure=STRUCTURE RESTRICTION (M.T.C); FUNCTION f(x:OBJECTS OF M.T.V):BOOLEAN; END M."
         );
-        outcome(
+        let with_view = outcome(
             request(vec![("class-values", text)]),
-            Status::Incomplete,
-            Some("ILI-UNSUPPORTED"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = with_view.graph().unwrap();
+        let Some(TypeInfo::ObjectSelection(selection)) = graph.effective_type("M.f.x") else {
+            panic!("expected a view set argument");
+        };
+        assert_eq!(
+            selection.targets[0].target.as_ref().unwrap().target_name(),
+            "M.T.V",
         );
         let text = format!(
             "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S;

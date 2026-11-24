@@ -473,7 +473,7 @@ impl Analyzer<'_, '_> {
             Some((PathElement::Special(special), tail)) if special.value == SpecialPath::This => {
                 if tail.is_empty() {
                     let type_id = match self.symbols[owner].declaration.kind {
-                        Kind::Class | Kind::Association => {
+                        Kind::Class | Kind::Association | Kind::View => {
                             let target =
                                 self.current_object_target(owner, "THIS", &special.span)?;
                             Some(self.object_selection_type(false, target))
@@ -519,10 +519,30 @@ impl Analyzer<'_, '_> {
                 return None;
             }
             let member =
-                match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
+                match self.visible_name(
+                    scope,
+                    &name.value,
+                    Some(&[Kind::Attribute, Kind::ViewBase]),
+                    &name.span,
+                ) {
                     Ok(Some(member)) => member,
                     Err(LookupError::Limit) => return None,
                     _ => {
+                        if position == 0
+                            && let Some(view) = self.symbols[scope].declaration.view()
+                            && view.formation == crate::ViewFormation::Projection
+                        {
+                            let base = view.bases[0];
+                            scope = self.names[self.symbols[base]
+                                .declaration
+                                .type_reference()?
+                                .target_name()];
+                            steps.push(BoundPathStep {
+                                reference: self.reference_to_symbol(owner, base, name)?,
+                                selection: None,
+                                selection_span: None,
+                            });
+                        }
                         match self.path_role(
                             owner,
                             scope,
@@ -553,10 +573,26 @@ impl Analyzer<'_, '_> {
                         }
                     }
                 };
-            let member_type = if self.symbols[member].declaration.kind == Kind::Role {
+            let decl = &self.symbols[member].declaration;
+            if self.symbols[owner].declaration.kind == Kind::View
+                && !self.symbols[owner].declaration.is_abstract()
+                && decl.is_abstract()
+            {
+                return self.path_error(
+                    "ILI-VIEW-ABSTRACT-ATTRIBUTE",
+                    "A concrete view cannot access an abstract basis member",
+                    &name.span,
+                );
+            }
+            let member_type = if decl.kind == Kind::Role {
                 self.role_value_type(owner, scope, member, &name.span)?
+            } else if let Some(ty) = decl.type_id {
+                ty
             } else {
-                self.symbols[member].declaration.type_id?
+                if self.symbols[scope].declaration.kind == Kind::View {
+                    self.unsupported_expression(&name.span);
+                }
+                return None;
             };
             let reference = self.reference_to_symbol(owner, member, name)?;
             let (value, selection, selection_span) = match selector {
@@ -642,7 +678,7 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn role_value_type(
+    pub(super) fn role_value_type(
         &mut self,
         owner: usize,
         scope: usize,

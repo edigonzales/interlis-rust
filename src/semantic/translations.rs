@@ -315,6 +315,8 @@ impl Analyzer<'_, '_> {
         };
         if !comparison.reference(a.reference.as_ref(), b.reference.as_ref())?
             || !comparison.reference(a.base_reference(), b.base_reference())?
+            || !comparison.reference(a.derived_from(), b.derived_from())?
+            || a.is_nullable_view_base() != b.is_nullable_view_base()
             || !comparison.unordered_references(
                 a.declared_topic_dependencies(),
                 b.declared_topic_dependencies(),
@@ -383,6 +385,8 @@ impl Analyzer<'_, '_> {
                 | Kind::Role
                 | Kind::Unit
                 | Kind::Context
+                | Kind::View
+                | Kind::ViewBase
         ) {
             return Ok(None);
         }
@@ -398,6 +402,21 @@ impl Analyzer<'_, '_> {
         let mut expressions = Vec::new();
         if !pair_expressions(&mut expressions, a.derivations(), b.derivations()) {
             return Ok(Some(false));
+        }
+        if let (Some(left), Some(right)) = (a.view(), b.view()) {
+            if left.formation != right.formation
+                || left.bases.len() != right.bases.len()
+                || !pair_expressions(&mut expressions, &left.selections, &right.selections)
+            {
+                return Ok(Some(false));
+            }
+            let (a, b) = (
+                a.effective_attributes.as_deref().unwrap_or_default(),
+                b.effective_attributes.as_deref().unwrap_or_default(),
+            );
+            if a.len() != b.len() || a.iter().zip(b).any(|(&a, &b)| originals[b] != a) {
+                return Ok(Some(false));
+            }
         }
         for (a, b) in a.constraints().iter().zip(b.constraints()) {
             if !comparison.pair_constraint(&mut expressions, a, b)? {
@@ -445,6 +464,7 @@ fn properties(syntax: Option<&SyntaxDecl>) -> &[crate::syntax::Located<crate::sy
             | SyntaxDecl::Domain { properties, .. },
         ) => properties,
         Some(SyntaxDecl::Association(association)) => &association.properties,
+        Some(SyntaxDecl::View(view)) => &view.properties,
         _ => &[],
     }
 }

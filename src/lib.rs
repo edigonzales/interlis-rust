@@ -28,7 +28,7 @@ pub use model::{
     PathSelection, PlausibilityDirection, ReferenceType, RoleInfo, RoleStrength, StructureType,
     TemporalBound, TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference,
     UnaryOperator, UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale,
-    UnitTerm,
+    UnitTerm, ViewFormation, ViewInfo,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

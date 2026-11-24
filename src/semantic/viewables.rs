@@ -391,6 +391,17 @@ impl Analyzer<'_, '_> {
                 let value = self
                     .bind_expression(owner, statements, root, ExpressionContext::Value)
                     .and_then(|value| {
+                        if mandatory
+                            && self.symbols[owner].declaration.kind == Kind::View
+                            && self.view_uses_nullable_base(value)?
+                        {
+                            self.diagnostics.push(
+                                "ILI-VIEW-NULLABLE-ATTRIBUTE",
+                                "A mandatory view attribute cannot use an optional join basis",
+                                Some(self.expressions[value.0 as usize].span.clone()),
+                            );
+                            return None;
+                        }
                         self.value_fits(owner, value, ty, mandatory, AssignmentContext::Attribute)
                             .map(|fits| (value, fits))
                     });

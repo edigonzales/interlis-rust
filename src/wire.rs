@@ -509,6 +509,12 @@ impl Serialize for DeclarationsOutput<'_> {
             explanation_location: Option<SourceLocation>,
         }
         #[derive(Serialize)]
+        struct View<'a> {
+            formation: crate::ViewFormation,
+            bases: Vec<&'a str>,
+            selections: &'a [crate::ExpressionId],
+        }
+        #[derive(Serialize)]
         struct Context<'a> {
             generic: Reference<'a>,
             alternatives: Vec<Reference<'a>>,
@@ -545,6 +551,14 @@ impl Serialize for DeclarationsOutput<'_> {
             subdivision: Option<Subdivision>,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             transient: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            view_topic: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            nullable_view_base: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            view: Option<View<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            derived_from: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "<[_]>::is_empty")]
             derivations: &'a [crate::ExpressionId],
             #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -616,6 +630,20 @@ impl Serialize for DeclarationsOutput<'_> {
                     location: self.sources.location(subdivision.source_span()),
                 }),
                 transient: declaration.is_transient(),
+                view_topic: declaration.is_view_topic(),
+                nullable_view_base: declaration.is_nullable_view_base(),
+                view: declaration.view().map(|view| View {
+                    formation: view.formation,
+                    bases: view
+                        .bases
+                        .iter()
+                        .map(|&id| self.graph.declarations()[id].qualified_name())
+                        .collect(),
+                    selections: &view.selections,
+                }),
+                derived_from: declaration
+                    .derived_from()
+                    .map(|reference| project_reference(reference, self.sources)),
                 derivations: declaration.derivations(),
                 constraints: declaration
                     .constraints()

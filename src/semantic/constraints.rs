@@ -18,7 +18,7 @@ impl Analyzer<'_, '_> {
         let mut attached = BTreeMap::<usize, Vec<&ConstraintSyntax>>::new();
         for index in 0..self.constraint_blocks.len() {
             let (topic, block) = self.constraint_blocks[index];
-            let kinds = &[Kind::Class, Kind::Association];
+            let kinds = &[Kind::Class, Kind::Association, Kind::View];
             let local = if let [name] = block.target.segments.as_slice() {
                 self.visible_name(topic, &name.value, Some(kinds), &name.span)
                     .ok()?
@@ -70,6 +70,7 @@ impl Analyzer<'_, '_> {
             let inline: &[ConstraintSyntax] = match self.symbols[owner].ast {
                 Some(SyntaxDecl::Container { constraints, .. }) => constraints,
                 Some(SyntaxDecl::Association(association)) => &association.constraints,
+                Some(SyntaxDecl::View(view)) => &view.constraints,
                 Some(SyntaxDecl::Domain {
                     constraints, span, ..
                 }) => {

@@ -220,7 +220,8 @@ impl Analyzer<'_, '_> {
         let mut targets = Vec::new();
         let mut primary = Vec::new();
         for syntax in &declaration.targets {
-            let target = self.bind_object_target(role, syntax)?;
+            let target =
+                self.bind_object_target(role, syntax, &[Kind::Class, Kind::Association])?;
             let root = target
                 .target
                 .as_ref()

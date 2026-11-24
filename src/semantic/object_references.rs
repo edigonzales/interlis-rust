@@ -44,7 +44,7 @@ impl Analyzer<'_, '_> {
             self.duplicate(&repeated.span, &first.span);
             return None;
         }
-        let target = self.bind_object_target(owner, target)?;
+        let target = self.bind_object_target(owner, target, &[Kind::Class, Kind::Association])?;
         if !self.symbols[owner].declaration.is_abstract()
             && !self
                 .has_concrete_reference_target(&target, &self.symbols[owner].name_span.clone())?
@@ -66,14 +66,15 @@ impl Analyzer<'_, '_> {
         &mut self,
         owner: usize,
         syntax: &syntax::RestrictedTarget,
+        kinds: &[Kind],
     ) -> Option<ObjectTarget> {
         let target = match &syntax.target {
-            syntax::TargetRef::Named(name) => Some(self.object_reference(owner, name)?),
+            syntax::TargetRef::Named(name) => Some(self.object_reference(owner, name, kinds)?),
             syntax::TargetRef::AnyClass(_) => None,
         };
         let mut restrictions = Vec::with_capacity(syntax.restrictions.len());
         for name in &syntax.restrictions {
-            let restriction = self.object_reference(owner, name)?;
+            let restriction = self.object_reference(owner, name, kinds)?;
             if let Some(base) = &target
                 && !self.specializes_symbol(
                     self.names[restriction.target_name()],
@@ -96,13 +97,13 @@ impl Analyzer<'_, '_> {
         })
     }
 
-    fn object_reference(&mut self, owner: usize, name: &QualifiedName) -> Option<TypeReference> {
-        match self.lookup_name(
-            owner,
-            &name.segments,
-            &name.span,
-            &[Kind::Class, Kind::Association],
-        ) {
+    fn object_reference(
+        &mut self,
+        owner: usize,
+        name: &QualifiedName,
+        kinds: &[Kind],
+    ) -> Option<TypeReference> {
+        match self.lookup_name(owner, &name.segments, &name.span, kinds) {
             Ok(bound @ BoundName::Declared(_)) => self.bound_reference(owner, name, bound),
             Ok(BoundName::Predefined(..)) => {
                 self.diagnostics.push(
@@ -116,7 +117,7 @@ impl Analyzer<'_, '_> {
             Err(_) => {
                 self.diagnostics.push(
                     "ILI-NAME-NOT-FOUND",
-                    "Reference target cannot be resolved to a class or association",
+                    "The object target cannot be resolved in this context",
                     Some(name.span.clone()),
                 );
                 None

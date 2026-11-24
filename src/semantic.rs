@@ -22,6 +22,7 @@ mod topics;
 mod translations;
 mod units;
 mod viewables;
+mod views;
 
 use self::names::{BoundName, LookupError};
 use crate::{
@@ -86,7 +87,11 @@ impl<'a> Symbol<'a> {
             }
             Some(SyntaxDecl::MetadataBasket(b)) => b.base.is_some(),
             Some(SyntaxDecl::Graphic(g)) => g.base.is_some() || extended(&g.properties),
-            Some(SyntaxDecl::View(_)) => true,
+            Some(SyntaxDecl::View(view)) => {
+                self.base_scope.is_none()
+                    && (matches!(view.origin, Some(syntax::ViewOrigin::Extends(_)))
+                        || extended(&view.properties))
+            }
             _ => false,
         }
     }
@@ -104,7 +109,8 @@ fn namespace(kind: Kind) -> Namespace {
         | Kind::RuntimeParameter
         | Kind::Role
         | Kind::Parameter
-        | Kind::DrawingRule => Namespace::Member,
+        | Kind::DrawingRule
+        | Kind::ViewBase => Namespace::Member,
         Kind::MetaObject => Namespace::MetaObject,
         Kind::Context => Namespace::Context,
         _ => Namespace::Type,
@@ -227,17 +233,9 @@ fn ensure_supported_semantics(
             }
             let unsupported = match item {
                 SyntaxDecl::Topic {
-                    options,
                     declarations: children,
-                    span,
                     ..
-                } => {
-                    if options.view.is_some() {
-                        Some(span)
-                    } else {
-                        declarations(children, work, diagnostics)
-                    }
-                }
+                } => declarations(children, work, diagnostics),
                 SyntaxDecl::Container {
                     properties,
                     parameters,
@@ -347,7 +345,34 @@ fn ensure_supported_semantics(
                     }
                 }
                 SyntaxDecl::Context(_) => None,
-                SyntaxDecl::View(view) => Some(&view.span),
+                SyntaxDecl::View(view) => {
+                    let supported = matches!(
+                        view.origin,
+                        Some(syntax::ViewOrigin::Formation(syntax::Located {
+                            value: syntax::ViewFormation::Projection(_)
+                                | syntax::ViewFormation::Join { .. },
+                            ..
+                        })) | None
+                    ) && view.base_extensions.is_empty()
+                        && view
+                            .properties
+                            .iter()
+                            .all(|p| p.value != syntax::Property::Extended);
+                    if !supported {
+                        Some(&view.span)
+                    } else {
+                        view.attributes
+                            .iter()
+                            .find_map(|attribute| match attribute {
+                                syntax::ViewAttribute::Typed(item) => declarations(
+                                    std::slice::from_ref(item.as_ref()),
+                                    work,
+                                    diagnostics,
+                                ),
+                                _ => None,
+                            })
+                    }
+                }
                 SyntaxDecl::Graphic(graphic) => Some(&graphic.span),
                 SyntaxDecl::MetadataBasket(basket) => Some(&basket.span),
                 SyntaxDecl::RuntimeParameter { type_use, span, .. } => match &type_use.ty {
@@ -547,6 +572,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 context: None,
                 generic_bindings: None,
                 deferred_generics: None,
+                view: None,
+                view_topic: false,
+                nullable_view_base: false,
+                derived_from: None,
             },
             name_span: name.span.clone(),
             model,
@@ -875,6 +904,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     self.end_name(name, end_name);
                     if let Some(id) = self.add(Kind::Topic, name, span, Some(parent), model, None) {
                         self.index_abstract_final(id, &options.properties);
+                        self.symbols[id].declaration.view_topic = options.view.is_some();
                         self.index_declarations(id, model, declarations);
                     }
                 }
@@ -1093,6 +1123,11 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         model,
                         None,
                     ) {
+                        self.index_abstract_final(id, &view.properties);
+                        self.symbols[id].declaration.transient = view
+                            .properties
+                            .iter()
+                            .any(|p| p.value == syntax::Property::Transient);
                         for attribute in &view.attributes {
                             match attribute {
                                 syntax::ViewAttribute::Typed(item) => self.index_declarations(
@@ -1100,8 +1135,21 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                                     model,
                                     std::slice::from_ref(item.as_ref()),
                                 ),
-                                syntax::ViewAttribute::Derived { name, span, .. } => {
-                                    self.add(Kind::Attribute, name, span, Some(id), model, None);
+                                syntax::ViewAttribute::Derived {
+                                    name,
+                                    properties,
+                                    span,
+                                    ..
+                                } => {
+                                    if let Some(member) =
+                                        self.add(Kind::Attribute, name, span, Some(id), model, None)
+                                    {
+                                        self.index_abstract_final(member, properties);
+                                        self.symbols[member].declaration.final_declaration = true;
+                                        self.symbols[member].declaration.transient = properties
+                                            .iter()
+                                            .any(|p| p.value == syntax::Property::Transient);
+                                    }
                                 }
                                 syntax::ViewAttribute::AllOf(_) => {}
                             }
@@ -1916,7 +1964,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         {
             return None;
         }
-        let viewables = self.bind_viewable_bases()?;
+        let mut viewables = self.bind_viewable_bases()?;
         self.check_topic_members()?;
         self.check_abstract_topics(&topics)?;
         self.bind_units()?;
@@ -1950,7 +1998,6 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             self.bind_attribute(id)?;
         }
         self.validate_subdivisions(&viewables)?;
-        self.validate_reference_types(&viewables)?;
         self.check_role_names(&viewables)?;
         for id in 0..self.symbols.len() {
             if self.symbols[id].declaration.kind != Kind::RuntimeParameter {
@@ -1975,13 +2022,15 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         }
         self.bind_functions()?;
         self.validate_domain_reference_systems()?;
-        self.validate_geometries()?;
-        self.bind_contexts(&model_order, &topics, &viewables)?;
         let expressions: BTreeMap<_, _> = self
             .documents
             .iter()
             .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
             .collect();
+        viewables.extend(self.bind_views(&expressions)?);
+        self.validate_reference_types(&viewables)?;
+        self.validate_geometries()?;
+        self.bind_contexts(&model_order, &topics, &viewables)?;
         self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
         self.bind_constraints(&expressions)?;

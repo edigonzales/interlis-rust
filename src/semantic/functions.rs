@@ -57,7 +57,11 @@ impl Analyzer<'_, '_> {
                 )
             }
             ArgumentType::Objects { plural, target, .. } => {
-                let target = self.bind_object_target(owner, target)?;
+                let target = self.bind_object_target(
+                    owner,
+                    target,
+                    &[Kind::Class, Kind::Association, Kind::View],
+                )?;
                 (self.object_selection_type(*plural, target), false, false)
             }
             ArgumentType::EnumValue(_) | ArgumentType::EnumTreeValue(_) => {
