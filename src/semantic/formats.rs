@@ -62,9 +62,16 @@ impl Analyzer<'_, '_> {
                 );
             }
         }
-        for part in &syntax.parts {
+        for (index, part) in syntax.parts.iter().enumerate() {
             match part {
                 FormatPart::Literal(literal) => {
+                    if literal.value.is_empty() && index > 0 && index + 1 < syntax.parts.len() {
+                        return self.format_error(
+                            "ILI-FORMAT-SEPARATOR",
+                            "Numeric format components require a nonempty separator",
+                            &literal.span,
+                        );
+                    }
                     if !self.step(literal.value.len() + 1, &literal.span) {
                         return None;
                     }
@@ -263,10 +270,6 @@ impl Analyzer<'_, '_> {
             let upper_text = upper.original.clone();
             let lower_span = lower.span.clone();
             let upper_span = upper.span.clone();
-            if abstract_type {
-                self.unsupported_expression(&lower_span);
-                return None;
-            }
             let lower = self.format_value(ty, &lower_text, &lower_span)?;
             let upper = self.format_value(ty, &upper_text, &upper_span)?;
             let TypeInfo::Formatted(format) = &self.types[ty] else {
@@ -352,7 +355,7 @@ impl Analyzer<'_, '_> {
                 .declaration
                 .type_id?;
             match &self.types[ty] {
-                TypeInfo::Numeric(number) => number.bounds.as_ref(),
+                TypeInfo::Numeric(number) => Some(number),
                 _ => None,
             }
         });
@@ -381,10 +384,10 @@ fn parse_value<'a>(
     mut text: &str,
     limits: &Limits,
     work: &mut WorkBudget,
-    component_type: impl Fn(&TypeReference) -> Option<&'a NumericBounds>,
+    component_type: impl Fn(&TypeReference) -> Option<&'a crate::NumericRange>,
 ) -> Result<Option<Vec<DecimalInfo>>, NumberError> {
     let mut values = Vec::new();
-    for part in &format.parts {
+    for (index, part) in format.parts.iter().enumerate() {
         work.charge(1).map_err(|_| NumberError::Work)?;
         match part {
             FormattedPart::Literal { value, .. } => {
@@ -394,10 +397,16 @@ fn parse_value<'a>(
                 text = rest;
             }
             FormattedPart::Numeric { attribute, width } => {
-                let Some(bounds) = component_type(attribute) else {
+                let Some(range) = component_type(attribute) else {
                     return Ok(None);
                 };
-                let Some((size, digits)) = component_prefix(text, bounds) else {
+                let next_literal = match format.parts.get(index + 1) {
+                    Some(FormattedPart::Literal { value, .. }) => Some(value.as_str()),
+                    _ => None,
+                };
+                let Some((size, digits)) =
+                    component_prefix(text, range.bounds.as_ref(), next_literal)
+                else {
                     return Ok(None);
                 };
                 if width
@@ -406,9 +415,10 @@ fn parse_value<'a>(
                 {
                     return Ok(None);
                 }
-                let value = DecimalLiteral::parse(&text[..size], limits, work)?.info;
-                if compare_decimal(&value, &bounds.lower, work)? == Ordering::Less
-                    || compare_decimal(&value, &bounds.upper, work)? == Ordering::Greater
+                let value = DecimalLiteral::parse_formatted(&text[..size], limits, work)?.info;
+                if let Some(bounds) = &range.bounds
+                    && (compare_decimal(&value, &bounds.lower, work)? == Ordering::Less
+                        || compare_decimal(&value, &bounds.upper, work)? == Ordering::Greater)
                 {
                     return Ok(None);
                 }
@@ -420,7 +430,11 @@ fn parse_value<'a>(
     Ok(text.is_empty().then_some(values))
 }
 
-fn component_prefix(text: &str, bounds: &NumericBounds) -> Option<(usize, usize)> {
+fn component_prefix(
+    text: &str,
+    bounds: Option<&NumericBounds>,
+    next_literal: Option<&str>,
+) -> Option<(usize, usize)> {
     let signed = usize::from(text.starts_with(['+', '-']));
     let digits = text[signed..]
         .bytes()
@@ -430,25 +444,47 @@ fn component_prefix(text: &str, bounds: &NumericBounds) -> Option<(usize, usize)
         return None;
     }
     let mut end = signed + digits;
-    let precision = bounds.lower.fractional_digits() as usize;
-    if precision > 0 {
-        let fraction = text[end..].strip_prefix('.')?.as_bytes().get(..precision)?;
-        if !fraction.iter().all(u8::is_ascii_digit) {
-            return None;
+    let use_optional_prefix = |start: usize, finish: usize| {
+        next_literal
+            .is_none_or(|next| text[finish..].starts_with(next) || !text[start..].starts_with(next))
+    };
+    let has_exponent = bounds.is_some_and(|bounds| bounds.lower.scaled || bounds.upper.scaled);
+    if let Some(bounds) = bounds {
+        let precision = bounds.lower.fractional_digits() as usize;
+        if precision > 0 {
+            let fraction = text[end..].strip_prefix('.')?.as_bytes().get(..precision)?;
+            if !fraction.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            if has_exponent
+                && (!text[signed..end].bytes().all(|b| b == b'0')
+                    || fraction[0] == b'0' && !fraction.iter().all(|&b| b == b'0'))
+            {
+                return None;
+            }
+            end += 1 + precision;
         }
-        end += 1 + precision;
+    } else if let Some(fraction) = text[end..].strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && use_optional_prefix(end, end + 1 + digits) {
+            end += 1 + digits;
+        }
     }
-    if bounds.lower.scaled || bounds.upper.scaled {
-        let exponent = text[end..].strip_prefix(['e', 'E'])?;
+    if let Some(exponent) = text[end..].strip_prefix(['e', 'E'])
+        && (has_exponent || bounds.is_none())
+    {
         let signed = usize::from(exponent.starts_with(['+', '-']));
         let digits = exponent[signed..]
             .bytes()
             .take_while(u8::is_ascii_digit)
             .count();
-        if digits == 0 {
+        if digits > 0 && (has_exponent || use_optional_prefix(end, end + 1 + signed + digits)) {
+            end += 1 + signed + digits;
+        } else if has_exponent {
             return None;
         }
-        end += 1 + signed + digits;
+    } else if has_exponent {
+        return None;
     }
     Some((end, digits))
 }

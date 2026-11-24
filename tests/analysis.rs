@@ -1739,6 +1739,10 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
                     VIEW U UNION OF a0~A,b0~B;
                        BASE a0 EXTENDED BY child~Child
                        = {attributes} END U;
+                    VIEW ConstantRows UNION OF a0~A,b0~B; = value:0..10 := 3; END ConstantRows;
+                    VIEW ConstantProjection PROJECTION OF origin~ConstantRows;
+                        = value:MANDATORY 0..10 := origin->value;
+                    END ConstantProjection;
                     VIEW Grouped AGGREGATION OF a0~A EQUAL(a0->number);
                         = rows:BAG OF ANYSTRUCTURE := AGGREGATES;
                           MANDATORY CONSTRAINT INTERLIS.elementCount(AGGREGATES) > 0;
@@ -1945,6 +1949,17 @@ fn formats_bind_numeric_components_widths_and_inherited_exact_ranges() {
         let (lower, upper) = format.bounds.as_ref().unwrap();
         assert_eq!(lower.original, "t01:00:00.0");
         assert_eq!(upper.components[2].original(), "59.9");
+        assert_eq!(
+            graph
+                .formatted_base(format)
+                .unwrap()
+                .bounds
+                .as_ref()
+                .unwrap()
+                .0
+                .original,
+            "t01:00"
+        );
         outcome(
             input("t00:00", "minor"),
             Status::Rejected,
@@ -1960,6 +1975,35 @@ fn formats_bind_numeric_components_widths_and_inherited_exact_ranges() {
             Status::Rejected,
             Some("ILI-FORMAT-ATTRIBUTE"),
         );
+    }
+}
+
+#[test]
+fn formatted_bounds_accept_abstract_values_and_padded_exponents() {
+    for version in ["2.3", "2.4"] {
+        let input = |property: &str| {
+            request(vec![(
+                "forms",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                 STRUCTURE Proto (ABSTRACT)=n(ABSTRACT):NUMERIC; END Proto;
+                 STRUCTURE Concrete=n:0.10e1..0.99e3; END Concrete;
+                 DOMAIN ProtoValue {property}=FORMAT BASED ON Proto (n/2) \"01\"..\"20\";
+                     Scaled=FORMAT BASED ON Concrete (n/2) \"00.12e2\"..\"00.90e3\";
+                 END M."
+                ),
+            )])
+        };
+        let report = outcome(input("(ABSTRACT)"), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let Some(TypeInfo::Formatted(scaled)) = graph.effective_type("M.Scaled") else {
+            panic!("expected formatted numeric domain");
+        };
+        let (lower, _) = scaled.bounds.as_ref().unwrap();
+        assert_eq!(lower.components[0].original(), "00.12e2");
+        assert_eq!(lower.components[0].coefficient(), "12");
+        assert_eq!(lower.components[0].written_exponent(), 2);
+        outcome(input(""), Status::Rejected, Some("ILI-FORMAT-ABSTRACT"));
     }
 }
 

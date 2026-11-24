@@ -27,6 +27,7 @@ struct UnionBranch {
     attributes: BTreeSet<usize>,
     nested_attributes: BTreeSet<usize>,
     nullable: bool,
+    unconditional: bool,
 }
 
 impl Analyzer<'_, '_> {
@@ -1022,7 +1023,21 @@ impl Analyzer<'_, '_> {
         union: bool,
         result: &mut ViewAttributeDependencies,
     ) -> Option<UnionBranch> {
-        let mut branch = UnionBranch::default();
+        let actual = underlying_expression(&self.expressions, root);
+        let mut branch = UnionBranch {
+            unconditional: actual.value_type != ExpressionType::Undefined
+                && matches!(
+                    actual.kind,
+                    BoundExpressionKind::Boolean { .. }
+                        | BoundExpressionKind::Number { .. }
+                        | BoundExpressionKind::Text { .. }
+                        | BoundExpressionKind::Temporal { .. }
+                        | BoundExpressionKind::Enumeration { .. }
+                        | BoundExpressionKind::Class { .. }
+                        | BoundExpressionKind::AttributePath { .. }
+                ),
+            ..UnionBranch::default()
+        };
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
             let at = self.expressions[id.0 as usize].span.clone();
@@ -1091,6 +1106,15 @@ impl Analyzer<'_, '_> {
             covered.extend(inherited);
         }
         for branch in branches {
+            if branch.unconditional {
+                let owner = self.symbols[member].declaration.parent?;
+                let count = self.symbols[owner].declaration.view()?.bases.len();
+                if !self.step(count, at) {
+                    return None;
+                }
+                covered.extend(&self.symbols[owner].declaration.view()?.bases);
+                break;
+            }
             if !self.step(branch.nested_attributes.len() + 1, at) {
                 return None;
             }

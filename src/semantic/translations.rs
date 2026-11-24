@@ -1,7 +1,6 @@
 use super::{
     Analyzer, Kind, SyntaxDecl,
     expressions::{numeric_operand, underlying_expression},
-    formats::compare_components,
     functions::compare_decimal,
     paths::equivalent_selector,
 };
@@ -1065,12 +1064,13 @@ impl Comparison<'_> {
                 }
                 match (&a.bounds, &b.bounds) {
                     (Some((al, au)), Some((bl, bu))) => {
-                        compare_components(&al.components, &bl.components, self.work)
-                            .map_err(|_| ())?
-                            == Ordering::Equal
-                            && compare_components(&au.components, &bu.components, self.work)
-                                .map_err(|_| ())?
-                                == Ordering::Equal
+                        self.work.charge(
+                            (al.original.len()
+                                + au.original.len()
+                                + bl.original.len()
+                                + bu.original.len()) as u32,
+                        )?;
+                        al.original == bl.original && au.original == bu.original
                     }
                     (None, None) => true,
                     _ => false,

@@ -1084,6 +1084,12 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn formatted_base(&self, format: &FormattedType) -> Option<&FormattedType> {
+        let TypeInfo::Formatted(base) = self.types.get(format.base?)? else {
+            return None;
+        };
+        Some(base)
+    }
     pub fn view_bases(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
         Some(
             self.declaration(name)?

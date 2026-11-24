@@ -22,7 +22,11 @@ struct Spelling<'a> {
 }
 
 // Shared lexical/form inspection. No bigint, power calculation or allocation.
-fn inspect<'a>(text: &'a str, limits: &Limits) -> Result<Spelling<'a>, NumberError> {
+fn inspect<'a>(
+    text: &'a str,
+    limits: &Limits,
+    formatted: bool,
+) -> Result<Spelling<'a>, NumberError> {
     // Inspect operational bounds before bigint allocation or exponent alignment.
     let mut digits = 0_u32;
     for b in text.bytes() {
@@ -75,7 +79,7 @@ fn inspect<'a>(text: &'a str, limits: &Limits) -> Result<Spelling<'a>, NumberErr
     if fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit())) {
         return Err(NumberError::Form);
     }
-    if exponent_text.is_some() {
+    if exponent_text.is_some() && !formatted {
         let Some(f) = fraction else {
             return Err(NumberError::Form);
         };
@@ -98,7 +102,7 @@ fn inspect<'a>(text: &'a str, limits: &Limits) -> Result<Spelling<'a>, NumberErr
 }
 
 pub(crate) fn check_spelling(text: &str, limits: &Limits) -> Result<(), NumberError> {
-    inspect(text, limits).map(|_| ())
+    inspect(text, limits, false).map(|_| ())
 }
 
 impl DecimalLiteral {
@@ -114,7 +118,24 @@ impl DecimalLiteral {
     }
 
     pub fn parse(text: &str, limits: &Limits, work: &mut WorkBudget) -> Result<Self, NumberError> {
-        let spelling = inspect(text, limits)?;
+        Self::parse_decimal(text, limits, work, false)
+    }
+
+    pub fn parse_formatted(
+        text: &str,
+        limits: &Limits,
+        work: &mut WorkBudget,
+    ) -> Result<Self, NumberError> {
+        Self::parse_decimal(text, limits, work, true)
+    }
+
+    fn parse_decimal(
+        text: &str,
+        limits: &Limits,
+        work: &mut WorkBudget,
+        formatted: bool,
+    ) -> Result<Self, NumberError> {
+        let spelling = inspect(text, limits, formatted)?;
         work.charge(spelling.digits)
             .map_err(|_| NumberError::Work)?;
         let Spelling {
