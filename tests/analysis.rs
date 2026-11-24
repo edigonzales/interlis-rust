@@ -1193,7 +1193,7 @@ fn association_names_have_matching_opening_and_closing_presence() {
 fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
     for language in ["2.3", "2.4"] {
         let text = format!(
-            "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S; DOMAIN KindOfViewable=CLASS RESTRICTION (S); TOPIC T=CLASS C=END C; VIEW V PROJECTION OF C; = END V; END T; DOMAIN KindOfStructure=STRUCTURE RESTRICTION (M.T.C); FUNCTION f(x:OBJECTS OF M.T.V):BOOLEAN; END M."
+            "INTERLIS {language}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S; DOMAIN KindOfViewable=CLASS RESTRICTION (S); TOPIC T=CLASS C=END C; VIEW V PROJECTION OF C; = END V; END T; DOMAIN KindOfStructure=STRUCTURE RESTRICTION (M.T.C); FUNCTION f(x:OBJECTS OF M.T.V):BOOLEAN; END M."
         );
         outcome(
             request(vec![("class-values", text)]),
@@ -3641,6 +3641,104 @@ fn constraint_errors_keep_name_candidates_and_check_independent_conditions() {
         ),
         Status::Rejected,
         Some("ILI-EXPRESSION-OPERANDS"),
+    );
+}
+
+#[test]
+fn function_signatures_and_calls_bind_parameters_in_order() {
+    let report = outcome(
+        request(vec![
+            (
+                "library",
+                r#"INTERLIS 2.3; CONTRACTED TYPE MODEL Library AT "issuer" VERSION "1" =
+                DOMAIN Small=0..10;
+                FUNCTION permits(value:Small; label:TEXT*5):BOOLEAN // policy //;
+                END Library."#
+                    .into(),
+            ),
+            (
+                "client",
+                r#"INTERLIS 2.4; MODEL Client AT "issuer" VERSION "1" =
+                IMPORTS Library; TOPIC T=CLASS Obj=
+                    count:0..8; label:TEXT*3;
+                    MANDATORY CONSTRAINT permitted: Library.permits(count,label);
+                    MANDATORY CONSTRAINT nonempty: INTERLIS.len(INTERLIS.trim(label)) > 0;
+                END Obj; END T; END Client."#
+                    .into(),
+            ),
+        ]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let function = graph
+        .declaration("Library.permits")
+        .unwrap()
+        .function()
+        .unwrap();
+    assert!(function.explanation.as_deref().unwrap().contains("policy"));
+    assert_eq!(
+        graph
+            .function_arguments("Library.permits")
+            .unwrap()
+            .map(|arg| arg.name())
+            .collect::<Vec<_>>(),
+        ["value", "label"],
+    );
+    let call = graph.declaration("Client.T.Obj").unwrap().constraints()[0].expression;
+    let interlis::BoundExpressionKind::Call {
+        function,
+        arguments,
+    } = &graph.expression(call).unwrap().kind
+    else {
+        panic!("expected a bound function call");
+    };
+    assert_eq!(function.target_name(), "Library.permits");
+    assert_eq!(arguments.len(), 2);
+    assert!(matches!(
+        graph.expression_declared_type(call),
+        Some(TypeInfo::Boolean)
+    ));
+}
+
+#[test]
+fn function_arguments_and_23_contracts_have_specific_diagnostics() {
+    for (call, code) in [
+        ("check()", "ILI-FUNCTION-ARITY"),
+        ("check(#true)", "ILI-FUNCTION-ARGUMENT"),
+        ("check(UNDEFINED)", "ILI-FUNCTION-ARGUMENT"),
+        ("check(11)", "ILI-FUNCTION-ARGUMENT"),
+        ("check(outside)", "ILI-FUNCTION-ARGUMENT"),
+        ("Missing(0)", "ILI-FUNCTION-NAME"),
+        ("INTERLIS.len(note) > 0", "ILI-FUNCTION-ARGUMENT"),
+    ] {
+        outcome(
+            single(&format!(
+                "FUNCTION check(value:MANDATORY 0..10):BOOLEAN;
+                 TOPIC T=CLASS Obj=outside:0..11; note:MTEXT*4;
+                 MANDATORY CONSTRAINT {call}; END Obj; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        request(vec![(
+            "legacy",
+            "INTERLIS 2.3; MODEL Legacy AT \"x\" VERSION \"1\" =
+            FUNCTION check(value:BOOLEAN):BOOLEAN; END Legacy."
+                .into(),
+        )]),
+        Status::Rejected,
+        Some("ILI-FUNCTION-CONTRACTED"),
+    );
+    outcome(
+        single(
+            "FUNCTION check(value:0..10 [INTERLIS.m]):BOOLEAN;
+                TOPIC T=CLASS Obj=MANDATORY CONSTRAINT check(0); END Obj; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
     );
 }
 

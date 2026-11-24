@@ -1522,7 +1522,7 @@ mod review_regressions {
             ("UNIT u;", AnalysisStatus::CheckedSubset),
             (
                 "FUNCTION f (x:BOOLEAN):BOOLEAN;",
-                AnalysisStatus::Incomplete,
+                AnalysisStatus::CheckedSubset,
             ),
             ("LINE FORM curve:Segment;", AnalysisStatus::Incomplete),
             ("SIGN BASKET B~S;", AnalysisStatus::Incomplete),

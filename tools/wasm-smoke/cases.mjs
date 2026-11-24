@@ -33,18 +33,18 @@ export function verify(report, expected = 'checked_subset') {
 }
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
-const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=active:BOOLEAN; MANDATORY CONSTRAINT requiresActive: active; END C; END T; END B.';
+const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; FUNCTION gate(value:BOOLEAN):BOOLEAN; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=active:BOOLEAN; MANDATORY CONSTRAINT requiresActive: gate(active); END C; END T; END B.';
 const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
-  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = FUNCTION f(x:BOOLEAN):BOOLEAN; CLASS C=a:BOOLEAN := Missing(THIS); MANDATORY CONSTRAINT a OR b AND c == d; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = FUNCTION f(x:BOOLEAN):BOOLEAN; CLASS C=a:BOOLEAN := Missing(THIS); MANDATORY CONSTRAINT a OR b AND c == d; END C; END M.', 'rejected', 'ILI-FUNCTION-CONTRACTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = FUNCTION f():BOOLEAN; CLASS C=MANDATORY CONSTRAINT named: a == b AND c OR d + e * f => g; UNIQUE(BASKET) key: WHERE a: parts[FIRST]->name; SET CONSTRAINT(BASKET) all: WHERE a: Missing(ALL(ANYCLASS)); END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT f(); END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=a:BOOLEAN := b AND c; END C; END T; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=a:BOOLEAN := b AND c; END C; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT a AND; MANDATORY CONSTRAINT b ==; MANDATORY CONSTRAINT #true; END C; END M.', 'rejected', 'ILI-SYNTAX'],
-  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN CONSTRAINTS c: Missing(THIS); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN CONSTRAINTS c: Missing(THIS); END M.', 'rejected', 'ILI-FUNCTION-NAME'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[INTERLIS.rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [INTERLIS.m] {M.T.B.System[2]}; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'rejected', 'ILI-DOMAIN-ABSTRACT'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
@@ -91,7 +91,8 @@ export function verifySyntax(report, text, status, code) {
     if (calendar.kind !== 'temporal_range' || calendar.base.targetName !== 'INTERLIS.XMLDate' || calendar.lower.components.join('-') !== '2005-2-3') throw new Error('Lost the bound date interval');
     const constraint = declaration('B.T.C').constraints[0];
     const expression = report.model.expressions[constraint.expression];
-    if (constraint.name !== 'requiresActive' || expression.valueType !== 'boolean' || expression.reference.targetName !== 'B.T.C.active') throw new Error('Lost the bound constraint expression');
+    const argument = report.model.expressions[expression.arguments[0]];
+    if (constraint.name !== 'requiresActive' || expression.valueType !== 'boolean' || expression.function.targetName !== 'B.gate' || argument.reference.targetName !== 'B.T.C.active') throw new Error('Lost the bound constraint expression');
     const model = report.model.models[1];
     if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8' || model.effectiveXmlNamespace !== 'http://www.interlis.ch/xtf/2.4/B') throw new Error('Lost model options');
   }

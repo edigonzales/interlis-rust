@@ -406,6 +406,15 @@ impl Serialize for DeclarationsOutput<'_> {
             location: Option<SourceLocation>,
         }
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Function<'a> {
+            arguments: Vec<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            explanation: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            explanation_location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
         struct Context<'a> {
             generic: Reference<'a>,
             alternatives: Vec<Reference<'a>>,
@@ -440,6 +449,8 @@ impl Serialize for DeclarationsOutput<'_> {
             subdivision: Option<Subdivision>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             constraints: Vec<Constraint<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            function: Option<Function<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             association: Option<Association<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,6 +522,17 @@ impl Serialize for DeclarationsOutput<'_> {
                         location: self.sources.location(constraint.source_span()),
                     })
                     .collect(),
+                function: declaration.function().map(|function| Function {
+                    arguments: function
+                        .arguments
+                        .iter()
+                        .map(|&argument| self.graph.declarations()[argument].qualified_name())
+                        .collect(),
+                    explanation: function.explanation.as_deref(),
+                    explanation_location: function
+                        .explanation_span()
+                        .and_then(|span| self.sources.location(span)),
+                }),
                 association: declaration.association().map(|association| Association {
                     cardinality: &association.cardinality,
                     identified: association.identified,

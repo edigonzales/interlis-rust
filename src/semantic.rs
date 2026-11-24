@@ -5,6 +5,7 @@ mod contexts;
 mod domains;
 mod enumeration;
 mod expressions;
+mod functions;
 mod geometry;
 mod model_header;
 mod names;
@@ -175,6 +176,10 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
     ) && supported_type(ty)
 }
 
+fn supported_function_argument(argument: &syntax::ArgumentType) -> bool {
+    matches!(argument, syntax::ArgumentType::Attribute(ty) if ty.ty.as_ref().is_some_and(supported_type))
+}
+
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
 // Inert section markers do not change the supported attribute semantics.
 fn ensure_supported_semantics(
@@ -306,7 +311,12 @@ fn ensure_supported_semantics(
                 }
                 SyntaxDecl::Unit(_) => None,
                 SyntaxDecl::LineForm(form) => Some(&form.span),
-                SyntaxDecl::Function(function) => Some(&function.span),
+                SyntaxDecl::Function(function) => (!supported_function_argument(&function.result)
+                    || function
+                        .arguments
+                        .iter()
+                        .any(|argument| !supported_function_argument(&argument.ty)))
+                .then_some(&function.span),
                 SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
                 SyntaxDecl::Association(association) => {
                     if association.derived_from.is_some()
@@ -347,9 +357,10 @@ fn ensure_supported_semantics(
         let kind_supported = model.kind == syntax::ModelKind::Data
             || model.kind == syntax::ModelKind::Type
                 && model.declarations.iter().all(|d| match d {
-                    SyntaxDecl::Domain { .. } | SyntaxDecl::Unit(_) | SyntaxDecl::Context(_) => {
-                        true
-                    }
+                    SyntaxDecl::Domain { .. }
+                    | SyntaxDecl::Unit(_)
+                    | SyntaxDecl::Context(_)
+                    | SyntaxDecl::Function(_) => true,
                     SyntaxDecl::Container {
                         kind, properties, ..
                     } => {
@@ -510,6 +521,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 effective_attributes: None,
                 subdivision: None,
                 constraints: None,
+                function: None,
                 association: None,
                 role: None,
                 generic: false,
@@ -1931,6 +1943,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 return None;
             }
         }
+        self.bind_functions()?;
         self.validate_domain_reference_systems()?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;

@@ -135,6 +135,15 @@ impl Analyzer<'_, '_> {
                     );
                 }
                 Declaration::Function(f) => {
+                    let model = &self.models[self.symbols[owner].model];
+                    if model.language() == crate::LanguageVersion::V23 && !model.is_contracted() {
+                        self.diagnostics.push(
+                            "ILI-FUNCTION-CONTRACTED",
+                            "INTERLIS 2.3 function declarations require a CONTRACTED model",
+                            Some(f.name.span.clone()),
+                        );
+                        continue;
+                    }
                     for signature in f
                         .arguments
                         .iter()

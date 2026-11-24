@@ -210,6 +210,12 @@ impl Analyzer<'_, '_> {
                     | ExpressionKind::Defined {
                         expression: operand,
                     } => pending.push((operand, false)),
+                    ExpressionKind::Call { ref arguments, .. } => {
+                        if !self.step(arguments.len(), &expression.span) {
+                            return None;
+                        }
+                        pending.extend(arguments.iter().rev().map(|&argument| (argument, false)));
+                    }
                     _ => {}
                 }
                 continue;
@@ -219,6 +225,18 @@ impl Analyzer<'_, '_> {
                     self.expression_literal(owner, literal, &expression.span)?
                 }
                 ExpressionKind::Path(path) => self.expression_path(owner, path)?,
+                ExpressionKind::Call {
+                    function,
+                    arguments,
+                } => self.bind_call(
+                    owner,
+                    function,
+                    arguments
+                        .iter()
+                        .map(|argument| bound[&argument.0])
+                        .collect(),
+                    &expression.span,
+                )?,
                 ExpressionKind::RuntimeParameter(name) => {
                     let BoundName::Declared(target) = self.expression_name(
                         owner,
@@ -421,7 +439,7 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn expression_name(
+    pub(super) fn expression_name(
         &mut self,
         owner: usize,
         name: &QualifiedName,
@@ -515,7 +533,7 @@ impl Analyzer<'_, '_> {
         );
     }
 
-    fn unsupported_expression(&mut self, at: &Span) {
+    pub(super) fn unsupported_expression(&mut self, at: &Span) {
         self.diagnostics.push(
             "ILI-UNSUPPORTED",
             "This expression requires semantics outside the implemented subset",
@@ -524,7 +542,7 @@ impl Analyzer<'_, '_> {
     }
 }
 
-fn scalar_type(ty: &TypeInfo) -> ValueType {
+pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
     match ty {
         TypeInfo::Boolean => ValueType::Boolean,
         TypeInfo::Numeric(_) => ValueType::Numeric,
@@ -540,17 +558,28 @@ fn scalar_type(ty: &TypeInfo) -> ValueType {
 fn numeric_unit<'a>(
     expressions: &'a [BoundExpression],
     types: &'a [TypeInfo],
-    mut id: ExpressionId,
+    id: ExpressionId,
 ) -> Option<&'a TypeReference> {
+    let expression = underlying_expression(expressions, id);
+    if let Some(TypeInfo::Numeric(range)) = expression.type_id.map(|id| &types[id]) {
+        range.unit.as_ref()
+    } else if let BoundKind::Number { unit, .. } = &expression.kind {
+        unit.as_ref()
+    } else {
+        None
+    }
+}
+
+pub(super) fn underlying_expression(
+    expressions: &[BoundExpression],
+    mut id: ExpressionId,
+) -> &BoundExpression {
     loop {
         let expression = &expressions[id.0 as usize];
-        if let Some(TypeInfo::Numeric(range)) = expression.type_id.map(|id| &types[id]) {
-            return range.unit.as_ref();
-        }
-        match &expression.kind {
-            BoundKind::Number { unit, .. } => return unit.as_ref(),
-            BoundKind::Group { expression } => id = *expression,
-            _ => return None,
+        if let BoundKind::Group { expression } = expression.kind {
+            id = expression;
+        } else {
+            return expression;
         }
     }
 }

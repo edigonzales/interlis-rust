@@ -290,6 +290,10 @@ pub enum BoundExpressionKind {
     RuntimeParameter {
         reference: TypeReference,
     },
+    Call {
+        function: TypeReference,
+        arguments: Vec<ExpressionId>,
+    },
     Unary {
         operator: UnaryOperator,
         operand: ExpressionId,
@@ -350,6 +354,19 @@ pub struct BoundConstraint {
 impl BoundConstraint {
     pub fn source_span(&self) -> &Span {
         &self.span
+    }
+}
+
+#[derive(Debug)]
+pub struct FunctionInfo {
+    pub explanation: Option<String>,
+    pub(crate) arguments: Box<[usize]>,
+    pub(crate) explanation_span: Option<Span>,
+}
+
+impl FunctionInfo {
+    pub fn explanation_span(&self) -> Option<&Span> {
+        self.explanation_span.as_ref()
     }
 }
 
@@ -771,6 +788,7 @@ pub struct Declaration {
     pub(crate) effective_attributes: Option<Box<[usize]>>,
     pub(crate) subdivision: Option<AttributeSubdivision>,
     pub(crate) constraints: Option<Box<[BoundConstraint]>>,
+    pub(crate) function: Option<Box<FunctionInfo>>,
     pub(crate) association: Option<Box<AssociationInfo>>,
     pub(crate) role: Option<Box<RoleInfo>>,
     pub(crate) generic: bool,
@@ -819,6 +837,9 @@ impl Declaration {
     }
     pub fn constraints(&self) -> &[BoundConstraint] {
         self.constraints.as_deref().unwrap_or_default()
+    }
+    pub fn function(&self) -> Option<&FunctionInfo> {
+        self.function.as_deref()
     }
     pub fn oid_rules(&self) -> Option<&OidRules> {
         self.oids.as_deref()
@@ -870,6 +891,15 @@ impl ModelGraph {
     }
     pub fn expression_declared_type(&self, id: ExpressionId) -> Option<&TypeInfo> {
         self.types.get(self.expression(id)?.type_id?)
+    }
+    pub fn function_arguments(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
+        Some(
+            self.declaration(name)?
+                .function()?
+                .arguments
+                .iter()
+                .map(|&id| &self.declarations[id]),
+        )
     }
     pub fn models(&self) -> &[ModelInfo] {
         &self.models
