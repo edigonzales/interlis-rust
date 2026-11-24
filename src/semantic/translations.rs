@@ -332,9 +332,11 @@ impl Analyzer<'_, '_> {
             types: &self.types,
             expressions: &self.expressions,
             names: &self.names,
-            originals,
-            symbol_models,
-            imports,
+            correspondence: Some(Correspondence {
+                originals,
+                symbol_models,
+                imports,
+            }),
             temporal_languages: &self.temporal_languages,
             work: &mut self.work,
         };
@@ -547,11 +549,36 @@ struct Comparison<'a> {
     types: &'a [TypeInfo],
     expressions: &'a [BoundExpression],
     names: &'a BTreeMap<String, usize>,
+    correspondence: Option<Correspondence<'a>>,
+    temporal_languages: &'a BTreeMap<usize, LanguageVersion>,
+    work: &'a mut WorkBudget,
+}
+
+struct Correspondence<'a> {
     originals: &'a [usize],
     symbol_models: &'a [usize],
     imports: &'a BTreeMap<usize, usize>,
-    temporal_languages: &'a BTreeMap<usize, LanguageVersion>,
-    work: &'a mut WorkBudget,
+}
+
+pub(super) fn same_bound_expression(
+    types: &[TypeInfo],
+    expressions: &[BoundExpression],
+    names: &BTreeMap<String, usize>,
+    temporal_languages: &BTreeMap<usize, LanguageVersion>,
+    work: &mut WorkBudget,
+    a: ExpressionId,
+    b: ExpressionId,
+) -> Result<bool, ()> {
+    Ok(Comparison {
+        types,
+        expressions,
+        names,
+        correspondence: None,
+        temporal_languages,
+        work,
+    }
+    .expressions_match(vec![(a, b)])?
+        == Some(true))
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -913,16 +940,19 @@ impl Comparison<'_> {
         let Some(&id) = self.names.get(name) else {
             return Ok(OriginalTarget::Predefined(name));
         };
-        let model = self.symbol_models[id];
+        let Some(correspondence) = &self.correspondence else {
+            return Ok(OriginalTarget::Declared(0, id));
+        };
+        let model = correspondence.symbol_models[id];
         let original_model = if translated {
-            let Some(&model) = self.imports.get(&model) else {
+            let Some(&model) = correspondence.imports.get(&model) else {
                 return Ok(OriginalTarget::Unmatched(id));
             };
             model
         } else {
             model
         };
-        let declaration = original_root(id, self.originals, self.work)?;
+        let declaration = original_root(id, correspondence.originals, self.work)?;
         Ok(OriginalTarget::Declared(original_model, declaration))
     }
 

@@ -73,60 +73,89 @@ impl Analyzer<'_, '_> {
             .map(|(i, &id)| (id, i))
             .collect();
         let mut dependencies = Vec::with_capacity(arguments.len());
+        let mut direct = Vec::with_capacity(arguments.len());
         for &arg in arguments.iter().chain(std::iter::once(&function)) {
             let ty = self.symbols[arg].declaration.type_id?;
-            let dependency = self.argument_dependency(ty);
-            if let Some(dep) = dependency {
-                let ty = self.symbols[dep].declaration.type_id?;
-                if !matches!(
-                    self.types[ty],
-                    TypeInfo::ClassValue(_)
-                        | TypeInfo::ObjectSelection(_)
-                        | TypeInfo::Reference(_)
-                        | TypeInfo::Structure(_)
-                        | TypeInfo::AttributePath(_)
-                        | TypeInfo::Collection(_)
-                ) {
-                    self.diagnostics.push(
-                        "ILI-FUNCTION-ATTRIBUTE-OWNER",
-                        "The dependent formal must provide a class or structure scope",
-                        Some(self.symbols[arg].name_span.clone()),
-                    );
+            let at = self.symbols[arg].name_span.clone();
+            let mut nested = vec![ty];
+            let mut visited = BTreeSet::new();
+            let mut links = BTreeSet::new();
+            while let Some(id) = nested.pop() {
+                if !visited.insert(id) {
+                    continue;
+                }
+                if !self.step(1, &at) {
                     return None;
+                }
+                match &self.types[id] {
+                    TypeInfo::Collection(collection) => nested.push(collection.element),
+                    TypeInfo::AttributePath(path) => {
+                        nested.extend(path.restrictions.iter().map(|restriction| restriction.ty));
+                        if let Some(dep) = self.argument_dependency(id) {
+                            let mut scope_type = self.symbols[dep].declaration.type_id?;
+                            while let TypeInfo::Collection(collection) = &self.types[scope_type] {
+                                scope_type = collection.element;
+                            }
+                            if !matches!(
+                                self.types[scope_type],
+                                TypeInfo::ClassValue(_)
+                                    | TypeInfo::ObjectSelection(_)
+                                    | TypeInfo::Reference(_)
+                                    | TypeInfo::Structure(_)
+                                    | TypeInfo::AttributePath(_)
+                            ) {
+                                self.diagnostics.push(
+                                    "ILI-FUNCTION-ATTRIBUTE-OWNER",
+                                    "The dependent formal must provide a class or structure scope",
+                                    Some(at.clone()),
+                                );
+                                return None;
+                            }
+                            links.insert(positions[&dep]);
+                        }
+                    }
+                    _ => {}
                 }
             }
             if arg != function {
-                dependencies.push(dependency.map(|arg| positions[&arg]));
+                direct.push(self.argument_dependency(ty).map(|arg| positions[&arg]));
+                dependencies.push(links.into_iter().collect::<Vec<_>>());
             }
         }
         let mut order = Vec::with_capacity(arguments.len());
         let mut visited = vec![0; arguments.len()];
-        let mut chain = Vec::new();
+        let mut pending = Vec::new();
         for start in 0..arguments.len() {
-            let mut position = Some(start);
-            while let Some(current) = position {
-                match visited[current] {
-                    0 => {
-                        visited[current] = 1;
-                        chain.push(current);
-                        position = dependencies[current];
-                    }
-                    1 => {
-                        self.diagnostics.push(
-                            "ILI-FUNCTION-ARGUMENT-CYCLE",
-                            "Attribute-path arguments cannot depend on one another cyclically",
-                            Some(self.symbols[arguments[current]].name_span.clone()),
-                        );
-                        return None;
-                    }
-                    _ => break,
-                }
+            if visited[start] != 0 {
+                continue;
             }
-            for current in chain.drain(..).rev() {
+            visited[start] = 1;
+            pending.push((start, dependencies[start].iter()));
+            while let Some((current, deps)) = pending.last_mut() {
+                if let Some(&dep) = deps.next() {
+                    match visited[dep] {
+                        0 => {
+                            visited[dep] = 1;
+                            pending.push((dep, dependencies[dep].iter()));
+                        }
+                        1 => {
+                            self.diagnostics.push(
+                                "ILI-FUNCTION-ARGUMENT-CYCLE",
+                                "Attribute-path arguments cannot depend on one another cyclically",
+                                Some(self.symbols[arguments[dep]].name_span.clone()),
+                            );
+                            return None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                let current = *current;
+                pending.pop();
                 visited[current] = 2;
                 order.push(ArgumentBinding {
                     position: current,
-                    dependency: dependencies[current],
+                    dependency: direct[current],
                 });
             }
         }

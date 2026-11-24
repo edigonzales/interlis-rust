@@ -309,10 +309,31 @@ impl Analyzer<'_, '_> {
             (
                 Some(AttributePathOwner::ClassAttribute(source)),
                 Some(AttributePathOwner::ClassAttribute(target)),
+            ) if prefix.is_empty() => {
+                match super::translations::same_bound_expression(
+                    &self.types,
+                    &self.expressions,
+                    &self.names,
+                    &self.temporal_languages,
+                    &mut self.work,
+                    *source,
+                    *target,
+                ) {
+                    Ok(equal) => equal,
+                    Err(()) => {
+                        self.diagnostics
+                            .limit("Semantic work budget exceeded", Some(at.clone()));
+                        return None;
+                    }
+                }
+            }
+            (
+                Some(AttributePathOwner::ClassAttribute(source)),
+                Some(AttributePathOwner::ClassAttribute(target)),
             ) => {
                 match (
-                    &self.expressions[source.0 as usize].kind,
-                    &self.expressions[target.0 as usize].kind,
+                    &underlying_expression(&self.expressions, *source).kind,
+                    &underlying_expression(&self.expressions, *target).kind,
                 ) {
                     (
                         BoundExpressionKind::Path { steps: source },

@@ -2266,6 +2266,69 @@ fn dependent_function_attribute_paths_bind_later_arguments_and_return_types() {
 }
 
 #[test]
+fn dependent_attribute_arguments_validate_nested_formals_and_dynamic_owners() {
+    for version in ["2.3", "2.4"] {
+        let input = |body: &str| {
+            request(vec![(
+                "dependent",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" = {body} END M."
+                ),
+            )])
+        };
+        for signature in [
+            "FUNCTION check(first:ATTRIBUTE RESTRICTION(ATTRIBUTE OF @first)):BOOLEAN;",
+            "FUNCTION check(first:ATTRIBUTE RESTRICTION(ATTRIBUTE OF @other); other:ATTRIBUTE OF @first):BOOLEAN;",
+        ] {
+            outcome(
+                input(signature),
+                Status::Rejected,
+                Some("ILI-FUNCTION-ARGUMENT-CYCLE"),
+            );
+        }
+        outcome(
+            input("FUNCTION check(source:0..10):ATTRIBUTE RESTRICTION(ATTRIBUTE OF @source);"),
+            Status::Rejected,
+            Some("ILI-FUNCTION-ATTRIBUTE-OWNER"),
+        );
+        let model = |condition: &str| {
+            input(&format!(
+                "FUNCTION check(cls:CLASS; path:ATTRIBUTE OF @cls RESTRICTION(TEXT)):BOOLEAN;
+                 FUNCTION pick(cls:CLASS):ATTRIBUTE OF @cls RESTRICTION(TEXT);
+                 TOPIC T=CLASS A=label:TEXT; END A;
+                 FUNCTION selectClass(flag:BOOLEAN):CLASS RESTRICTION(A);
+                 CLASS B=cls:CLASS RESTRICTION(A); other:CLASS RESTRICTION(A);
+                   path:ATTRIBUTE OF cls RESTRICTION(TEXT);
+                   MANDATORY CONSTRAINT {condition};
+                 END B; END T;"
+            ))
+        };
+        for expression in [
+            "check((cls), path)",
+            "check(cls,pick((cls)))",
+            "check(selectClass(#true), pick(selectClass((#true))))",
+        ] {
+            outcome(model(expression), Status::CheckedSubset, None);
+        }
+        for expression in [
+            "check(other,path)",
+            "check(selectClass(#true), pick(selectClass(#false)))",
+        ] {
+            outcome(
+                model(expression),
+                Status::Rejected,
+                Some("ILI-FUNCTION-ARGUMENT"),
+            );
+        }
+    }
+    outcome(
+        single("FUNCTION check(source:BAG OF TEXT; field:ATTRIBUTE OF @source):BOOLEAN;"),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ATTRIBUTE-OWNER"),
+    );
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(
