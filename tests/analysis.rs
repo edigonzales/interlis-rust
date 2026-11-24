@@ -5363,6 +5363,44 @@ fn attribute_path_overrides_preserve_the_inherited_class_selector() {
             (status == Status::Rejected).then_some("ILI-ATTRIBUTE-PATH-EXTENSION"),
         );
     }
+    outcome(
+        single(
+            "TOPIC T=CLASS Base=first:CLASS; other:CLASS;
+              path:ATTRIBUTE RESTRICTION (ATTRIBUTE OF first); END Base;
+             CLASS Child EXTENDS Base=
+              path (EXTENDED):ATTRIBUTE RESTRICTION (ATTRIBUTE OF other);
+             END Child; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-ATTRIBUTE-PATH-EXTENSION"),
+    );
+}
+
+#[test]
+fn attribute_path_assignment_distinguishes_the_object_instances_of_its_selector() {
+    for (source, status) in [("left", Status::CheckedSubset), ("right", Status::Rejected)] {
+        outcome(
+            single(&format!(
+                "TOPIC T=STRUCTURE Scope=selector:CLASS; chosen:ATTRIBUTE OF selector; END Scope;
+                 CLASS Item=left:Scope; right:Scope;
+                    copy:ATTRIBUTE OF left->selector := {source}->chosen;
+                 END Item; END T;"
+            )),
+            status,
+            (status == Status::Rejected).then_some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS Base=selector:CLASS; chosen:ATTRIBUTE OF selector; END Base;
+             STRUCTURE Link=reference:REFERENCE TO Base; END Link;
+             CLASS Item EXTENDS Base=other:Link;
+                copy:ATTRIBUTE OF selector := other->reference->chosen;
+             END Item; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
+    );
 }
 
 #[test]

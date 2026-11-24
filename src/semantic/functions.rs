@@ -455,7 +455,13 @@ impl Analyzer<'_, '_> {
                     return Some(false);
                 };
                 let at = actual.span.clone();
-                return self.attribute_path_specializes(owner, source, target, &at);
+                return self.attribute_path_specializes(
+                    owner,
+                    source,
+                    target,
+                    &at,
+                    Some(expression),
+                );
             }
         }
         match self.argument_fits(owner, expression, target, mandatory, context) {

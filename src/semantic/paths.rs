@@ -2,14 +2,14 @@ use super::{
     Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, TypeInfo, TypeSyntax,
     collections::{compare_count, structure_targets},
     domains::scalar_extension,
-    expressions::scalar_type,
+    expressions::{scalar_type, underlying_expression},
     functions::text_details,
     object_references::object_targets,
 };
 use crate::{
     AttributePathOwner, AttributePathType, BoundExpressionKind, BoundPathStep, CollectionKind,
-    CoordinateKind, ExpressionType, LanguageVersion, ObjectSelection, PathSelection, Span,
-    TypeReference,
+    CoordinateKind, ExpressionId, ExpressionType, LanguageVersion, ObjectSelection, PathSelection,
+    Span, TypeReference,
     model::AttributeRestriction,
     syntax::{AttributePathOf, ObjectPath, PathElement, PathSelector, SpecialPath, TypeUseSyntax},
 };
@@ -152,12 +152,8 @@ impl Analyzer<'_, '_> {
             else {
                 continue;
             };
-            if !matches!(&self.types[base], TypeInfo::AttributePath(attribute) if attribute.owner.is_some())
-            {
-                continue;
-            }
             let span = symbol.declaration.span.clone();
-            if !self.attribute_path_specializes(id, own, base, &span)? {
+            if !self.attribute_path_specializes(id, own, base, &span, None)? {
                 self.report_type_override(
                     id,
                     "ILI-ATTRIBUTE-PATH-EXTENSION",
@@ -226,8 +222,9 @@ impl Analyzer<'_, '_> {
         actual: usize,
         expected: usize,
         at: &Span,
+        value: Option<ExpressionId>,
     ) -> Option<bool> {
-        match self.attribute_path_match(owner, actual, expected, at)? {
+        match self.attribute_path_match(owner, actual, expected, at, value)? {
             RestrictionMatch::Fits => Some(true),
             RestrictionMatch::Outside => Some(false),
             RestrictionMatch::Unchecked => {
@@ -243,8 +240,19 @@ impl Analyzer<'_, '_> {
         actual: usize,
         expected: usize,
         at: &Span,
+        value: Option<ExpressionId>,
     ) -> Option<RestrictionMatch> {
-        if actual == expected {
+        // The declared selector starts at the object containing the value's attribute.
+        let prefix = value
+            .and_then(|id| {
+                let expression = underlying_expression(&self.expressions, id);
+                let BoundExpressionKind::Path { steps } = &expression.kind else {
+                    return None;
+                };
+                steps.split_last().map(|(_, prefix)| prefix)
+            })
+            .unwrap_or_default();
+        if actual == expected && prefix.is_empty() {
             return Some(RestrictionMatch::Fits);
         }
         let (TypeInfo::AttributePath(source), TypeInfo::AttributePath(target)) =
@@ -272,18 +280,22 @@ impl Analyzer<'_, '_> {
                     ) => {
                         if self
                             .work
-                            .charge((source.len() + target.len()) as u32)
+                            .charge((prefix.len() + source.len() + target.len()) as u32)
                             .is_err()
                         {
                             self.diagnostics
                                 .limit("Semantic work budget exceeded", Some(at.clone()));
                             return None;
                         }
-                        source.len() == target.len()
-                            && source.iter().zip(target).all(|(source, target)| {
-                                source.reference.target_name() == target.reference.target_name()
-                                    && source.selection == target.selection
-                            })
+                        prefix.len() + source.len() == target.len()
+                            && prefix
+                                .iter()
+                                .chain(source)
+                                .zip(target)
+                                .all(|(source, target)| {
+                                    source.reference.target_name() == target.reference.target_name()
+                                        && source.selection == target.selection
+                                })
                     }
                     _ => false,
                 }
@@ -316,7 +328,7 @@ impl Analyzer<'_, '_> {
                 if target.mandatory && !source.mandatory {
                     continue;
                 }
-                match self.attribute_type_match(owner, source.ty, target.ty, at)? {
+                match self.attribute_type_match(owner, source.ty, target.ty, at, value)? {
                     RestrictionMatch::Fits => {
                         alternatives = RestrictionMatch::Fits;
                         break;
@@ -340,11 +352,18 @@ impl Analyzer<'_, '_> {
         source: usize,
         target: usize,
         at: &Span,
+        value: Option<ExpressionId>,
     ) -> Option<RestrictionMatch> {
         if !self.step(1, at) {
             return None;
         }
-        if source == target {
+        if source == target
+            && (value.is_none()
+                || !matches!(
+                    self.types[source],
+                    TypeInfo::AttributePath(_) | TypeInfo::Collection(_)
+                ))
+        {
             return Some(RestrictionMatch::Fits);
         }
         if self.is_enum_type(source) && self.is_enum_type(target) {
@@ -406,10 +425,10 @@ impl Analyzer<'_, '_> {
                 {
                     return Some(RestrictionMatch::Outside);
                 }
-                return self.attribute_type_match(owner, source.element, target.element, at);
+                return self.attribute_type_match(owner, source.element, target.element, at, value);
             }
             (TypeInfo::AttributePath(_), TypeInfo::AttributePath(_)) => {
-                return self.attribute_path_match(owner, source, target, at);
+                return self.attribute_path_match(owner, source, target, at, value);
             }
             (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
                 return Some(RestrictionMatch::Unchecked);
