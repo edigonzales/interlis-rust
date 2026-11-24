@@ -925,7 +925,10 @@ impl Analyzer<'_, '_> {
     }
 }
 
-fn equivalent_selector(source: Option<&PathSelection>, target: Option<&PathSelection>) -> bool {
+pub(super) fn equivalent_selector(
+    source: Option<&PathSelection>,
+    target: Option<&PathSelection>,
+) -> bool {
     source == target
         || match (source, target) {
             (Some(PathSelection::First), Some(PathSelection::Index(index)))

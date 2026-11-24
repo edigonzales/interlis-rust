@@ -1,8 +1,13 @@
-use super::{Analyzer, Kind, SyntaxDecl};
-use crate::{
-    DecimalInfo, Enumeration, LanguageVersion, NumericRange, OidRule, OidType, RelatedLocation,
-    TypeInfo, TypeReference, limits::WorkBudget,
+use super::{
+    Analyzer, Kind, SyntaxDecl, expressions::underlying_expression, functions::compare_decimal,
+    paths::equivalent_selector,
 };
+use crate::{
+    AttributePathOwner, BoundConstraint, BoundExpression, BoundExpressionKind, ConstraintRule,
+    DecimalInfo, Enumeration, ExpressionId, LanguageVersion, NumericRange, OidRule, OidType,
+    RelatedLocation, TypeInfo, TypeReference, UnitConstant, limits::WorkBudget,
+};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
@@ -277,7 +282,6 @@ impl Analyzer<'_, '_> {
             || a.is_transient() != b.is_transient()
             || a.generic != b.generic
             || a.constraints().len() != b.constraints().len()
-            || a.derivations().len() != b.derivations().len()
             || a.subdivision().map(|subdivision| subdivision.continuous)
                 != b.subdivision().map(|subdivision| subdivision.continuous)
         {
@@ -298,6 +302,7 @@ impl Analyzer<'_, '_> {
         }
         let mut comparison = Comparison {
             types: &self.types,
+            expressions: &self.expressions,
             names: &self.names,
             originals,
             symbol_models,
@@ -331,19 +336,46 @@ impl Analyzer<'_, '_> {
                 | Kind::Class
                 | Kind::Structure
                 | Kind::Attribute
-        ) || !a.constraints().is_empty()
-            || !a.derivations().is_empty()
-            || a.context.is_some()
+                | Kind::Function
+                | Kind::Parameter
+        ) || a.context.is_some()
             || a.deferred_generics.is_some()
             || b.deferred_generics.is_some()
         {
             return Ok(None);
         }
-        match (a.type_id, b.type_id) {
-            (Some(a), Some(b)) => comparison.types(a, b),
-            (None, None) => Ok(Some(true)),
-            _ => Ok(Some(false)),
+        if a.function()
+            .and_then(|function| function.explanation.as_ref())
+            .is_some()
+            != b.function()
+                .and_then(|function| function.explanation.as_ref())
+                .is_some()
+        {
+            return Ok(Some(false));
         }
+        let mut expressions = Vec::new();
+        if !pair_expressions(&mut expressions, a.derivations(), b.derivations()) {
+            return Ok(Some(false));
+        }
+        for (a, b) in a.constraints().iter().zip(b.constraints()) {
+            if !comparison.pair_constraint(&mut expressions, a, b)? {
+                return Ok(Some(false));
+            }
+        }
+        let type_equal = match (a.type_id, b.type_id) {
+            (Some(a), Some(b)) => comparison.types(a, b)?,
+            (None, None) => Some(true),
+            _ => Some(false),
+        };
+        if type_equal == Some(false) {
+            return Ok(Some(false));
+        }
+        let expressions_equal = comparison.expressions_match(expressions)?;
+        Ok(if expressions_equal == Some(false) {
+            Some(false)
+        } else {
+            type_equal.and(expressions_equal)
+        })
     }
 
     fn translation_error(&mut self, original: usize, translated: usize, code: &str, message: &str) {
@@ -374,8 +406,36 @@ fn properties(syntax: Option<&SyntaxDecl>) -> &[crate::syntax::Located<crate::sy
     }
 }
 
+fn pair_expressions(
+    pending: &mut Vec<(ExpressionId, ExpressionId)>,
+    a: &[ExpressionId],
+    b: &[ExpressionId],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    pending.extend(a.iter().copied().zip(b.iter().copied()));
+    true
+}
+
+fn pair_optional(
+    pending: &mut Vec<(ExpressionId, ExpressionId)>,
+    a: Option<ExpressionId>,
+    b: Option<ExpressionId>,
+) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            pending.push((a, b));
+            true
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 struct Comparison<'a> {
     types: &'a [TypeInfo],
+    expressions: &'a [BoundExpression],
     names: &'a BTreeMap<String, usize>,
     originals: &'a [usize],
     symbol_models: &'a [usize],
@@ -400,6 +460,249 @@ fn original_root(mut id: usize, originals: &[usize], work: &mut WorkBudget) -> R
 }
 
 impl Comparison<'_> {
+    fn pair_constraint(
+        &mut self,
+        pending: &mut Vec<(ExpressionId, ExpressionId)>,
+        a: &BoundConstraint,
+        b: &BoundConstraint,
+    ) -> Result<bool, ()> {
+        self.work.charge(1)?;
+        if !pair_optional(pending, a.expression, b.expression) {
+            return Ok(false);
+        }
+        use ConstraintRule::*;
+        Ok(match (&a.rule, &b.rule) {
+            (Domain, Domain) | (Mandatory, Mandatory) => true,
+            (
+                Plausibility {
+                    direction: a,
+                    percentage: av,
+                },
+                Plausibility {
+                    direction: b,
+                    percentage: bv,
+                },
+            ) => a == b && compare_decimal(av, bv, self.work).map_err(|_| ())? == Ordering::Equal,
+            (
+                Unique {
+                    basket: a,
+                    local_prefix: ap,
+                    keys: ak,
+                },
+                Unique {
+                    basket: b,
+                    local_prefix: bp,
+                    keys: bk,
+                },
+            ) => a == b && pair_optional(pending, *ap, *bp) && pair_expressions(pending, ak, bk),
+            (
+                Existence {
+                    source_path: ap,
+                    required: ar,
+                },
+                Existence {
+                    source_path: bp,
+                    required: br,
+                },
+            ) => {
+                if ar.len() != br.len() {
+                    return Ok(false);
+                }
+                pending.push((*ap, *bp));
+                for (a, b) in ar.iter().zip(br) {
+                    if !self.reference(Some(&a.viewable), Some(&b.viewable))? {
+                        return Ok(false);
+                    }
+                    pending.push((a.path, b.path));
+                }
+                true
+            }
+            (
+                Set {
+                    basket: a,
+                    filter: af,
+                },
+                Set {
+                    basket: b,
+                    filter: bf,
+                },
+            ) => a == b && pair_optional(pending, *af, *bf),
+            _ => false,
+        })
+    }
+
+    fn expressions_match(
+        &mut self,
+        mut pending: Vec<(ExpressionId, ExpressionId)>,
+    ) -> ComparisonResult {
+        use BoundExpressionKind::*;
+        let mut complete = true;
+        while let Some((a, b)) = pending.pop() {
+            self.work.charge(1)?;
+            let a = underlying_expression(self.expressions, a);
+            let b = underlying_expression(self.expressions, b);
+            let equal = match (&a.kind, &b.kind) {
+                (Undefined, Undefined) | (This, This) => true,
+                (Boolean { value: a }, Boolean { value: b }) => a == b,
+                (
+                    Number {
+                        value: av,
+                        unit: au,
+                    },
+                    Number {
+                        value: bv,
+                        unit: bu,
+                    },
+                ) => {
+                    if !self.constant(av, bv)? {
+                        return Ok(Some(false));
+                    }
+                    if au.is_some() != bu.is_some() {
+                        complete = false;
+                        continue;
+                    }
+                    self.reference(au.as_ref(), bu.as_ref())?
+                }
+                (Text { value: a, .. }, Text { value: b, .. }) => {
+                    self.work.charge((a.len() + b.len()) as u32)?;
+                    a == b
+                }
+                (Temporal { components: a, .. }, Temporal { components: b, .. }) => a == b,
+                (Enumeration { path: ap }, Enumeration { path: bp }) => {
+                    let x = self.enum_positions(a.type_id, ap)?;
+                    let y = self.enum_positions(b.type_id, bp)?;
+                    match (x, y) {
+                        (Some(x), Some(y)) => x == y,
+                        (None, None) => ap == bp,
+                        _ => false,
+                    }
+                }
+                (Class { reference: a }, Class { reference: b })
+                | (AttributePath { reference: a }, AttributePath { reference: b })
+                | (RuntimeParameter { reference: a }, RuntimeParameter { reference: b }) => {
+                    self.reference(Some(a), Some(b))?
+                }
+                (Path { steps: a }, Path { steps: b }) => {
+                    if a.len() != b.len() {
+                        return Ok(Some(false));
+                    }
+                    for (a, b) in a.iter().zip(b) {
+                        if !equivalent_selector(a.selection.as_ref(), b.selection.as_ref())
+                            || !self.reference(Some(&a.reference), Some(&b.reference))?
+                        {
+                            return Ok(Some(false));
+                        }
+                    }
+                    true
+                }
+                (ObjectSet { explicit: ae }, ObjectSet { explicit: be }) => {
+                    if ae != be {
+                        return Ok(Some(false));
+                    }
+                    match a.type_id.zip(b.type_id) {
+                        Some((a, b)) => match self.types(a, b)? {
+                            Some(equal) => equal,
+                            None => {
+                                complete = false;
+                                continue;
+                            }
+                        },
+                        None => return Ok(None),
+                    }
+                }
+                (
+                    Call {
+                        function: a,
+                        arguments: av,
+                    },
+                    Call {
+                        function: b,
+                        arguments: bv,
+                    },
+                ) => self.reference(Some(a), Some(b))? && pair_expressions(&mut pending, av, bv),
+                (
+                    Binary {
+                        operator: a,
+                        left: al,
+                        right: ar,
+                    },
+                    Binary {
+                        operator: b,
+                        left: bl,
+                        right: br,
+                    },
+                ) => {
+                    pending.extend([(*al, *bl), (*ar, *br)]);
+                    a == b
+                }
+                (
+                    Unary {
+                        operator: a,
+                        operand: av,
+                    },
+                    Unary {
+                        operator: b,
+                        operand: bv,
+                    },
+                ) => {
+                    pending.push((*av, *bv));
+                    a == b
+                }
+                (Defined { expression: a }, Defined { expression: b }) => {
+                    pending.push((*a, *b));
+                    true
+                }
+                _ => false,
+            };
+            if !equal {
+                return Ok(Some(false));
+            }
+        }
+        Ok(complete.then_some(true))
+    }
+
+    fn constant(&mut self, a: &UnitConstant, b: &UnitConstant) -> Result<bool, ()> {
+        use UnitConstant::*;
+        match (a, b) {
+            (Decimal(a), Decimal(b)) => {
+                Ok(compare_decimal(a, b, self.work).map_err(|_| ())? == Ordering::Equal)
+            }
+            (Pi, Pi) | (LnBase, LnBase) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn enum_positions(
+        &mut self,
+        ty: Option<usize>,
+        path: &[String],
+    ) -> Result<Option<Vec<usize>>, ()> {
+        let Some(ty) = ty else {
+            return Ok(None);
+        };
+        let ty = match self.types[ty] {
+            TypeInfo::EnumTree { base, .. } => base,
+            _ => ty,
+        };
+        let TypeInfo::Enumeration { values, .. } = &self.types[ty] else {
+            return Ok(None);
+        };
+        let mut elements = values.elements();
+        let mut positions = Vec::new();
+        for part in path {
+            self.work.charge(elements.len() as u32)?;
+            let Some(position) = elements.iter().position(|element| element.name() == part) else {
+                return Ok(None);
+            };
+            positions.push(position);
+            elements = elements[position]
+                .children()
+                .map(Enumeration::elements)
+                .unwrap_or_default();
+        }
+        Ok(Some(positions))
+    }
+
     fn name(&mut self, a: &str, b: &str) -> Result<bool, ()> {
         Ok(self.target(a, false)? == self.target(b, true)?)
     }
@@ -592,6 +895,39 @@ impl Comparison<'_> {
             (ClassValue(a), ClassValue(b)) => {
                 a.kind == b.kind && self.references(&a.restrictions, &b.restrictions)?
             }
+            (EnumArgument { tree_values: a }, EnumArgument { tree_values: b }) => a == b,
+            (AttributePath(a), AttributePath(b)) => {
+                if a.restrictions.len() != b.restrictions.len() {
+                    return Ok(Some(false));
+                }
+                let owners = match (&a.owner, &b.owner) {
+                    (None, None) => Some(true),
+                    (
+                        Some(AttributePathOwner::Viewable(a)),
+                        Some(AttributePathOwner::Viewable(b)),
+                    ) => Some(self.reference(Some(a), Some(b))?),
+                    (
+                        Some(AttributePathOwner::ClassAttribute(a)),
+                        Some(AttributePathOwner::ClassAttribute(b)),
+                    ) => self.expressions_match(vec![(*a, *b)])?,
+                    _ => Some(false),
+                };
+                let mut complete = owners == Some(true);
+                if owners == Some(false) {
+                    return Ok(Some(false));
+                }
+                for (a, b) in a.restrictions.iter().zip(&b.restrictions) {
+                    if a.mandatory != b.mandatory {
+                        return Ok(Some(false));
+                    }
+                    match self.types(a.ty, b.ty)? {
+                        Some(true) => {}
+                        Some(false) => return Ok(Some(false)),
+                        None => complete = false,
+                    }
+                }
+                return Ok(complete.then_some(true));
+            }
             (Structure(a), Structure(b)) => {
                 self.reference(a.target.as_ref(), b.target.as_ref())?
                     && self.references(&a.restrictions, &b.restrictions)?
@@ -600,6 +936,19 @@ impl Comparison<'_> {
                 a.external == b.external
                     && self.reference(a.target.target.as_ref(), b.target.target.as_ref())?
                     && self.references(&a.target.restrictions, &b.target.restrictions)?
+            }
+            (ObjectSelection(a), ObjectSelection(b)) => {
+                if a.plural != b.plural || a.targets.len() != b.targets.len() {
+                    return Ok(Some(false));
+                }
+                for (a, b) in a.targets.iter().zip(&b.targets) {
+                    if !self.reference(a.target.as_ref(), b.target.as_ref())?
+                        || !self.references(&a.restrictions, &b.restrictions)?
+                    {
+                        return Ok(Some(false));
+                    }
+                }
+                true
             }
             (Collection(a), Collection(b)) => {
                 if a.kind != b.kind
@@ -610,10 +959,7 @@ impl Comparison<'_> {
                 }
                 return self.types(a.element, b.element);
             }
-            (Geometry(_), Geometry(_))
-            | (AttributePath(_), AttributePath(_))
-            | (ObjectSelection(_), ObjectSelection(_))
-            | (EnumArgument { .. }, EnumArgument { .. }) => return Ok(None),
+            (Geometry(_), Geometry(_)) => return Ok(None),
             _ => false,
         }))
     }

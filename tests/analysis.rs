@@ -1333,6 +1333,69 @@ fn translation_imports_match_exact_models_before_other_localizations() {
 }
 
 #[test]
+fn translations_compare_bound_expressions_after_renaming_members_and_enum_values() {
+    for version in ["2.3", "2.4"] {
+        let input = |member: &str, operator: &str, derivation: &str| {
+            request(vec![
+            (
+                "original",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL Base AT \"x\" VERSION \"1\" =
+                    DOMAIN Kind=(garden, wood(oak,pine)) ORDERED;
+                    FUNCTION permitted(value:Kind):BOOLEAN // original explanation //;
+                    TOPIC T=CLASS Item=kind:Kind; active:BOOLEAN; count:0..10;
+                        chosen:0.0..9.0 := 3;
+                        MANDATORY CONSTRAINT permitted(#wood.pine) AND count < 9;
+                        UNIQUE WHERE active: count;
+                        EXISTENCE CONSTRAINT count REQUIRED IN Item:count;
+                        SET CONSTRAINT WHERE active: INTERLIS.objectCount(ALL) > 0;
+                    END Item; END T; END Base."
+                ),
+            ),
+            (
+                "localized",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL French AT \"x\" VERSION \"1\" TRANSLATION OF Base [\"1\"] =
+                    DOMAIN Genre=(jardin, foret(chene,pin)) ORDERED;
+                    FUNCTION permis(valeur:Genre):BOOLEAN // explication traduite //;
+                    TOPIC P=CLASS Objet=genre:Genre; valide:BOOLEAN; nombre:0..10;
+                        choisi:0.0..9.0 := {derivation};
+                        MANDATORY CONSTRAINT permis(#foret.{member}) AND nombre {operator} 9.0;
+                        UNIQUE WHERE valide: nombre;
+                        EXISTENCE CONSTRAINT nombre REQUIRED IN Objet:nombre;
+                        SET CONSTRAINT WHERE valide: INTERLIS.objectCount(ALL) > 0;
+                    END Objet; END P; END French."
+                ),
+            ),
+        ])
+        };
+        let report = outcome(input("pin", "<", "3.0"), Status::CheckedSubset, None);
+        assert_eq!(
+            report
+                .graph()
+                .unwrap()
+                .declaration("French.permis")
+                .unwrap()
+                .translation_of()
+                .unwrap()
+                .target_name(),
+            "Base.permitted",
+        );
+        for (member, operator, derivation) in [
+            ("chene", "<", "3.0"),
+            ("pin", ">", "3.0"),
+            ("pin", "<", "4.0"),
+        ] {
+            outcome(
+                input(member, operator, derivation),
+                Status::Rejected,
+                Some("ILI-TRANSLATION-DEFINITION"),
+            );
+        }
+    }
+}
+
+#[test]
 fn association_names_have_matching_opening_and_closing_presence() {
     for (head, end) in [(" Link", ""), ("", " leftright"), (" Link", " Other")] {
         let body = format!(
