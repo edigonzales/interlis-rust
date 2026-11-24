@@ -34,6 +34,7 @@ export function verify(report, expected = 'checked_subset') {
 
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=END C; END T; END B.';
+const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
@@ -48,7 +49,7 @@ export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'rejected', 'ILI-DOMAIN-ABSTRACT'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate ("😀" Year/4 "-" Month/INTERLIS.XMLDate); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
-  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M.', 'checked_subset'],
+  [classValues, 'checked_subset'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; CONTEXT first=G=X; empty= END M.', 'rejected', 'ILI-CONTEXT-GENERIC'],
@@ -87,7 +88,12 @@ export function verifySyntax(report, text, status, code) {
     const oid = declaration('B.T.C').oidRules.object;
     if (!angle.circular || angle.unit.targetName !== 'INTERLIS.rad' || oid.domain.targetName !== 'INTERLIS.I32OID') throw new Error('Lost a bound unit or inherited OID rule');
     const model = report.model.models[1];
-    if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8') throw new Error('Lost model options');
+    if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8' || model.effectiveXmlNamespace !== 'http://www.interlis.ch/xtf/2.4/B') throw new Error('Lost model options');
+  }
+  if (text === classValues) {
+    const value = report.model.declarations.find(d => d.qualifiedName === 'M.D').effectiveType;
+    const target = value.restrictions[0];
+    if (value.kind !== 'class_value' || value.valueKind !== 'class' || target.predefinedLanguage !== '2.3' || text.slice(target.startByte, target.endByte) !== 'INTERLIS.METAOBJECT') throw new Error('Lost the class-value restriction');
   }
   if(text.includes('X=;')) {
     const errors=report.diagnostics.filter(d=>d.code==='ILI-SYNTAX');
