@@ -455,6 +455,94 @@ fn project_reference<'a>(r: &'a crate::TypeReference, sources: &SourceSet) -> Re
         location: sources.location(r.source_span()),
     }
 }
+
+#[derive(Serialize)]
+struct SourceMetadataOutput<'a> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attributes: Vec<MetaAttributeOutput<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    documentation: Vec<DocumentationOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct MetaAttributeOutput<'a> {
+    key: &'a str,
+    #[serde(flatten)]
+    value: DocumentationOutput<'a>,
+}
+
+#[derive(Serialize)]
+struct DocumentationOutput<'a> {
+    text: &'a str,
+    #[serde(flatten)]
+    location: Option<SourceLocation>,
+}
+
+fn project_metadata<'a>(
+    metadata: &'a crate::SourceMetadata,
+    sources: &SourceSet,
+) -> SourceMetadataOutput<'a> {
+    SourceMetadataOutput {
+        attributes: metadata
+            .attributes
+            .iter()
+            .map(|attribute| MetaAttributeOutput {
+                key: &attribute.key,
+                value: DocumentationOutput {
+                    text: &attribute.text,
+                    location: sources.location(&attribute.span),
+                },
+            })
+            .collect(),
+        documentation: metadata
+            .documentation
+            .iter()
+            .map(|comment| DocumentationOutput {
+                text: &comment.text,
+                location: sources.location(&comment.span),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnumerationOutput<'a> {
+    elements: Vec<EnumerationElementOutput<'a>>,
+    final_subtree: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnumerationElementOutput<'a> {
+    name: &'a str,
+    children: Option<EnumerationOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_metadata: Option<SourceMetadataOutput<'a>>,
+}
+
+fn project_enumeration<'a>(
+    values: &'a crate::Enumeration,
+    sources: &SourceSet,
+) -> EnumerationOutput<'a> {
+    EnumerationOutput {
+        elements: values
+            .elements()
+            .iter()
+            .map(|element| EnumerationElementOutput {
+                name: element.name(),
+                children: element
+                    .children()
+                    .map(|children| project_enumeration(children, sources)),
+                source_metadata: element
+                    .source_metadata()
+                    .map(|metadata| project_metadata(metadata, sources)),
+            })
+            .collect(),
+        final_subtree: values.is_final(),
+    }
+}
+
 struct DeclarationsOutput<'a> {
     graph: &'a ModelGraph,
     sources: &'a SourceSet,
@@ -490,12 +578,15 @@ impl Serialize for DeclarationsOutput<'_> {
             },
         }
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct Constraint<'a> {
             name: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             expression: Option<crate::ExpressionId>,
             #[serde(flatten)]
             rule: Rule<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            source_metadata: Option<SourceMetadataOutput<'a>>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -545,6 +636,8 @@ impl Serialize for DeclarationsOutput<'_> {
             predefined: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             metadata_kind: Option<crate::MetadataBasketKind>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            source_metadata: Option<SourceMetadataOutput<'a>>,
             type_reference: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
@@ -612,6 +705,9 @@ impl Serialize for DeclarationsOutput<'_> {
                 abstract_declaration: declaration.is_abstract(),
                 predefined: declaration.is_predefined(),
                 metadata_kind: declaration.metadata_basket_kind(),
+                source_metadata: declaration
+                    .source_metadata()
+                    .map(|metadata| project_metadata(metadata, self.sources)),
                 type_reference: reference,
                 base_reference: declaration
                     .base_reference()
@@ -690,6 +786,9 @@ impl Serialize for DeclarationsOutput<'_> {
                             rule => Rule::Ordinary(rule),
                         },
                         expression: constraint.expression,
+                        source_metadata: constraint
+                            .source_metadata()
+                            .map(|metadata| project_metadata(metadata, self.sources)),
                         location: self.sources.location(constraint.source_span()),
                     })
                     .collect(),
@@ -870,7 +969,7 @@ impl<'report> Serialize for TypeOutput<'report> {
                 encoding: crate::BlackboxKind,
             },
             Enumeration {
-                values: &'a crate::Enumeration,
+                values: EnumerationOutput<'a>,
                 order: Option<crate::EnumerationOrder>,
                 declared_order: Option<crate::EnumerationOrder>,
             },
@@ -1009,7 +1108,7 @@ impl<'report> Serialize for TypeOutput<'report> {
                 order,
                 declared_order,
             } => Type::Enumeration {
-                values,
+                values: project_enumeration(values, self.2),
                 order: *order,
                 declared_order: *declared_order,
             }

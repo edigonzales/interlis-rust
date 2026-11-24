@@ -6,8 +6,10 @@ use crate::{
     lexer::{self, Kind, Token},
     limits::SyntaxBudget,
 };
+use std::collections::BTreeMap;
 
 mod expressions;
+mod metadata;
 mod structure;
 mod types;
 mod views;
@@ -97,6 +99,7 @@ pub(crate) struct Document {
     // Preserved original comment ranges, without semantic interpretation.
     #[allow(dead_code)]
     pub trivia: Vec<lexer::Trivia>,
+    pub metadata: BTreeMap<u32, crate::SourceMetadata>,
 }
 #[derive(Debug)]
 pub(crate) struct ModelDecl {
@@ -769,6 +772,7 @@ impl Parser<'_> {
             expressions: std::mem::take(&mut self.expressions),
             span: self.span(start, self.source().len()),
             trivia: std::mem::take(&mut self.trivia),
+            metadata: BTreeMap::new(),
         })
     }
 }
@@ -798,7 +802,17 @@ pub(crate) fn parse(
         diagnostics,
     };
     match parser.document() {
-        Ok(document) => Some(document),
+        Ok(mut document) => {
+            document.metadata = metadata::read(
+                sources,
+                file,
+                &parser.tokens,
+                &document.trivia,
+                parser.budget,
+                parser.diagnostics,
+            )?;
+            Some(document)
+        }
         Err(issue) => {
             parser.report(issue);
             None

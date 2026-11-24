@@ -886,6 +886,7 @@ impl Analyzer<'_, '_> {
         copy.declaration.abstract_declaration = original.declaration.is_abstract();
         copy.declaration.transient = !is_role && original.declaration.is_transient();
         copy.declaration.subdivision = original.declaration.subdivision.clone();
+        copy.declaration.source_metadata = original.declaration.source_metadata.clone();
         copy.declaration.derivations = Some(Box::new([expression]));
         Some(copy_id)
     }

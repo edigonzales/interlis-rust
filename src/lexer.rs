@@ -69,8 +69,7 @@ pub(crate) struct Token {
     pub range: Range<usize>,
 }
 
-// Source-preserving syntax data; comments have no model-checking semantics.
-#[allow(dead_code)]
+// Source-preserving syntax data.
 #[derive(Debug)]
 pub(crate) struct Trivia {
     pub kind: TriviaKind,
@@ -96,13 +95,17 @@ fn hex(source: &str, at: usize) -> Option<u16> {
     }
 }
 // INTERLIS escapes, deliberately not a JSON string decoder. Return only UTF-8 boundaries.
-fn string(source: &str, mut at: usize) -> Result<(String, usize), usize> {
+pub(crate) fn string(
+    source: &str,
+    mut at: usize,
+    multiline: bool,
+) -> Result<(String, usize), usize> {
     let mut out = String::new();
     while let Some(c) = source[at..].chars().next() {
         at += c.len_utf8();
         match c {
             '"' => return Ok((out, at)),
-            '\r' | '\n' => return Err(at),
+            '\r' | '\n' if !multiline => return Err(at),
             '\\' => {
                 let Some(c) = source[at..].chars().next() else {
                     return Err(at);
@@ -317,7 +320,7 @@ pub(crate) fn lex(
                     Kind::Invalid
                 }
             }
-            Ok(Raw::Quote) => match string(source, range.end) {
+            Ok(Raw::Quote) => match string(source, range.end, false) {
                 Ok((value, end)) => {
                     lexer.bump(end - range.end);
                     range.end = end;

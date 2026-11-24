@@ -562,6 +562,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 derived_from: None,
                 predefined: false,
                 metadata_kind: None,
+                source_metadata: None,
             },
             name_span: name.span.clone(),
             model,
@@ -1943,6 +1944,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             if self.diagnostics.limited {
                 return None;
             }
+        }
+        for id in 0..self.symbols.len() {
+            let symbol = &self.symbols[id];
+            let start = symbol.declaration.span.clone();
+            let name = symbol.name_span.clone();
+            let function = symbol.declaration.kind == Kind::Function;
+            self.symbols[id].declaration.source_metadata =
+                self.source_metadata(&start, &name, function)?;
         }
         if self.diagnostics.limited {
             return None;

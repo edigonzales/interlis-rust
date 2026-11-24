@@ -107,6 +107,31 @@ impl Analyzer<'_, '_> {
     ) -> Option<()> {
         for &(original, translated) in pairs {
             let at = self.symbols[translated].name_span.clone();
+            let a = &self.symbols[original].declaration;
+            let b = &self.symbols[translated].declaration;
+            if matches!(
+                a.type_id.map(|ty| &self.types[ty]),
+                Some(TypeInfo::Coordinate(_))
+            ) {
+                let a_crs = a
+                    .source_metadata()
+                    .and_then(|metadata| metadata.attribute("CRS"));
+                let b_crs = b
+                    .source_metadata()
+                    .and_then(|metadata| metadata.attribute("CRS"));
+                if a_crs.map(|crs| &crs.text) != b_crs.map(|crs| &crs.text) {
+                    self.diagnostics.push_related(
+                        "ILI-TRANSLATION-COORDINATE",
+                        "The translated coordinate metadata declares a different reference system",
+                        Some(b_crs.map_or_else(|| b.span.clone(), |crs| crs.span.clone())),
+                        vec![crate::RelatedLocation {
+                            span: a_crs.map_or_else(|| a.span.clone(), |crs| crs.span.clone()),
+                            message: "Original coordinate reference system".into(),
+                        }],
+                    );
+                    continue;
+                }
+            }
             let result = if self.symbols[translated].declaration.kind == Kind::Model {
                 Ok(Some(self.translation_profile_matches(
                     symbol_models[original],

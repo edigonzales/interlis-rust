@@ -6814,3 +6814,140 @@ fn generic_dependencies_never_switch_an_alternative_between_axes() {
         assert_eq!(bindings[0].generic_domain, "M.G");
     }
 }
+
+#[test]
+fn source_annotations_bind_to_their_declarations_and_keep_original_ranges() {
+    for version in ["2.3", "2.4"] {
+        let report = outcome(
+            request(vec![(
+                "metadata",
+                format!(
+                    "INTERLIS {version};\r\n/** Werk 🦊 */\r\n!!@ title=Example\r\nCONTRACTED MODEL M AT \"x\" VERSION \"1\" =\r\n\
+                     !!@ title=\"Gr\\u00fcezi;\r\n  !!@ \\\"Welt\\\"\"; empty=\"\"\r\nDOMAIN Code=TEXT*10;\r\n\
+                     E=(\r\n!!@ label=Red\r\nred,blue);\r\n\
+                     !!@ fn.param=first; fn.param=second\r\nFUNCTION Test(value:BOOLEAN):BOOLEAN;\r\n\
+                     TOPIC T = CLASS C =\r\n!!@ label=Flag\r\nflag:BOOLEAN;\r\n\
+                     !!@ label=Required\r\nMANDATORY CONSTRAINT flag;\r\nEND C;\r\n\
+                     VIEW Copy PROJECTION OF C; = ALL OF C; END Copy; END T; END M."
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let source_metadata = |name| graph.declaration(name).unwrap().source_metadata().unwrap();
+        let location = |span| report.sources().location(span).unwrap();
+        let model = source_metadata("M");
+        assert_eq!(model.documentation[0].text, "Werk 🦊");
+        assert_eq!(model.attribute("title").unwrap().text, "Example");
+        let domain = source_metadata("M.Code");
+        let title = domain.attribute("title").unwrap();
+        assert_eq!(title.text, "Grüezi;\r\n   \"Welt\"");
+        let range = location(&title.span);
+        assert_eq!(
+            &report.sources().files()[0].text()[range.start_byte as usize..range.end_byte as usize],
+            "title=\"Gr\\u00fcezi;\r\n  !!@ \\\"Welt\\\"\""
+        );
+        assert_eq!(domain.attribute("empty").unwrap().text, "");
+        let TypeInfo::Enumeration { values, .. } = graph.effective_type("M.E").unwrap() else {
+            panic!("expected enumeration");
+        };
+        assert_eq!(
+            values.elements()[0]
+                .source_metadata()
+                .unwrap()
+                .attribute("label")
+                .unwrap()
+                .text,
+            "Red"
+        );
+        assert!(values.elements()[1].source_metadata().is_none());
+        let function = source_metadata("M.Test");
+        assert_eq!(
+            function
+                .attributes
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        let original = source_metadata("M.T.C.flag").attribute("label").unwrap();
+        let copied = source_metadata("M.T.Copy.flag").attribute("label").unwrap();
+        assert_eq!(original.text, copied.text);
+        assert_eq!(
+            location(&original.span).start_byte,
+            location(&copied.span).start_byte
+        );
+        let constraint = &graph.declaration("M.T.C").unwrap().constraints()[0];
+        assert_eq!(
+            constraint
+                .source_metadata()
+                .unwrap()
+                .attribute("label")
+                .unwrap()
+                .text,
+            "Required"
+        );
+    }
+}
+
+#[test]
+fn source_annotation_errors_and_translated_crs_use_actual_comment_locations() {
+    for annotation in [
+        "key",
+        "=value",
+        "key=",
+        "key=\"open",
+        "key=\"\\q\"",
+        "key=two words",
+        "key=a,b",
+    ] {
+        outcome(
+            single(&format!("\n!!@ {annotation}\nDOMAIN D=TEXT;")),
+            Status::Rejected,
+            Some("ILI-SYNTAX"),
+        );
+    }
+    outcome(
+        single("\n!!@ fn.param=one; fn.param=two\nDOMAIN D=TEXT;"),
+        Status::Rejected,
+        Some("ILI-METADATA-CONFLICT"),
+    );
+    outcome(
+        single("\n!!@\n!!@ label=one; label=one\nDOMAIN D=TEXT;"),
+        Status::CheckedSubset,
+        None,
+    );
+    for version in ["2.3", "2.4"] {
+        let model = |target_crs| {
+            request(vec![(
+                "translated.ili",
+                format!(
+                    "INTERLIS {version}; MODEL A AT \"x\" VERSION \"1\" =\n\
+                 !!@ CRS=EPSG:2056; label=Original\nDOMAIN P=COORD 0..10,0..10; END A.\n\
+                 MODEL B AT \"x\" VERSION \"1\" TRANSLATION OF A [\"1\"] =\n\
+                 !!@ CRS={target_crs}; label=Translation\nDOMAIN Q=COORD 0..10,0..10; END B."
+                ),
+            )])
+        };
+        outcome(model("EPSG:2056"), Status::CheckedSubset, None);
+        let report = outcome(
+            model("EPSG:21781"),
+            Status::Rejected,
+            Some("ILI-TRANSLATION-COORDINATE"),
+        );
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|diag| diag.code == "ILI-TRANSLATION-COORDINATE")
+            .unwrap();
+        let range = report
+            .sources()
+            .location(diagnostic.primary.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            &report.sources().files()[0].text()[range.start_byte as usize..range.end_byte as usize],
+            "CRS=EPSG:21781"
+        );
+    }
+}

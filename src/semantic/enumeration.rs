@@ -54,6 +54,7 @@ impl Analyzer<'_, '_> {
                 name: name.value.clone(),
                 span: name.span.clone(),
                 children,
+                source_metadata: self.source_metadata(&name.span, &name.span, false)?,
             });
         }
         Some(result)
@@ -204,6 +205,7 @@ impl Analyzer<'_, '_> {
                     name: last.value.clone(),
                     span: last.span.clone(),
                     children: None,
+                    source_metadata: self.source_metadata(&item.path[0].span, &last.span, false)?,
                 });
                 siblings.elements.last_mut().expect("element just appended")
             };

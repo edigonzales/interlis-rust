@@ -2,11 +2,72 @@ use super::{
     Analyzer, BoundName, Effective, Kind, LookupError, Namespace, QualifiedName, SyntaxDecl,
 };
 use crate::{
-    MetadataBasketKind, Span, TypeInfo, TypeReference,
+    MetadataBasketKind, RelatedLocation, SourceMetadata, Span, TypeInfo, TypeReference,
     syntax::{ParameterType, Property},
 };
+use std::{collections::BTreeMap, sync::Arc};
 
 impl Analyzer<'_, '_> {
+    pub(super) fn source_metadata(
+        &mut self,
+        start: &Span,
+        name: &Span,
+        function: bool,
+    ) -> Option<Option<Arc<SourceMetadata>>> {
+        let (file, first, _) = start.sort_key();
+        let last = name.sort_key().1;
+        let Ok(index) = self
+            .documents
+            .binary_search_by_key(&file, |doc| doc.span.sort_key().0)
+        else {
+            return Some(None);
+        };
+        let mut metadata = SourceMetadata::default();
+        let mut seen = BTreeMap::new();
+        if first > last {
+            return Some(None);
+        }
+        for (_, group) in self.documents[index].metadata.range(first..=last) {
+            for attr in &group.attributes {
+                if !self.step(1 + attr.key.len() + attr.text.len(), &attr.span) {
+                    return None;
+                }
+                if !(function && attr.key == "fn.param") {
+                    match seen.entry(attr.key.as_str()) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(attr);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry) => {
+                            let previous = entry.get();
+                            if previous.text != attr.text {
+                                self.diagnostics.push_related(
+                                    "ILI-METADATA-CONFLICT",
+                                    "Conflicting values for a single-valued source meta-attribute",
+                                    Some(attr.span.clone()),
+                                    vec![RelatedLocation {
+                                        span: previous.span.clone(),
+                                        message: "First value was assigned here".into(),
+                                    }],
+                                );
+                            }
+                        }
+                    }
+                }
+                metadata.attributes.push(attr.clone());
+            }
+            for doc in &group.documentation {
+                if !self.step(1 + doc.text.len(), &doc.span) {
+                    return None;
+                }
+                metadata.documentation.push(doc.clone());
+            }
+        }
+        Some(
+            (!metadata.attributes.is_empty() || !metadata.documentation.is_empty())
+                .then(|| Arc::new(metadata)),
+        )
+    }
+
     pub(super) fn bind_metadata_parameters(&mut self, viewables: &[usize]) -> Option<()> {
         for &owner in viewables {
             let Some(SyntaxDecl::Container { parameters, .. }) = self.symbols[owner].ast else {

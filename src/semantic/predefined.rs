@@ -225,6 +225,7 @@ impl Analyzer<'_, '_> {
                         name: None,
                         expression: None,
                         span: name.span,
+                        source_metadata: None,
                         rule: ConstraintRule::Unique {
                             basket: false,
                             local_prefix: None,

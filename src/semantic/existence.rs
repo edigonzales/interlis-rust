@@ -69,6 +69,11 @@ impl Analyzer<'_, '_> {
             },
             expression: None,
             span: syntax.span.clone(),
+            source_metadata: self.source_metadata(
+                &syntax.span,
+                syntax.name.as_ref().map_or(&syntax.span, |name| &name.span),
+                false,
+            )?,
         })
     }
 

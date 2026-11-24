@@ -88,7 +88,7 @@ impl Analyzer<'_, '_> {
                         if let Some(constraint) = self.bind_constraint(
                             owner,
                             expressions,
-                            Some(name.value.as_str()),
+                            Some(name),
                             ConstraintRule::Domain,
                             constraint.expression,
                             &constraint.span,
@@ -248,7 +248,7 @@ impl Analyzer<'_, '_> {
             if let Some(constraint) = self.bind_constraint(
                 owner,
                 expressions,
-                constraint.name.as_ref().map(|name| name.value.as_str()),
+                constraint.name.as_ref(),
                 rule,
                 root,
                 &constraint.span,
@@ -266,7 +266,7 @@ impl Analyzer<'_, '_> {
         &mut self,
         owner: usize,
         expressions: &[Expression],
-        name: Option<&str>,
+        name: Option<&crate::syntax::Name>,
         rule: ConstraintRule,
         root: ExprId,
         span: &Span,
@@ -280,10 +280,15 @@ impl Analyzer<'_, '_> {
         };
         let expression = self.bind_boolean_expression(owner, expressions, root, context)?;
         Some(BoundConstraint {
-            name: name.map(str::to_owned),
+            name: name.map(|name| name.value.clone()),
             rule,
             expression: Some(expression),
             span: span.clone(),
+            source_metadata: self.source_metadata(
+                span,
+                name.map_or(span, |name| &name.span),
+                false,
+            )?,
         })
     }
 
@@ -414,6 +419,14 @@ impl Analyzer<'_, '_> {
             },
             expression,
             span: constraint.span.clone(),
+            source_metadata: self.source_metadata(
+                &constraint.span,
+                constraint
+                    .name
+                    .as_ref()
+                    .map_or(&constraint.span, |name| &name.span),
+                false,
+            )?,
         })
     }
 

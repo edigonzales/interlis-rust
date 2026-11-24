@@ -477,9 +477,13 @@ pub struct BoundConstraint {
     pub rule: ConstraintRule,
     pub expression: Option<ExpressionId>,
     pub(crate) span: Span,
+    pub(crate) source_metadata: Option<std::sync::Arc<SourceMetadata>>,
 }
 
 impl BoundConstraint {
+    pub fn source_metadata(&self) -> Option<&SourceMetadata> {
+        self.source_metadata.as_deref()
+    }
     pub fn source_span(&self) -> &Span {
         &self.span
     }
@@ -853,9 +857,14 @@ pub struct EnumerationElement {
     #[serde(skip)]
     pub(crate) span: Span,
     pub(crate) children: Option<Enumeration>,
+    #[serde(skip)]
+    pub(crate) source_metadata: Option<std::sync::Arc<SourceMetadata>>,
 }
 
 impl EnumerationElement {
+    pub fn source_metadata(&self) -> Option<&SourceMetadata> {
+        self.source_metadata.as_deref()
+    }
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -953,6 +962,34 @@ pub struct UnitFactor {
     pub value: UnitConstant,
 }
 
+/// Declared annotations in source order, with their original ranges.
+#[derive(Debug, Default)]
+pub struct SourceMetadata {
+    pub attributes: Vec<MetaAttribute>,
+    pub documentation: Vec<DocumentationComment>,
+}
+
+impl SourceMetadata {
+    pub fn attribute(&self, key: &str) -> Option<&MetaAttribute> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MetaAttribute {
+    pub key: String,
+    pub text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct DocumentationComment {
+    pub text: String,
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct Declaration {
     pub(crate) name: String,
@@ -989,6 +1026,7 @@ pub struct Declaration {
     pub(crate) derived_from: Option<TypeReference>,
     pub(crate) predefined: bool,
     pub(crate) metadata_kind: Option<MetadataBasketKind>,
+    pub(crate) source_metadata: Option<std::sync::Arc<SourceMetadata>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1019,6 +1057,9 @@ pub struct ViewInfo {
 }
 
 impl Declaration {
+    pub fn source_metadata(&self) -> Option<&SourceMetadata> {
+        self.source_metadata.as_deref()
+    }
     pub fn name(&self) -> &str {
         &self.name
     }
