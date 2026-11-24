@@ -3515,3 +3515,40 @@ fn contexts_recheck_units_and_rotation_in_each_concrete_alternative() {
         outcome(single(body), Status::Rejected, Some(code));
     }
 }
+
+#[test]
+fn coordinate_selections_check_cycles_with_one_alternative_per_generic() {
+    outcome(
+        single(
+            "DOMAIN Generic (GENERIC)=COORD NUMERIC,NUMERIC;
+             Measure=0..10 <Generic[1]>; Selected=COORD 0..10 <Measure>,0..10;
+             CONTEXT C=Generic=Selected;
+             TOPIC T=CLASS C=value:Measure; END C; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-REFSYSTEM-CYCLE"),
+    );
+    outcome(
+        single(
+            "DOMAIN Generic (GENERIC)=COORD NUMERIC,NUMERIC;
+             First=COORD 0..10 <Generic[2]>,0..10;
+             Second=COORD 0..10,0..10 <Generic[1]>;
+             CONTEXT C=Generic=First OR Second;
+             TOPIC T=DEFERRED GENERICS Generic;
+                CLASS C=value:Generic; END C;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        single(
+            "DOMAIN G1 (GENERIC)=COORD NUMERIC; G2 (GENERIC)=COORD NUMERIC;
+             First=COORD 0..10 <G2[1]>; Second=COORD 0..10 <G1[1]>;
+             CONTEXT C1=G1=First; C2=G2=Second;
+             TOPIC T=CLASS C=value:G1; END C; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-REFSYSTEM-CYCLE"),
+    );
+}

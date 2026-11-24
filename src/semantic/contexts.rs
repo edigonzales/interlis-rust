@@ -387,8 +387,21 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
                 for &alternative in choice {
+                    let selected = self.symbols[alternative].declaration.type_id?;
+                    self.check_context_reference_cycles(
+                        selected,
+                        (generic, alternative),
+                        &alternatives[model],
+                        &span,
+                    )?;
                     for &type_use in &type_uses {
                         self.validate_context_use(type_use, generic, alternative, &span)?;
+                        self.check_context_reference_cycles(
+                            type_use,
+                            (generic, alternative),
+                            &alternatives[model],
+                            &span,
+                        )?;
                     }
                 }
                 let bytes = choice
@@ -425,6 +438,106 @@ impl Analyzer<'_, '_> {
             if !local_deferred.is_empty() {
                 self.symbols[topic].declaration.deferred_generics =
                     Some(local_deferred.into_boxed_slice());
+            }
+        }
+        Some(())
+    }
+
+    fn check_context_reference_cycles(
+        &mut self,
+        source_type: usize,
+        (generic, alternative): (usize, usize),
+        alternatives: &ContextAlternatives,
+        topic: &Span,
+    ) -> Option<()> {
+        // A branch uses a single choice for every generic, even when its
+        // reference path reaches different axes of that generic.
+        type Axis = (usize, usize);
+        enum Walk {
+            Enter(Axis, Span),
+            Leave(Axis),
+            Select {
+                generic: usize,
+                axis: Axis,
+                at: Span,
+            },
+            Unselect(usize),
+        }
+
+        let mut pending = Vec::new();
+        for index in (0..reference_ranges(&self.types[source_type]).len()).rev() {
+            pending.push(Walk::Enter((source_type, index), topic.clone()));
+        }
+        let mut selected =
+            BTreeMap::from([(generic, self.symbols[alternative].declaration.type_id?)]);
+        let mut active = BTreeSet::new();
+        while let Some(next) = pending.pop() {
+            let (node, at) = match next {
+                Walk::Enter(node, at) => (node, at),
+                Walk::Leave(node) => {
+                    active.remove(&node);
+                    continue;
+                }
+                Walk::Select { generic, axis, at } => {
+                    selected.insert(generic, axis.0);
+                    pending.push(Walk::Unselect(generic));
+                    (axis, at)
+                }
+                Walk::Unselect(generic) => {
+                    selected.remove(&generic);
+                    continue;
+                }
+            };
+            if !self.step(1, &at) {
+                return None;
+            }
+            if !active.insert(node) {
+                self.diagnostics.push_related(
+                    "ILI-REFSYSTEM-CYCLE",
+                    "Selecting coordinate alternatives closes a reference-system cycle",
+                    Some(at),
+                    vec![RelatedLocation {
+                        span: self.symbols[alternative].name_span.clone(),
+                        message: "Selected coordinate alternative".into(),
+                    }],
+                );
+                return None;
+            }
+            pending.push(Walk::Leave(node));
+            let Some(reference) = reference_ranges(&self.types[node.0])
+                .get(node.1)
+                .and_then(|range| range.reference_system.as_ref())
+            else {
+                continue;
+            };
+            let Some(&target) = self.names.get(reference.domain.target_name()) else {
+                continue;
+            };
+            let at = reference.domain.span.clone();
+            let ty = self.symbols[target].declaration.type_id?;
+            let axis = match reference.axis {
+                Some(axis) => usize::from(axis - 1),
+                None if matches!(self.types[ty], TypeInfo::Numeric(_)) => 0,
+                None => continue,
+            };
+            if self.symbols[target].declaration.is_generic() {
+                if let Some(&chosen) = selected.get(&target) {
+                    pending.push(Walk::Enter((chosen, axis), at));
+                } else if let Some(choices) = alternatives.get(&target) {
+                    if !self.step(choices.domains.len(), &at) {
+                        return None;
+                    }
+                    for &candidate in choices.domains.iter().rev() {
+                        let ty = self.symbols[candidate].declaration.type_id?;
+                        pending.push(Walk::Select {
+                            generic: target,
+                            axis: (ty, axis),
+                            at: at.clone(),
+                        });
+                    }
+                }
+            } else {
+                pending.push(Walk::Enter((ty, axis), at));
             }
         }
         Some(())
