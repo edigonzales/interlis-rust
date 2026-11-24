@@ -286,8 +286,8 @@ pub enum BoundExpressionKind {
         canonical_length: usize,
     },
     This,
-    Attribute {
-        reference: TypeReference,
+    Path {
+        steps: Vec<BoundPathStep>,
     },
     RuntimeParameter {
         reference: TypeReference,
@@ -311,6 +311,30 @@ pub enum BoundExpressionKind {
     Defined {
         expression: ExpressionId,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PathSelection {
+    First,
+    Last,
+    Index(String),
+    Axis(u8),
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoundPathStep {
+    pub reference: TypeReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<PathSelection>,
+    #[serde(skip)]
+    pub(crate) selection_span: Option<Span>,
+}
+
+impl BoundPathStep {
+    pub fn selection_span(&self) -> Option<&Span> {
+        self.selection_span.as_ref()
+    }
 }
 
 #[derive(Debug)]
@@ -582,7 +606,7 @@ pub struct CoordinateType {
     pub reference_system: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NumericRange {
     pub bounds: Option<NumericBounds>,
     pub unit: Option<TypeReference>,
@@ -597,7 +621,7 @@ pub struct DomainReferenceSystem {
     pub axis: Option<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NumericBounds {
     pub lower: DecimalInfo,
     pub upper: DecimalInfo,

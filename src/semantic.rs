@@ -11,6 +11,7 @@ mod model_header;
 mod names;
 mod object_references;
 mod oid;
+mod paths;
 mod reference_systems;
 mod references;
 mod subdivisions;

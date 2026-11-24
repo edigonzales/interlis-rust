@@ -280,10 +280,28 @@ impl Serialize for ExpressionsOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
+        struct PathStep<'a> {
+            reference: Reference<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            selection: Option<&'a crate::PathSelection>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            selection_location: Option<SourceLocation>,
+        }
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Kind<'a> {
+            Path {
+                kind: &'static str,
+                steps: Vec<PathStep<'a>>,
+            },
+            Other(&'a crate::BoundExpressionKind),
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct Expression<'a> {
             value_type: crate::ExpressionType,
             #[serde(flatten)]
-            kind: &'a crate::BoundExpressionKind,
+            kind: Kind<'a>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -291,7 +309,22 @@ impl Serialize for ExpressionsOutput<'_> {
         for expression in self.0 {
             seq.serialize_element(&Expression {
                 value_type: expression.value_type,
-                kind: &expression.kind,
+                kind: match &expression.kind {
+                    crate::BoundExpressionKind::Path { steps } => Kind::Path {
+                        kind: "path",
+                        steps: steps
+                            .iter()
+                            .map(|step| PathStep {
+                                reference: project_reference(&step.reference, self.1),
+                                selection: step.selection.as_ref(),
+                                selection_location: step
+                                    .selection_span()
+                                    .and_then(|span| self.1.location(span)),
+                            })
+                            .collect(),
+                    },
+                    kind => Kind::Other(kind),
+                },
                 location: self.1.location(expression.source_span()),
             })?;
         }

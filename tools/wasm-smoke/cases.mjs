@@ -92,7 +92,7 @@ export function verifySyntax(report, text, status, code) {
     const constraint = declaration('B.T.C').constraints[0];
     const expression = report.model.expressions[constraint.expression];
     const argument = report.model.expressions[expression.arguments[0]];
-    if (constraint.name !== 'requiresActive' || expression.valueType !== 'boolean' || expression.function.targetName !== 'B.gate' || argument.reference.targetName !== 'B.T.C.active') throw new Error('Lost the bound constraint expression');
+    if (constraint.name !== 'requiresActive' || expression.valueType !== 'boolean' || expression.function.targetName !== 'B.gate' || argument.steps[0].reference.targetName !== 'B.T.C.active') throw new Error('Lost the bound constraint expression');
     const model = report.model.models[1];
     if (!model.noIncrementalTransfer || model.charset !== 'UTF-8' || model.declaredCharset !== 'csUTF8' || model.effectiveXmlNamespace !== 'http://www.interlis.ch/xtf/2.4/B') throw new Error('Lost model options');
   }

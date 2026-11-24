@@ -17,16 +17,16 @@ mod wire;
 pub use limits::Limits;
 pub use model::{
     AlignmentKind, AssociationInfo, AttributeSubdivision, AxisRotation, BinaryOperator,
-    BlackboxKind, BoundConstraint, BoundExpression, BoundExpressionKind, Cardinality,
-    ClassValueKind, ClassValueType, CollectionKind, CollectionType, ConstraintRule, ContextMapping,
-    CoordinateKind, CoordinateType, DecimalInfo, Declaration, DeclarationKind,
+    BlackboxKind, BoundConstraint, BoundExpression, BoundExpressionKind, BoundPathStep,
+    Cardinality, ClassValueKind, ClassValueType, CollectionKind, CollectionType, ConstraintRule,
+    ContextMapping, CoordinateKind, CoordinateType, DecimalInfo, Declaration, DeclarationKind,
     DomainReferenceSystem, Enumeration, EnumerationElement, EnumerationOrder, ExpressionId,
     ExpressionType, FixedTextFormat, FunctionInfo, GeometryKind, GeometryType, LanguageVersion,
     LineForm, ModelGraph, ModelInfo, ModelKind, NumericBounds, NumericDirection, NumericRange,
-    ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance, PlausibilityDirection,
-    ReferenceType, RoleInfo, RoleStrength, StructureType, TemporalBound, TemporalKind,
-    TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator, UnitConstant,
-    UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
+    ObjectTarget, OidKind, OidRule, OidRules, OidType, OverlapTolerance, PathSelection,
+    PlausibilityDirection, ReferenceType, RoleInfo, RoleStrength, StructureType, TemporalBound,
+    TemporalKind, TemporalRange, TopicGenericBinding, TypeInfo, TypeReference, UnaryOperator,
+    UnitConstant, UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
 pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};

@@ -3555,10 +3555,10 @@ fn scalar_constraints_bind_inherited_attributes_and_domain_values() {
         _ => panic!("expected a Boolean conjunction"),
     };
     let lhs = graph.expression(lhs).unwrap();
-    let BoundExpressionKind::Attribute { reference } = &lhs.kind else {
+    let BoundExpressionKind::Path { steps } = &lhs.kind else {
         panic!("expected an inherited attribute");
     };
-    assert_eq!(reference.target_name(), "M.T.Base.flag");
+    assert_eq!(steps[0].reference.target_name(), "M.T.Base.flag");
     let location = report.sources().location(lhs.source_span()).unwrap();
     let original = report.sources().files()[0].text();
     assert_eq!(
@@ -3785,6 +3785,89 @@ fn function_text_arguments_use_canonical_length_and_undefined_values() {
         Status::Rejected,
         Some("ILI-FUNCTION-ARGUMENT"),
     );
+}
+
+#[test]
+fn object_paths_bind_structure_reference_list_and_coordinate_steps() {
+    use interlis::{BoundExpressionKind, PathSelection};
+    let report = outcome(
+        single(
+            "TOPIC T=
+               STRUCTURE Part=ready:BOOLEAN; END Part;
+               CLASS Target=label:TEXT*4; END Target;
+               CLASS Item=parts:LIST {0..3} OF Part; single:Part;
+                   position:COORD 0.0..9.0,0.00..8.00;
+                   pointer:REFERENCE TO Target;
+                   MANDATORY CONSTRAINT parts[FIRST]->ready AND single->ready;
+                   MANDATORY CONSTRAINT pointer->label == \"test\";
+                   MANDATORY CONSTRAINT position[2] > 0;
+               END Item;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let rules = graph.declaration("M.T.Item").unwrap().constraints();
+    let first_operand = |id| match graph.expression(id).unwrap().kind {
+        BoundExpressionKind::Binary { left, .. } => left,
+        _ => panic!("expected a binary expression"),
+    };
+    let item = graph
+        .expression(first_operand(rules[0].expression))
+        .unwrap();
+    let BoundExpressionKind::Path { steps } = &item.kind else {
+        panic!("expected a path");
+    };
+    assert_eq!(steps[0].reference.target_name(), "M.T.Item.parts");
+    assert!(matches!(steps[0].selection, Some(PathSelection::First)));
+    assert_eq!(steps[1].reference.target_name(), "M.T.Part.ready");
+    let span = report
+        .sources()
+        .location(steps[0].selection_span().unwrap())
+        .unwrap();
+    let source = report.sources().files()[0].text();
+    assert_eq!(
+        &source[span.start_byte as usize..span.end_byte as usize],
+        "FIRST"
+    );
+    let item = graph
+        .expression(first_operand(rules[1].expression))
+        .unwrap();
+    let BoundExpressionKind::Path { steps } = &item.kind else {
+        panic!("expected a path");
+    };
+    assert_eq!(steps[1].reference.target_name(), "M.T.Target.label");
+    let Some(TypeInfo::Numeric(axis)) =
+        graph.expression_declared_type(first_operand(rules[2].expression))
+    else {
+        panic!("expected the selected coordinate axis");
+    };
+    assert_eq!(axis.bounds.as_ref().unwrap().upper.original(), "8.00");
+}
+
+#[test]
+fn object_path_selectors_and_traversal_enforce_actual_shapes() {
+    for (path, code) in [
+        ("parts[0]->ready", "ILI-PATH-INDEX"),
+        ("parts[4]->ready", "ILI-PATH-INDEX"),
+        ("bag[FIRST]->ready", "ILI-PATH-SELECTOR"),
+        ("parts->ready", "ILI-PATH-MULTIPLICITY"),
+        ("point[3] > 0", "ILI-PATH-AXIS"),
+        ("label->ready", "ILI-PATH-TRAVERSAL"),
+        ("parts[LAST]->absent", "ILI-PATH-NAME"),
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC T=STRUCTURE Piece=ready:BOOLEAN; END Piece;
+                 CLASS Item=parts:LIST {{0..3}} OF Piece; bag:BAG {{0..3}} OF Piece;
+                 point:COORD 0..1,0..1; label:TEXT*5;
+                 MANDATORY CONSTRAINT {path}; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
 }
 
 #[test]

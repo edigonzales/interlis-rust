@@ -5,7 +5,7 @@ use crate::{
     TypeReference, UnitConstant,
     syntax::{
         ConstraintKind, ConstraintSyntax, DecimalConstant, ExprId, Expression, ExpressionKind,
-        LiteralSyntax, ObjectPath, PathElement, SpecialPath,
+        LiteralSyntax,
     },
 };
 use std::collections::BTreeMap;
@@ -416,64 +416,6 @@ impl Analyzer<'_, '_> {
             }
         };
         Some((kind, value_type, None))
-    }
-
-    fn expression_path(
-        &mut self,
-        owner: usize,
-        path: &ObjectPath,
-    ) -> Option<(BoundKind, ValueType, Option<usize>)> {
-        let elements = match path.elements.split_first() {
-            Some((PathElement::Special(special), tail)) if special.value == SpecialPath::This => {
-                if tail.is_empty() {
-                    let type_id = self.symbols[owner].declaration.type_id;
-                    let value_type =
-                        type_id.map_or(ValueType::Object, |ty| scalar_type(&self.types[ty]));
-                    return Some((BoundKind::This, value_type, type_id));
-                }
-                if self.symbols[owner].declaration.kind == Kind::Domain {
-                    self.unsupported_expression(&path.span);
-                    return None;
-                }
-                tail
-            }
-            _ => &path.elements,
-        };
-        let [
-            PathElement::Name {
-                name,
-                selector: None,
-                ..
-            },
-        ] = elements
-        else {
-            self.unsupported_expression(&path.span);
-            return None;
-        };
-        match self.visible_name(owner, &name.value, Some(&[Kind::Attribute]), &name.span) {
-            Ok(Some(target)) => {
-                let type_id = self.symbols[target].declaration.type_id?;
-                let reference = self.reference_to_symbol(owner, target, name)?;
-                Some((
-                    BoundKind::Attribute { reference },
-                    scalar_type(&self.types[type_id]),
-                    Some(type_id),
-                ))
-            }
-            Err(LookupError::Limit) => None,
-            _ => {
-                if self.has_role_access(owner, &name.value, &name.span)? {
-                    self.unsupported_expression(&path.span);
-                } else {
-                    self.diagnostics.push(
-                        "ILI-PATH-NAME",
-                        "The attribute is absent from this object context",
-                        Some(name.span.clone()),
-                    );
-                }
-                None
-            }
-        }
     }
 
     pub(super) fn expression_name(
