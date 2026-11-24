@@ -4991,6 +4991,48 @@ fn temporal_expressions_check_layout_bounds_and_type_compatibility() {
 }
 
 #[test]
+fn predefined_temporal_types_fit_explicit_ranges_covering_their_full_values() {
+    for version in ["2.3", "2.4"] {
+        for (predefined, lower, upper) in [
+            ("XMLDate", "1582-01-01", "2999-12-31"),
+            ("XMLTime", "00:00:00.000", "23:59:59.999"),
+            (
+                "XMLDateTime",
+                "1582-01-01T00:00:00.000",
+                "2999-12-31T23:59:59.999",
+            ),
+        ] {
+            outcome(
+                request(vec![(
+                    "memory:///temporal.ili",
+                    format!(
+                        "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                         DOMAIN Full=FORMAT INTERLIS.{predefined} \"{lower}\"..\"{upper}\";
+                         FUNCTION accepts(date:Full):BOOLEAN;
+                         TOPIC T=CLASS Item=value:INTERLIS.{predefined};
+                             MANDATORY CONSTRAINT accepts(value);
+                         END Item; END T; END M."
+                    ),
+                )]),
+                Status::CheckedSubset,
+                None,
+            );
+        }
+    }
+    outcome(
+        single(
+            "DOMAIN Narrow=FORMAT INTERLIS.XMLDate \"1583-01-01\"..\"2999-12-31\";
+             FUNCTION accepts(date:Narrow):BOOLEAN;
+             TOPIC T=CLASS Item=value:INTERLIS.XMLDate;
+               MANDATORY CONSTRAINT accepts(value);
+             END Item; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ARGUMENT"),
+    );
+}
+
+#[test]
 fn geometry_measurements_require_matching_family_and_multiplicity() {
     let declarations = "DOMAIN Vertex=COORD 0.000..100.000,0.000..100.000;
         TOPIC T=CLASS Item=

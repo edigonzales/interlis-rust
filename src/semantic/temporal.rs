@@ -284,9 +284,16 @@ pub(super) fn temporal_specializes(own: &TypeInfo, base: &TypeInfo) -> bool {
     let Some(base_range) = base_range else {
         return true;
     };
-    own_range.is_some_and(|own_range| {
-        let len = base_range.lower.components.len();
-        own_range.lower.components[..len] >= base_range.lower.components[..]
-            && own_range.upper.components[..len] <= base_range.upper.components[..]
-    })
+    let (lower, upper): (&[u16], &[u16]) = if let Some(own_range) = own_range {
+        (&own_range.lower.components, &own_range.upper.components)
+    } else {
+        match own_kind {
+            Date => (&[1582, 1, 1], &[2999, 12, 31]),
+            TemporalKind::TimeOfDay => (&[0, 0, 0, 0], &[23, 59, 59, 999]),
+            DateTime => (&[1582, 1, 1, 0, 0, 0, 0], &[2999, 12, 31, 23, 59, 59, 999]),
+        }
+    };
+    let len = base_range.lower.components.len();
+    lower[..len] >= base_range.lower.components[..]
+        && upper[..len] <= base_range.upper.components[..]
 }
