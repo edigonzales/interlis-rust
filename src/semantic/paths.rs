@@ -93,8 +93,11 @@ impl Analyzer<'_, '_> {
         })
     }
 
-    pub(super) fn bind_attribute_path_owners(&mut self) -> Option<()> {
-        for id in 0..self.symbols.len() {
+    pub(super) fn bind_attribute_path_owners(
+        &mut self,
+        symbols: std::ops::Range<usize>,
+    ) -> Option<()> {
+        for id in symbols {
             let symbol = &self.symbols[id];
             if symbol.declaration.kind != Kind::Attribute {
                 continue;

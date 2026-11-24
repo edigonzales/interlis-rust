@@ -82,58 +82,8 @@ impl Analyzer<'_, '_> {
             }
         }
         for owner in 0..self.symbols.len() {
-            let mut bound = Vec::new();
-            let inline: &[ConstraintSyntax] = match self.symbols[owner].ast {
-                Some(SyntaxDecl::Container { constraints, .. }) => constraints,
-                Some(SyntaxDecl::Association(association)) => &association.constraints,
-                Some(SyntaxDecl::View(view)) => &view.constraints,
-                Some(SyntaxDecl::Domain {
-                    constraints, span, ..
-                }) => {
-                    let expressions = documents[&span.sort_key().0];
-                    let mut names = BTreeMap::new();
-                    for constraint in constraints {
-                        let name = &constraint.name;
-                        if !self.step(1 + name.value.len(), &name.span) {
-                            return None;
-                        }
-                        if let Some(first) = names.insert(name.value.as_str(), &name.span) {
-                            self.duplicate(&name.span, first);
-                            continue;
-                        }
-                        if let Some(constraint) = self.bind_constraint(
-                            owner,
-                            expressions,
-                            Some(name),
-                            ConstraintRule::Domain,
-                            constraint.expression,
-                            &constraint.span,
-                        ) {
-                            bound.push(constraint);
-                        }
-                        if self.diagnostics.limited {
-                            return None;
-                        }
-                    }
-                    &[]
-                }
-                _ => &[],
-            };
             let external = attached.remove(&owner).unwrap_or_default();
-            if !inline.is_empty() || !external.is_empty() {
-                self.bind_named_constraints(
-                    owner,
-                    documents,
-                    inline
-                        .iter()
-                        .map(|constraint| (constraint, None))
-                        .chain(external),
-                    &mut bound,
-                )?;
-            }
-            if !bound.is_empty() {
-                self.symbols[owner].declaration.constraints = Some(bound.into_boxed_slice());
-            }
+            self.bind_local_constraints(owner, documents, external)?;
         }
         let mut by_topic = BTreeMap::new();
         for ((topic, target), constraints) in inherited {
@@ -150,6 +100,66 @@ impl Analyzer<'_, '_> {
         for (topic, mut constraints) in by_topic {
             constraints.sort_by_key(|constraint| constraint.source_span().sort_key());
             self.symbols[topic].declaration.constraints = Some(constraints.into_boxed_slice());
+        }
+        Some(())
+    }
+
+    pub(super) fn bind_local_constraints<'syntax>(
+        &mut self,
+        owner: usize,
+        documents: &BTreeMap<u32, &[Expression]>,
+        external: Vec<(&'syntax ConstraintSyntax, Option<&'syntax QualifiedName>)>,
+    ) -> Option<()> {
+        let mut bound = Vec::new();
+        let inline: &[ConstraintSyntax] = match self.symbols[owner].ast {
+            Some(SyntaxDecl::Container { constraints, .. }) => constraints,
+            Some(SyntaxDecl::Association(association)) => &association.constraints,
+            Some(SyntaxDecl::View(view)) => &view.constraints,
+            Some(SyntaxDecl::Domain {
+                constraints, span, ..
+            }) => {
+                let expressions = documents[&span.sort_key().0];
+                let mut names = BTreeMap::new();
+                for constraint in constraints {
+                    let name = &constraint.name;
+                    if !self.step(1 + name.value.len(), &name.span) {
+                        return None;
+                    }
+                    if let Some(first) = names.insert(name.value.as_str(), &name.span) {
+                        self.duplicate(&name.span, first);
+                        continue;
+                    }
+                    if let Some(constraint) = self.bind_constraint(
+                        owner,
+                        expressions,
+                        Some(name),
+                        ConstraintRule::Domain,
+                        constraint.expression,
+                        &constraint.span,
+                    ) {
+                        bound.push(constraint);
+                    }
+                    if self.diagnostics.limited {
+                        return None;
+                    }
+                }
+                &[]
+            }
+            _ => &[],
+        };
+        if !inline.is_empty() || !external.is_empty() {
+            self.bind_named_constraints(
+                owner,
+                documents,
+                inline
+                    .iter()
+                    .map(|constraint| (constraint, None))
+                    .chain(external),
+                &mut bound,
+            )?;
+        }
+        if !bound.is_empty() {
+            self.symbols[owner].declaration.constraints = Some(bound.into_boxed_slice());
         }
         Some(())
     }

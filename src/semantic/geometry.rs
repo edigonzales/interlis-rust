@@ -29,23 +29,39 @@ impl Analyzer<'_, '_> {
         let mut users: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut visited = BTreeSet::new();
         let mut affected = BTreeSet::new();
-        while let Some(structure) = pending.pop() {
-            if !visited.insert(structure) || symbols.contains_key(&structure) {
+        while let Some(item) = pending.pop() {
+            if !visited.insert(item) || symbols.contains_key(&item) {
                 continue;
             }
             if !self.step(1, at) {
                 return None;
             }
-            let mut structures = BTreeSet::new();
-            structures.extend(self.symbols[structure].base_scope);
-            let mut types = self.symbols[structure]
-                .declaration
+            let declaration = &self.symbols[item].declaration;
+            let members = declaration
                 .effective_attributes
                 .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|&member| self.symbols[member].declaration.type_id)
-                .collect::<Vec<_>>();
+                .unwrap_or_default();
+            if self
+                .work
+                .charge(u32::try_from(members.len()).ok()?)
+                .is_err()
+            {
+                self.diagnostics
+                    .limit("Semantic work budget exceeded", Some(at.clone()));
+                return None;
+            }
+            let mut dependencies = BTreeSet::new();
+            dependencies.extend(self.symbols[item].base_scope);
+            let mut types = Vec::new();
+            for id in std::iter::once(item).chain(members.iter().copied()) {
+                let value = &self.symbols[id].declaration;
+                types.extend(value.type_id);
+                for link in value.reference.iter().chain(value.base_reference.iter()) {
+                    if let Some(dependency) = self.segment_dependency(link) {
+                        dependencies.insert(dependency);
+                    }
+                }
+            }
             let mut seen = BTreeSet::new();
             while let Some(ty) = types.pop() {
                 if !seen.insert(ty) {
@@ -55,25 +71,23 @@ impl Analyzer<'_, '_> {
                     return None;
                 }
                 if ty == placeholder {
-                    affected.insert(structure);
+                    affected.insert(item);
                 }
                 let (links, children) = segment_type_links(&self.types[ty]);
                 types.extend(children);
                 for link in links {
-                    if self.is_line_coord_reference(link, placeholder) {
-                        affected.insert(structure);
+                    if link.target_name() == "INTERLIS.LineCoord" {
+                        affected.insert(item);
                     }
-                    if let Some(&target) = self.names.get(link.target_name())
-                        && self.symbols[target].declaration.kind == Kind::Structure
-                    {
-                        structures.insert(target);
+                    if let Some(dependency) = self.segment_dependency(link) {
+                        dependencies.insert(dependency);
                     }
                 }
             }
-            for target in structures {
-                users.entry(target).or_default().push(structure);
+            for target in dependencies {
+                users.entry(target).or_default().push(item);
                 if symbols.contains_key(&target) {
-                    affected.insert(structure);
+                    affected.insert(item);
                 } else {
                     pending.push(target);
                 }
@@ -93,12 +107,27 @@ impl Analyzer<'_, '_> {
         let mut members = Vec::new();
         for &original in &affected {
             let name = self.symbols[original].declaration.name.clone();
-            let contextual = self.geometry_structure(
-                row,
-                &format!("$Segment{original}"),
-                &name,
-                Some(original),
-            )?;
+            let key = format!("$Segment{original}");
+            if self.symbols[original].declaration.kind == Kind::Domain {
+                let data = &self.symbols[original];
+                let synthetic = Name {
+                    value: key,
+                    span: Span::predefined(),
+                };
+                let id = self.add(
+                    Kind::Domain,
+                    &synthetic,
+                    &synthetic.span,
+                    Some(row),
+                    data.model,
+                    data.declaration.declared_mandatory,
+                )?;
+                self.symbols[id].declaration.name = name;
+                symbols.insert(original, id);
+                members.push((original, id));
+                continue;
+            }
+            let contextual = self.geometry_structure(row, &key, &name, Some(original))?;
             symbols.insert(original, contextual);
             self.symbols[contextual].model = self.symbols[original].model;
             self.symbols[contextual].ast = self.symbols[original].ast;
@@ -152,7 +181,8 @@ impl Analyzer<'_, '_> {
                 continue;
             }
             let (links, children) = segment_type_links(&self.types[ty]);
-            let changed = children.iter().any(|id| types.contains_key(id))
+            let changed = matches!(self.types[ty], TypeInfo::AttributePath(_))
+                || children.iter().any(|id| types.contains_key(id))
                 || links.iter().any(|link| {
                     self.is_line_coord_reference(link, placeholder)
                         || self
@@ -180,12 +210,16 @@ impl Analyzer<'_, '_> {
                 .reference
                 .as_ref()
                 .map(|link| self.segment_reference(link, &symbols, vertex, placeholder));
+            let declared_base = declaration
+                .base_reference
+                .as_ref()
+                .map(|link| self.segment_reference(link, &symbols, vertex, placeholder));
             let base = from.base_scope.map(|id| *symbols.get(&id).unwrap_or(&id));
             let source = self.geometry_symbol_reference(row, original)?;
             let base_reference = if let Some(base) = base {
                 Some(self.geometry_symbol_reference(row, base)?)
             } else {
-                None
+                declared_base
             };
             let declaration = &self.symbols[original].declaration;
             let data = (
@@ -216,6 +250,9 @@ impl Analyzer<'_, '_> {
             ) = data;
         }
         for original in affected {
+            if self.symbols[original].declaration.kind == Kind::Domain {
+                continue;
+            }
             let copied = symbols[&original];
             let base = self.symbols[original]
                 .base_scope
@@ -275,6 +312,17 @@ impl Analyzer<'_, '_> {
             })
     }
 
+    fn segment_dependency(&self, reference: &TypeReference) -> Option<usize> {
+        self.names
+            .get(reference.target_name())
+            .copied()
+            .filter(|&id| {
+                let declaration = &self.symbols[id].declaration;
+                declaration.kind == Kind::Structure
+                    || declaration.kind == Kind::Domain && declaration.type_id.is_some()
+            })
+    }
+
     fn segment_reference(
         &self,
         reference: &TypeReference,
@@ -283,16 +331,16 @@ impl Analyzer<'_, '_> {
         placeholder: usize,
     ) -> TypeReference {
         let mut result = reference.clone();
-        if self.is_line_coord_reference(reference, placeholder) {
-            result.target = vertex.target.clone();
-            result.predefined_language = vertex.predefined_language;
-        } else if let Some(&id) = self
+        if let Some(&id) = self
             .names
             .get(reference.target_name())
             .and_then(|id| symbols.get(id))
         {
             result.target = self.symbols[id].declaration.qualified.clone();
             result.predefined_language = None;
+        } else if self.is_line_coord_reference(reference, placeholder) {
+            result.target = vertex.target.clone();
+            result.predefined_language = vertex.predefined_language;
         }
         result
     }
@@ -392,6 +440,7 @@ impl Analyzer<'_, '_> {
                         }
                         FormattedPart::Structure(part) => {
                             part.attribute = reference(&part.attribute);
+                            part.format = reference(&part.format);
                             part.type_id = id(part.type_id);
                         }
                     }
@@ -1109,6 +1158,7 @@ fn segment_type_links(ty: &TypeInfo) -> (Vec<&TypeReference>, Vec<usize>) {
                     FormattedPart::Numeric { attribute, .. } => links.push(attribute),
                     FormattedPart::Structure(part) => {
                         links.push(&part.attribute);
+                        links.push(&part.format);
                         children.push(part.type_id);
                     }
                 }

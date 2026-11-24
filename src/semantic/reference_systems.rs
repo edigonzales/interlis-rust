@@ -72,9 +72,9 @@ impl Analyzer<'_, '_> {
         )))
     }
 
-    pub(super) fn validate_domain_reference_systems(&mut self) -> Option<()> {
+    pub(super) fn validate_domain_reference_systems(&mut self, start: usize) -> Option<()> {
         let mut edges = BTreeMap::new();
-        for id in 0..self.types.len() {
+        for id in start..self.types.len() {
             let ranges = reference_ranges(&self.types[id]);
             for index in 0..ranges.len() {
                 let range = &reference_ranges(&self.types[id])[index];

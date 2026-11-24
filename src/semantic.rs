@@ -1862,8 +1862,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         break None;
                     }
                     Some(Target::Predefined(
-                        name @ ("LineCoord" | "NOOID" | "ANYOID" | "I32OID" | "STANDARDOID"
-                        | "UUIDOID"),
+                        name @ ("LineCoord" | "GregorianYear" | "NOOID" | "ANYOID" | "I32OID"
+                        | "STANDARDOID" | "UUIDOID"),
                     )) => {
                         let declaration = &mut self.symbols[current].declaration;
                         declaration.base_reference = declaration.reference.take();
@@ -2077,7 +2077,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         }
         self.bind_functions()?;
-        self.validate_domain_reference_systems()?;
+        self.validate_domain_reference_systems(0)?;
+        let reference_types = self.types.len();
         let expressions: BTreeMap<_, _> = self
             .documents
             .iter()
@@ -2089,15 +2090,32 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         let first_view_type = self.types.len();
         viewables.extend(self.bind_views(&expressions)?);
         self.validate_formatted_types(first_view_type, &mut abstract_formats)?;
+        let view_types = self.types.len();
         self.validate_reference_types(&viewables)?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;
-        self.bind_attribute_path_owners()?;
-        self.bind_attribute_derivations(&expressions)?;
+        let mut attributes_bound = self.symbols.len();
+        self.bind_attribute_path_owners(0..attributes_bound)?;
+        self.bind_attribute_derivations(0..attributes_bound, &expressions)?;
         self.bind_association_derivations(&viewables, &expressions)?;
-        self.validate_derivations()?;
+        let mut constraints_bound = self.symbols.len();
         self.bind_constraints(&expressions)?;
         self.bind_graphics(&expressions)?;
+        // Inline inspections can materialize segment structures while binding
+        // expressions. Finish their declarations before exposing the graph.
+        while attributes_bound < self.symbols.len() || constraints_bound < self.symbols.len() {
+            let end = self.symbols.len();
+            self.bind_attribute_path_owners(attributes_bound..end)?;
+            self.bind_attribute_derivations(attributes_bound..end, &expressions)?;
+            for owner in constraints_bound..end {
+                self.bind_local_constraints(owner, &expressions, Vec::new())?;
+            }
+            attributes_bound = end;
+            constraints_bound = end;
+        }
+        self.validate_formatted_types(view_types, &mut abstract_formats)?;
+        self.validate_domain_reference_systems(reference_types)?;
+        self.validate_derivations()?;
         if !self.diagnostics.rejected && !self.diagnostics.incomplete {
             self.bind_translations()?;
         }

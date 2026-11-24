@@ -2121,16 +2121,24 @@ fn custom_line_forms_bind_segment_types_and_their_inherited_endpoint() {
 #[test]
 fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
     for (edition, prefix) in [("2.3", "CONTRACTED"), ("2.4", "")] {
+        let domain_constraint = if edition == "2.4" {
+            "CONSTRAINTS present: DEFINED(THIS);"
+        } else {
+            ";"
+        };
         let report = outcome(
             request(vec![(
                 "segments.ili",
                 format!(
                     r#"INTERLIS {edition}; {prefix} MODEL M AT "x" VERSION "1" =
                 STRUCTURE External=label:TEXT; END External;
-                STRUCTURE Point (ABSTRACT)=position (ABSTRACT):INTERLIS.LineCoord; END Point;
-                STRUCTURE Bend EXTENDS INTERLIS.LineSegment=
+                DOMAIN PointPosition (ABSTRACT) EXTENDS INTERLIS.LineCoord=MANDATORY
+                    {domain_constraint}
+                STRUCTURE Point (ABSTRACT)=position (ABSTRACT):PointPosition; END Point;
+                STRUCTURE Bend (ABSTRACT) EXTENDS INTERLIS.LineSegment=
                     control:Point;
                     caption:External;
+                    duplicate (ABSTRACT):INTERLIS.LineCoord := SegmentEndPoint;
                     MANDATORY CONSTRAINT DEFINED(control->position);
                 END Bend;
                 LINE FORM Custom:Bend;
@@ -2140,6 +2148,7 @@ fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
                     CLASS Track=
                         local:POLYLINE WITH (STRAIGHTS,Custom) VERTEX LocalVertex;
                         other:POLYLINE WITH (Custom) VERTEX OtherVertex;
+                        MANDATORY CONSTRAINT DEFINED(INSPECTION OF Track->local);
                     END Track;
                     VIEW LocalLine INSPECTION OF line~Track->local; =
                         endPoint := line->Segments[FIRST]->SegmentEndPoint;
@@ -2157,6 +2166,7 @@ fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
         for (view, vertex, lower) in [
             ("M.T.LocalLine", "M.LocalVertex", "0.0"),
             ("M.T.OtherLine", "M.OtherVertex", "10.0"),
+            ("M.T.Track", "M.LocalVertex", "0.0"),
         ] {
             let contextual = graph
                 .declarations()
@@ -2182,6 +2192,21 @@ fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
             );
             let control = attributes[1].type_reference().unwrap().target_name();
             let position = graph.effective_attributes(control).unwrap().next().unwrap();
+            let domain = graph
+                .declaration(position.type_reference().unwrap().target_name())
+                .unwrap();
+            assert_eq!(
+                domain.derived_from().unwrap().target_name(),
+                "M.PointPosition"
+            );
+            assert_eq!(domain.base_reference().unwrap().target_name(), vertex);
+            assert_eq!(
+                domain
+                    .constraints()
+                    .first()
+                    .and_then(|rule| rule.name.as_deref()),
+                (edition == "2.4").then_some("present")
+            );
             let TypeInfo::Coordinate(ty) = graph.effective_type(position.qualified_name()).unwrap()
             else {
                 panic!("expected the contextual coordinate");
@@ -2199,6 +2224,14 @@ fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
                 panic!("expected contextual path")
             };
             assert_eq!(steps[1].reference.target_name(), position.qualified_name());
+            let duplicate = graph.expression(attributes[3].derivations()[0]).unwrap();
+            let interlis::BoundExpressionKind::Path { steps } = &duplicate.kind else {
+                panic!("expected the contextual derivation");
+            };
+            assert_eq!(
+                steps[0].reference.target_name(),
+                attributes[0].qualified_name()
+            );
         }
         assert_eq!(
             graph
@@ -2207,7 +2240,7 @@ fn custom_segment_inspections_substitute_the_vertex_in_dependent_structures() {
                 .type_reference()
                 .unwrap()
                 .target_name(),
-            "INTERLIS.LineCoord"
+            "M.PointPosition"
         );
     }
 }
@@ -8115,6 +8148,7 @@ fn nested_predefined_temporal_formats_preserve_layouts_and_reference_systems() {
                     r#"
                 INTERLIS {edition}; MODEL A AT "x" VERSION "1" =
                 DOMAIN LocalDate=FORMAT INTERLIS.XMLDate "2000-01-01".."2001-12-31";
+                    CalendarYear EXTENDS INTERLIS.GregorianYear=MANDATORY;
                 STRUCTURE Pair=start:INTERLIS.GregorianDate; at:INTERLIS.UTC; END Pair;
                 DOMAIN Stamp=FORMAT BASED ON Pair (start/LocalDate "@" at/INTERLIS.XMLTime)
                     "{first}@{lower}".."2001-12-31@23:59:59.999";
@@ -8138,6 +8172,10 @@ fn nested_predefined_temporal_formats_preserve_layouts_and_reference_systems() {
             panic!("expected the predefined year range");
         };
         assert_eq!(year.bounds.as_ref().unwrap().lower.original(), "1582");
+        assert!(matches!(
+            graph.effective_type("A.CalendarYear"),
+            Some(TypeInfo::Numeric(_))
+        ));
         assert_eq!(
             year.reference_system
                 .as_ref()

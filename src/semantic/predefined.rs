@@ -219,12 +219,30 @@ impl Analyzer<'_, '_> {
             return None;
         };
         let template = self.predefined_geometry_structure(owner, "LineGeometry", at)?;
-        let row = self.geometry_structure(
-            owner,
-            &format!("$LineGeometry{geometry}"),
-            "LineGeometry",
-            Some(template),
-        )?;
+        let key = format!("$LineGeometry{geometry}");
+        let mut ancestor = Some(owner);
+        let mut active_row = None;
+        while let Some(scope) = ancestor {
+            if !self.step(1, at) {
+                return None;
+            }
+            let declaration = &self.symbols[scope].declaration;
+            if declaration.name == "LineGeometry"
+                && declaration.qualified.rsplit('.').next() == Some(key.as_str())
+                && declaration
+                    .derived_from()
+                    .is_some_and(|origin| origin.target_name() == "INTERLIS.LineGeometry")
+            {
+                active_row = Some(scope);
+                break;
+            }
+            ancestor = declaration.parent;
+        }
+        let row = if let Some(row) = active_row {
+            row
+        } else {
+            self.geometry_structure(owner, &key, "LineGeometry", Some(template))?
+        };
         if self.symbols[row].declaration.effective_attributes.is_none() {
             let mut base_segment = None;
             let mut start = None;

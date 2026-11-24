@@ -377,9 +377,10 @@ impl Analyzer<'_, '_> {
 
     pub(super) fn bind_attribute_derivations(
         &mut self,
+        symbols: std::ops::Range<usize>,
         documents: &BTreeMap<u32, &[syntax::Expression]>,
     ) -> Option<()> {
-        for id in 0..self.symbols.len() {
+        for id in symbols.clone() {
             let Some(SyntaxDecl::Attribute {
                 derivations,
                 properties,
@@ -462,7 +463,7 @@ impl Analyzer<'_, '_> {
             }
             symbol.declaration.derivations = Some(bound.into_boxed_slice());
         }
-        for id in 0..self.symbols.len() {
+        for id in symbols {
             if self.symbols[id].declaration.kind == Kind::Attribute
                 && let Some(base) = self.symbols[id].base_scope
                 && self.symbols[base].declaration.is_final()
