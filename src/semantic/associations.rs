@@ -550,6 +550,12 @@ impl Analyzer<'_, '_> {
         at: &Span,
     ) -> Result<Option<usize>, super::LookupError> {
         use super::LookupError;
+        if !matches!(
+            self.symbols[scope].declaration.kind,
+            Kind::Class | Kind::Association
+        ) {
+            return Ok(None);
+        }
         let owner_topic = self.containing_topic(owner);
         let object_topic = self.containing_topic(scope);
         let mut candidates = Vec::new();

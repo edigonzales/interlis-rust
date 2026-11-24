@@ -430,12 +430,28 @@ impl Serialize for DeclarationsOutput<'_> {
             location: Option<SourceLocation>,
         }
         #[derive(Serialize)]
+        struct RequiredPath<'a> {
+            viewable: Reference<'a>,
+            path: crate::ExpressionId,
+        }
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Rule<'a> {
+            Ordinary(&'a crate::ConstraintRule),
+            Existence {
+                kind: &'static str,
+                #[serde(rename = "sourcePath")]
+                source_path: crate::ExpressionId,
+                required: Vec<RequiredPath<'a>>,
+            },
+        }
+        #[derive(Serialize)]
         struct Constraint<'a> {
             name: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             expression: Option<crate::ExpressionId>,
             #[serde(flatten)]
-            rule: &'a crate::ConstraintRule,
+            rule: Rule<'a>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
@@ -551,7 +567,23 @@ impl Serialize for DeclarationsOutput<'_> {
                     .iter()
                     .map(|constraint| Constraint {
                         name: constraint.name.as_deref(),
-                        rule: &constraint.rule,
+                        rule: match &constraint.rule {
+                            crate::ConstraintRule::Existence {
+                                source_path,
+                                required,
+                            } => Rule::Existence {
+                                kind: "existence",
+                                source_path: *source_path,
+                                required: required
+                                    .iter()
+                                    .map(|target| RequiredPath {
+                                        viewable: project_reference(&target.viewable, self.sources),
+                                        path: target.path,
+                                    })
+                                    .collect(),
+                            },
+                            rule => Rule::Ordinary(rule),
+                        },
                         expression: constraint.expression,
                         location: self.sources.location(constraint.source_span()),
                     })

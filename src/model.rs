@@ -380,7 +380,7 @@ pub enum ConstraintRule {
         keys: Vec<ExpressionId>,
     },
     Existence {
-        source: ExpressionId,
+        source_path: ExpressionId,
         required: Vec<ExistenceTarget>,
     },
 }

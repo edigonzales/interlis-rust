@@ -4185,6 +4185,16 @@ fn role_paths_check_declaration_order_multiplicity_and_following_external_access
         Status::Rejected,
         Some("ILI-PATH-NAME"),
     );
+    outcome(
+        single(
+            "TOPIC T=STRUCTURE Details=END Details; CLASS Holder=detail:Details; END Holder;
+             CLASS Other=active:BOOLEAN; END Other;
+             ASSOCIATION Link=origin -- {0..1} ANYCLASS; endpoint -- {0..1} Other; END Link;
+             CONSTRAINTS OF Holder=MANDATORY CONSTRAINT detail->endpoint->active; END; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-PATH-NAME"),
+    );
 }
 
 #[test]
@@ -4205,7 +4215,11 @@ fn existence_constraints_bind_each_required_viewable_and_attribute_path() {
     );
     let graph = report.graph().unwrap();
     let rules = graph.declaration("M.Links.Item").unwrap().constraints();
-    let interlis::ConstraintRule::Existence { source, required } = &rules[0].rule else {
+    let interlis::ConstraintRule::Existence {
+        source_path,
+        required,
+    } = &rules[0].rule
+    else {
         panic!("expected an existence constraint");
     };
     assert!(rules[0].expression.is_none());
@@ -4221,13 +4235,61 @@ fn existence_constraints_bind_each_required_viewable_and_attribute_path() {
         _ => panic!("expected a bound attribute path"),
     };
     assert_eq!(
-        steps(*source)[0].reference.target_name(),
+        steps(*source_path)[0].reference.target_name(),
         "M.Links.Item.code"
     );
     assert_eq!(
         steps(required[0].path)[0].reference.target_name(),
         "M.Values.Item.code"
     );
+}
+
+#[test]
+fn existence_wire_preserves_paths_and_referenced_viewable_ranges() {
+    let text = "INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" =
+        TOPIC T=CLASS Target=x:TEXT; END Target;
+        CLASS Source=y:TEXT; EXISTENCE CONSTRAINT y REQUIRED IN Target:x; END Source;
+        END T; END M.";
+    let request = serde_json::json!({"sources":[{"name":"model.ili","text":text}]});
+    let output = interlis::analyze_json(&request.to_string()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let source = report["model"]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|declaration| declaration["qualifiedName"] == "M.T.Source")
+        .unwrap();
+    let constraint = &source["constraints"][0];
+    assert_eq!(constraint["source"], "model.ili");
+    let path = constraint["sourcePath"].as_u64().unwrap() as usize;
+    assert_eq!(
+        report["model"]["expressions"][path]["steps"][0]["reference"]["targetName"],
+        "M.T.Source.y"
+    );
+    assert_eq!(constraint["required"][0]["viewable"]["source"], "model.ili");
+}
+
+#[test]
+fn existence_vertex_type_can_narrow_target_and_standard_oid_matches_text_oid() {
+    for (vertex, target, status) in [
+        ("Narrow", "Wide", Status::CheckedSubset),
+        ("Wide", "Narrow", Status::Rejected),
+    ] {
+        outcome(
+            single(&format!(
+                "DOMAIN Wide=COORD 0..100,0..100;
+                 Narrow EXTENDS Wide=COORD 10..50,10..50; TextId=OID TEXT*16;
+                 TOPIC T=CLASS Lookup=point:{target}; code:TextId; END Lookup;
+                 CLASS Source=line:POLYLINE WITH (STRAIGHTS) VERTEX {vertex};
+                     code:INTERLIS.STANDARDOID;
+                     EXISTENCE CONSTRAINT code REQUIRED IN Lookup:code;
+                     EXISTENCE CONSTRAINT line REQUIRED IN Lookup:point;
+                 END Source; END T;"
+            )),
+            status,
+            (status == Status::Rejected).then_some("ILI-EXISTENCE-TYPE"),
+        );
+    }
 }
 
 #[test]

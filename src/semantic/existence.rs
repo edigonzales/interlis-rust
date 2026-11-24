@@ -1,5 +1,6 @@
 use super::{
-    Analyzer, BoundName, Kind, TypeInfo, collections::compare_count, expressions::scalar_type,
+    Analyzer, BoundName, Kind, TypeInfo, collections::compare_count, domains::scalar_extension,
+    expressions::scalar_type,
 };
 use crate::{
     BoundConstraint, BoundExpressionKind, ConstraintRule, ExistenceTarget, ExpressionId,
@@ -43,7 +44,7 @@ impl Analyzer<'_, '_> {
                 return None;
             }
             let (path, expected) = self.existence_path(scope, &target.path)?;
-            if !self.existence_compatible(actual, expected, &target.path.span)? {
+            if !self.existence_compatible(owner, actual, expected, &target.path.span)? {
                 self.diagnostics.push_related(
                     "ILI-EXISTENCE-TYPE",
                     "The required attribute must have a compatible value type",
@@ -62,7 +63,10 @@ impl Analyzer<'_, '_> {
         }
         Some(BoundConstraint {
             name: syntax.name.as_ref().map(|name| name.value.clone()),
-            rule: ConstraintRule::Existence { source, required },
+            rule: ConstraintRule::Existence {
+                source_path: source,
+                required,
+            },
             expression: None,
             span: syntax.span.clone(),
         })
@@ -92,6 +96,7 @@ impl Analyzer<'_, '_> {
 
     fn existence_compatible(
         &mut self,
+        owner: usize,
         mut actual: usize,
         mut expected: usize,
         at: &Span,
@@ -103,6 +108,7 @@ impl Analyzer<'_, '_> {
                 .as_deref()
                 .is_some_and(|upper| compare_count(upper, "1") != Ordering::Greater)
         };
+        let mut from_vertex_domain = false;
         loop {
             if !self.step(1, at) {
                 return None;
@@ -133,6 +139,7 @@ impl Analyzer<'_, '_> {
                         return None;
                     };
                     actual = ty;
+                    from_vertex_domain = true;
                 }
                 _ => break,
             }
@@ -149,14 +156,32 @@ impl Analyzer<'_, '_> {
                 numeric_compatible(source, target)
             }
             (TypeInfo::Coordinate(source), TypeInfo::Coordinate(target)) => {
-                source.kind == target.kind
+                let same_axes = source.kind == target.kind
                     && source.reference_system == target.reference_system
                     && source.axes.len() == target.axes.len()
                     && source
                         .axes
                         .iter()
                         .zip(&target.axes)
-                        .all(|(source, target)| numeric_compatible(source, target))
+                        .all(|(source, target)| numeric_compatible(source, target));
+                if from_vertex_domain && same_axes {
+                    let language = self.models[self.symbols[owner].model].language;
+                    return match scalar_extension(
+                        &self.types[actual],
+                        &self.types[expected],
+                        language,
+                        self.limits,
+                        &mut self.work,
+                        false,
+                    ) {
+                        Ok(reason) => Some(reason.is_none()),
+                        Err(error) => {
+                            self.number_error(error, at);
+                            None
+                        }
+                    };
+                }
+                same_axes
             }
             (TypeInfo::Oid(source), TypeInfo::Oid(target)) => oid_compatible(source, target),
             (TypeInfo::Boolean, TypeInfo::Boolean) => true,
@@ -208,6 +233,10 @@ fn oid_compatible(actual: &OidType, expected: &OidType) -> bool {
         | (OidType::Unstable, OidType::Unstable)
         | (OidType::Standard, OidType::Standard)
         | (OidType::Uuid, OidType::Uuid) => true,
+        (OidType::Standard, OidType::Typed(carrier))
+        | (OidType::Typed(carrier), OidType::Standard) => {
+            scalar_type(carrier) == ExpressionType::Text
+        }
         (OidType::Typed(actual), OidType::Typed(expected)) => {
             match (actual.as_ref(), expected.as_ref()) {
                 (TypeInfo::Numeric(actual), TypeInfo::Numeric(expected)) => {
