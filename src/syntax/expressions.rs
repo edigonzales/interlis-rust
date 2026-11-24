@@ -1312,7 +1312,7 @@ mod tests {
             (
                 "2.3",
                 "TOPIC T=CONSTRAINTS OF Missing= END; END T;",
-                Incomplete,
+                Rejected,
             ),
         ] {
             clean(v, body);

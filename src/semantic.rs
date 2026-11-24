@@ -127,6 +127,7 @@ struct Analyzer<'a, 'd> {
     states: Vec<State>,
     types: Vec<TypeInfo>,
     expressions: Vec<crate::BoundExpression>,
+    constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
     role_accesses: BTreeMap<(usize, String), usize>,
     generic_types: BTreeMap<usize, usize>,
 }
@@ -318,7 +319,11 @@ fn ensure_supported_semantics(
                         .iter()
                         .any(|argument| !supported_function_argument(&argument.ty)))
                 .then_some(&function.span),
-                SyntaxDecl::Constraints(constraints) => Some(&constraints.span),
+                SyntaxDecl::Constraints(block) => block
+                    .constraints
+                    .iter()
+                    .any(|constraint| !expressions::supported_constraint(constraint))
+                    .then_some(&block.span),
                 SyntaxDecl::Association(association) => {
                     if association.derived_from.is_some()
                         || association
@@ -413,6 +418,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             states: vec![],
             types: vec![],
             expressions: vec![],
+            constraint_blocks: vec![],
             role_accesses: BTreeMap::new(),
             generic_types: BTreeMap::new(),
         }
@@ -1126,7 +1132,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                         }
                     }
                 }
-                SyntaxDecl::Constraints(_) => {} // A block augments its target's namespace.
+                SyntaxDecl::Constraints(block) => self.constraint_blocks.push((parent, block)),
             }
             if let Some(symbol) = self.symbols.get_mut(first_symbol) {
                 symbol.ast = Some(ast);

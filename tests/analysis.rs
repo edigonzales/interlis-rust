@@ -3871,6 +3871,59 @@ fn object_path_selectors_and_traversal_enforce_actual_shapes() {
 }
 
 #[test]
+fn same_topic_constraint_blocks_augment_the_target_in_source_order() {
+    let report = outcome(
+        single(
+            "TOPIC T=
+            CLASS Item=flag:BOOLEAN; MANDATORY CONSTRAINT original: flag; END Item;
+            CONSTRAINTS OF Item=MANDATORY CONSTRAINT appended: NOT(flag); END;
+            END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let constraints = report
+        .graph()
+        .unwrap()
+        .declaration("M.T.Item")
+        .unwrap()
+        .constraints();
+    assert_eq!(
+        constraints
+            .iter()
+            .map(|constraint| constraint.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["original", "appended"]
+    );
+    let location = report
+        .sources()
+        .location(constraints[1].source_span())
+        .unwrap();
+    assert_eq!(location.start_line, 3);
+    outcome(
+        single(
+            "TOPIC T=CLASS Item=flag:BOOLEAN; MANDATORY CONSTRAINT repeated:flag; END Item;
+            CONSTRAINTS OF Item=MANDATORY CONSTRAINT repeated:flag; END; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-DUPLICATE"),
+    );
+    outcome(
+        single(
+            "TOPIC Base=CLASS Item=flag:BOOLEAN; END Item; END Base;
+            TOPIC Other=CONSTRAINTS OF M.Base.Item=MANDATORY CONSTRAINT flag; END; END Other;",
+        ),
+        Status::Rejected,
+        Some("ILI-CONSTRAINT-TARGET-TOPIC"),
+    );
+    outcome(
+        single("TOPIC Base=CLASS Item=flag:BOOLEAN; END Item; END Base;
+            TOPIC Derived EXTENDS Base=CONSTRAINTS OF Item=MANDATORY CONSTRAINT flag; END; END Derived;"),
+        Status::Incomplete, Some("ILI-UNSUPPORTED"),
+    );
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;
