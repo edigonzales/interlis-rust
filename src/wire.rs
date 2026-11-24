@@ -314,19 +314,22 @@ impl Serialize for ExpressionsOutput<'_> {
         let expressions = self.0.expressions();
         let mut seq = serializer.serialize_seq(Some(expressions.len()))?;
         for (id, expression) in expressions.iter().enumerate() {
-            let effective_type = if matches!(
-                expression.kind,
-                crate::BoundExpressionKind::ObjectSet { .. }
-            ) || expression.value_type == crate::ExpressionType::Class
-                || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
+            let effective_type =
+                if matches!(
+                    expression.kind,
+                    crate::BoundExpressionKind::ObjectSet { .. }
+                ) || matches!(
+                    expression.value_type,
+                    crate::ExpressionType::Class | crate::ExpressionType::Temporal
+                ) || matches!(expression.kind, crate::BoundExpressionKind::Binary { .. })
                     && expression.value_type == crate::ExpressionType::Numeric
-            {
-                self.0
-                    .expression_declared_type(crate::ExpressionId(id as u32))
-                    .map(|ty| TypeOutput(ty, self.0, self.1))
-            } else {
-                None
-            };
+                {
+                    self.0
+                        .expression_declared_type(crate::ExpressionId(id as u32))
+                        .map(|ty| TypeOutput(ty, self.0, self.1))
+                } else {
+                    None
+                };
             seq.serialize_element(&Expression {
                 value_type: expression.value_type,
                 effective_type,

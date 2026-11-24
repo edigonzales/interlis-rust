@@ -131,6 +131,7 @@ struct Analyzer<'a, 'd> {
     expressions: Vec<crate::BoundExpression>,
     expression_boolean_type: Option<usize>,
     enum_bases: BTreeMap<usize, usize>,
+    temporal_languages: BTreeMap<usize, crate::LanguageVersion>,
     constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
     role_accesses: BTreeMap<(usize, String), usize>,
     generic_types: BTreeMap<usize, usize>,
@@ -416,6 +417,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             expressions: vec![],
             expression_boolean_type: None,
             enum_bases: BTreeMap::new(),
+            temporal_languages: BTreeMap::new(),
             constraint_blocks: vec![],
             role_accesses: BTreeMap::new(),
             generic_types: BTreeMap::new(),
@@ -1328,7 +1330,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 .collect(),
         );
     }
-    fn predefined_type(&mut self, name: &str, span: &Span) -> Option<Effective> {
+    fn predefined_type(&mut self, owner: usize, name: &str, span: &Span) -> Option<Effective> {
         let ty = match name {
             "URI" => TypeInfo::FixedText {
                 format: FixedTextFormat::Uri,
@@ -1399,6 +1401,10 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }
         };
         let id = self.types.len();
+        if matches!(ty, TypeInfo::Temporal(_)) {
+            self.temporal_languages
+                .insert(id, self.models[self.symbols[owner].model].language());
+        }
         self.types.push(ty);
         Some(Effective {
             ty: id,
@@ -1419,7 +1425,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             span: span.clone(),
             predefined_language: Some(self.models[self.symbols[owner].model].language),
         });
-        self.predefined_type(predefined, span)
+        self.predefined_type(owner, predefined, span)
     }
     fn number_error(&mut self, error: NumberError, span: &Span) {
         let (code, message) = match error {
@@ -1522,7 +1528,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             TypeSyntax::EnumTree { domain, .. } => {
                 let value = match self.bind_name(owner, domain)? {
                     Target::Domain(id) => self.resolve_domain(id)?,
-                    Target::Predefined(name) => self.predefined_type(name, &domain.span)?,
+                    Target::Predefined(name) => self.predefined_type(owner, name, &domain.span)?,
                     Target::Structure => {
                         self.diagnostics.push(
                             "ILI-ENUM-TARGET",
@@ -1547,7 +1553,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             }),
             TypeSyntax::Named(name) => match self.bind_name(owner, name)? {
                 Target::Domain(id) => return self.resolve_domain(id),
-                Target::Predefined(domain) => return self.predefined_type(domain, &name.span),
+                Target::Predefined(domain) => {
+                    return self.predefined_type(owner, domain, &name.span);
+                }
                 Target::Structure => {
                     let link = self.symbols[owner]
                         .declaration
@@ -1724,14 +1732,14 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                             Some(TypeSyntax::EnumTree { .. })
                         ) =>
                     {
-                        break self.predefined_type(name, &reference.span);
+                        break self.predefined_type(current, name, &reference.span);
                     }
                     Some(Target::Predefined(name @ ("XMLDate" | "XMLTime" | "XMLDateTime"))) => {
                         if self.symbols[current].base.is_some() {
                             let declaration = &mut self.symbols[current].declaration;
                             declaration.base_reference = declaration.reference.take();
                         }
-                        break self.predefined_type(name, &reference.span);
+                        break self.predefined_type(current, name, &reference.span);
                     }
                     Some(Target::Predefined(_))
                         if self.symbols[current].base.is_none()
@@ -1759,7 +1767,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     )) => {
                         let declaration = &mut self.symbols[current].declaration;
                         declaration.base_reference = declaration.reference.take();
-                        break self.predefined_type(name, &reference.span);
+                        break self.predefined_type(current, name, &reference.span);
                     }
                     Some(Target::Predefined(_)) => {
                         self.diagnostics.push(

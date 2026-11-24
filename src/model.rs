@@ -249,6 +249,7 @@ pub enum ExpressionType {
     Boolean,
     Numeric,
     Text,
+    Temporal,
     Undefined,
     Object,
     ObjectSet,
@@ -296,6 +297,10 @@ pub enum BoundExpressionKind {
         value: String,
         #[serde(rename = "canonicalLength")]
         canonical_length: usize,
+    },
+    Temporal {
+        value: String,
+        components: Vec<u16>,
     },
     Enumeration {
         path: Vec<String>,

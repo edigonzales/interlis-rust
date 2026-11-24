@@ -426,6 +426,13 @@ impl Analyzer<'_, '_> {
             self.unsupported_expression(at);
             return None;
         }
+        if (a == Temporal || b == Temporal)
+            && !logical
+            && !arithmetic
+            && self.temporal_comparable(left, right)?
+        {
+            return Some(Boolean);
+        }
         if (a == Enumeration || b == Enumeration) && !logical && !arithmetic {
             if self.enum_comparable(left, right, equality, at)? {
                 return Some(Boolean);
@@ -579,6 +586,7 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
         TypeInfo::ObjectSelection(_) => ValueType::Object,
         TypeInfo::ClassValue(_) => ValueType::Class,
+        TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_) => ValueType::Temporal,
         TypeInfo::Enumeration { .. }
         | TypeInfo::EnumTree { .. }
         | TypeInfo::EnumArgument { .. }

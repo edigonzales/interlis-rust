@@ -405,6 +405,8 @@ impl Analyzer<'_, '_> {
             self.bind_enum_literal(expression, target)?;
         } else if matches!(self.types[target], TypeInfo::EnumArgument { .. }) {
             self.retain_symbolic_enum(expression);
+        } else {
+            self.bind_temporal_literal(expression, target)?;
         }
         match self.argument_fits(owner, expression, target, mandatory) {
             Ok(Some(result)) => Some(result),
@@ -460,6 +462,10 @@ impl Analyzer<'_, '_> {
                     .class_value_specializes(source, formal, &at, false)
                     .map(Some)
                     .ok_or(NumberError::Work);
+            }
+            if actual.value_type == ExpressionType::Temporal && expected == ExpressionType::Temporal
+            {
+                return Ok(Some(self.preserves_temporal_layout(source, formal)));
             }
             if matches!(
                 (ty, formal_type),

@@ -418,6 +418,7 @@ impl Analyzer<'_, '_> {
                         | BoundExpressionKind::Boolean { .. }
                         | BoundExpressionKind::Number { .. }
                         | BoundExpressionKind::Text { .. }
+                        | BoundExpressionKind::Temporal { .. }
                         | BoundExpressionKind::Enumeration { .. }
                         | BoundExpressionKind::Class { .. }
                 )

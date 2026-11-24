@@ -1,7 +1,9 @@
-use super::{Analyzer, Effective, Target, TypeInfo, TypeSyntax};
+use super::{
+    Analyzer, Effective, Target, TypeInfo, TypeSyntax, expressions::underlying_expression,
+};
 use crate::{
-    LanguageVersion, RelatedLocation, Span, TemporalBound, TemporalKind, TemporalRange,
-    TypeReference,
+    BoundExpressionKind, ExpressionId, ExpressionType, LanguageVersion, RelatedLocation, Span,
+    TemporalBound, TemporalKind, TemporalRange,
     syntax::{FormatBase, Located},
 };
 
@@ -35,7 +37,7 @@ impl Analyzer<'_, '_> {
                         }
                         Target::Predefined(
                             name_value @ ("XMLDate" | "XMLTime" | "XMLDateTime"),
-                        ) => self.predefined_type(name_value, &name.span)?,
+                        ) => self.predefined_type(owner, name_value, &name.span)?,
                         Target::Predefined(_) | Target::Structure => {
                             return self.invalid_format_base(&name.span);
                         }
@@ -54,13 +56,8 @@ impl Analyzer<'_, '_> {
             }
             FormatBase::Structure { .. } => unreachable!("structure formats are gated"),
         };
-        let (kind, language) = match &self.types[value.ty] {
-            TypeInfo::Temporal(kind) => {
-                let kind = *kind;
-                (kind, self.temporal_language(owner, &base)?)
-            }
-            TypeInfo::TemporalRange(range) => (range.kind, range.language),
-            _ => return self.invalid_format_base(&base.span),
+        let Some((kind, language)) = self.temporal_profile(value.ty) else {
+            return self.invalid_format_base(&base.span);
         };
         let lower = self.temporal_bound(kind, language, &range.lower)?;
         let upper = self.temporal_bound(kind, language, &range.upper)?;
@@ -109,50 +106,89 @@ impl Analyzer<'_, '_> {
         None
     }
 
-    fn temporal_language(&mut self, owner: usize, from: &TypeReference) -> Option<LanguageVersion> {
-        let mut link = Some(from);
-        while let Some(reference) = link {
-            if let Some(language) = reference.predefined_language() {
-                return Some(language);
-            }
-            if self.work.charge(1).is_err() {
-                self.diagnostics
-                    .limit("Semantic work budget exceeded", Some(from.span.clone()));
-                return None;
-            }
-            link = self.names.get(reference.target_name()).and_then(|&id| {
-                let declaration = &self.symbols[id].declaration;
-                declaration
-                    .type_reference()
-                    .or_else(|| declaration.base_reference())
-            });
+    pub(super) fn temporal_profile(&self, ty: usize) -> Option<(TemporalKind, LanguageVersion)> {
+        match &self.types[ty] {
+            TypeInfo::Temporal(kind) => Some((*kind, self.temporal_languages[&ty])),
+            TypeInfo::TemporalRange(range) => Some((range.kind, range.language)),
+            _ => None,
         }
-        Some(self.models[self.symbols[owner].model].language())
     }
 
-    pub(super) fn preserves_temporal_layout(
+    pub(super) fn preserves_temporal_layout(&self, own: usize, base: usize) -> bool {
+        temporal_specializes(&self.types[own], &self.types[base])
+            && self
+                .temporal_profile(own)
+                .zip(self.temporal_profile(base))
+                .is_some_and(|((_, source), (_, target))| source == target)
+    }
+
+    pub(super) fn bind_temporal_literal(
         &mut self,
-        owner: usize,
-        own: usize,
-        base: usize,
-    ) -> Option<bool> {
-        if !temporal_specializes(&self.types[own], &self.types[base]) {
-            return Some(false);
+        expression: ExpressionId,
+        ty: usize,
+    ) -> Option<()> {
+        let Some((kind, language)) = self.temporal_profile(ty) else {
+            return Some(());
+        };
+        let actual = underlying_expression(&self.expressions, expression);
+        let BoundExpressionKind::Text { value, .. } = &actual.kind else {
+            return Some(());
+        };
+        if actual.value_type != ExpressionType::Text {
+            return Some(());
         }
-        let declaration = &self.symbols[owner].declaration;
-        let explicit = declaration.reference.as_ref().cloned();
-        let inherited = declaration.base_reference.as_ref().cloned();
-        let actual = match (&self.types[own], explicit.as_ref()) {
-            (TypeInfo::TemporalRange(range), _) => range.language,
-            (_, Some(link)) => self.temporal_language(owner, link)?,
-            _ => self.models[self.symbols[owner].model].language(),
+        let at = actual.span.clone();
+        let value = value.clone();
+        if !self.step(value.len(), &at) {
+            return None;
+        }
+        let components = temporal_components(kind, language, &value);
+        let Some(components) = components.filter(|components| match &self.types[ty] {
+            TypeInfo::TemporalRange(range) => {
+                range.lower.components <= *components && *components <= range.upper.components
+            }
+            _ => true,
+        }) else {
+            self.diagnostics.push(
+                "ILI-FORMAT-CONSTANT",
+                "The constant must match the temporal layout and the declared value range",
+                Some(at),
+            );
+            return None;
         };
-        let expected = match (&self.types[base], inherited.as_ref()) {
-            (TypeInfo::TemporalRange(range), _) => range.language,
-            (_, Some(link)) => self.temporal_language(owner, link)?,
-            _ => self.models[self.symbols[owner].model].language(),
+        let mut id = expression;
+        loop {
+            let bound = &mut self.expressions[id.0 as usize];
+            bound.type_id = Some(ty);
+            bound.value_type = ExpressionType::Temporal;
+            if let BoundExpressionKind::Group { expression } = bound.kind {
+                id = expression;
+            } else {
+                bound.kind = BoundExpressionKind::Temporal { value, components };
+                return Some(());
+            }
+        }
+    }
+
+    pub(super) fn temporal_comparable(
+        &mut self,
+        left: ExpressionId,
+        right: ExpressionId,
+    ) -> Option<bool> {
+        for (typed, candidate) in [(left, right), (right, left)] {
+            if let Some(ty) = self.expressions[typed.0 as usize].type_id {
+                self.bind_temporal_literal(candidate, ty)?;
+            }
+        }
+        let kind = |id: ExpressionId| {
+            let ty = self.expressions[id.0 as usize].type_id?;
+            self.temporal_profile(ty).map(|(kind, _)| kind)
         };
-        Some(actual == expected)
+        let Some((left, right)) = kind(left).zip(kind(right)) else {
+            return Some(false);
+        };
+        use TemporalKind::{Date, DateTime};
+        Some(left == right || matches!((left, right), (Date, DateTime) | (DateTime, Date)))
     }
 
     fn temporal_bound(

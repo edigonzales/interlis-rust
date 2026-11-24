@@ -265,7 +265,7 @@ impl Analyzer<'_, '_> {
             if matches!(leaf, TypeSyntax::Named(_)) {
                 self.check_nominal_domain(owner, leaf.span())?;
             }
-            if self.preserves_temporal_layout(owner, own_id, base_id)? {
+            if self.preserves_temporal_layout(own_id, base_id) {
                 return Some(own);
             }
             self.report_type_override(

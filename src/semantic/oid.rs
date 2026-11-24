@@ -136,7 +136,9 @@ impl Analyzer<'_, '_> {
         };
         let effective = match target {
             BoundName::Declared(id) => self.resolve_domain(id),
-            BoundName::Predefined(name_value, _) => self.predefined_type(name_value, &name.span),
+            BoundName::Predefined(name_value, _) => {
+                self.predefined_type(owner, name_value, &name.span)
+            }
         }?;
         let kind = match &self.types[effective.ty] {
             TypeInfo::Oid(OidType::Unstable) => OidKind::Unstable,

@@ -4886,6 +4886,82 @@ fn class_value_constraints_reject_wrong_targets_and_comparisons() {
 }
 
 #[test]
+fn temporal_literals_bind_to_the_expected_layout_and_keep_components() {
+    let report = outcome(
+        request(vec![
+            (
+                "memory:///legacy.ili",
+                "INTERLIS 2.3; TYPE MODEL Legacy AT \"x\" VERSION \"1\" =
+                 DOMAIN Clock EXTENDS INTERLIS.XMLTime=MANDATORY; END Legacy."
+                    .into(),
+            ),
+            (
+                "memory:///main.ili",
+                "INTERLIS 2.4; MODEL M AT \"x\" VERSION \"1\" =
+                 IMPORTS Legacy;
+                 DOMAIN Window=FORMAT INTERLIS.XMLDate \"2024-01-01\"..\"2024-12-31\";
+                 FUNCTION accepts(date:Window):BOOLEAN;
+                 TOPIC T=CLASS Item=clock:Legacy.Clock; date:Window; stamp:INTERLIS.XMLDateTime;
+                   fixed:Window := \"2024-09-16\";
+                   MANDATORY CONSTRAINT clock == (\"03:4:5.006\");
+                   MANDATORY CONSTRAINT date <= stamp;
+                   MANDATORY CONSTRAINT accepts(\"2024-02-29\");
+                 END Item; END T; END M."
+                    .into(),
+            ),
+        ]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let member = graph.declaration("M.T.Item.fixed").unwrap();
+    let interlis::BoundExpressionKind::Temporal { value, components } =
+        &graph.expression(member.derivations()[0]).unwrap().kind
+    else {
+        panic!("expected a temporal constant");
+    };
+    assert_eq!(value, "2024-09-16");
+    assert_eq!(components, &[2024, 9, 16]);
+    let owner = graph.declaration("M.T.Item").unwrap();
+    let interlis::BoundExpressionKind::Binary { right, .. } = graph
+        .expression(owner.constraints()[0].expression.unwrap())
+        .unwrap()
+        .kind
+    else {
+        panic!("expected a temporal comparison");
+    };
+    let interlis::BoundExpressionKind::Group { expression } = graph.expression(right).unwrap().kind
+    else {
+        panic!("expected a grouped constant");
+    };
+    assert!(matches!(&graph.expression(expression).unwrap().kind,
+        interlis::BoundExpressionKind::Temporal { components, .. } if components == &[3, 4, 5, 6]));
+}
+
+#[test]
+fn temporal_expressions_check_layout_bounds_and_type_compatibility() {
+    let definitions = "DOMAIN Window=FORMAT INTERLIS.XMLDate \"2024-01-01\"..\"2024-12-31\";
+        FUNCTION accepts(date:Window):BOOLEAN;
+        TOPIC T=CLASS Item=date:Window; clock:INTERLIS.XMLTime; label:TEXT;";
+    for (condition, code) in [
+        ("date == \"2023-12-31\"", "ILI-FORMAT-CONSTANT"),
+        ("date <= \"2024-1-01\"", "ILI-FORMAT-CONSTANT"),
+        ("clock >= \"24:00:00.000\"", "ILI-FORMAT-CONSTANT"),
+        ("accepts(\"2024-00-01\")", "ILI-FORMAT-CONSTANT"),
+        ("date == clock", "ILI-EXPRESSION-OPERANDS"),
+        ("date < label", "ILI-EXPRESSION-OPERANDS"),
+    ] {
+        outcome(
+            single(&format!(
+                "{definitions} MANDATORY CONSTRAINT {condition}; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (
