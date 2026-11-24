@@ -1116,8 +1116,19 @@ impl Analyzer<'_, '_> {
                 *root = self.contextual_path_scope(topic, *root, at)?;
             }
         }
-        let mut base = Some(roots[0]);
+        self.common_path_scope(&roots, at)
+    }
+
+    pub(super) fn common_path_scope(&mut self, roots: &[usize], at: &Span) -> Option<usize> {
+        let Some(&first) = roots.first() else {
+            self.unsupported_expression(at);
+            return None;
+        };
+        let mut base = Some(first);
         while let Some(candidate) = base {
+            if !self.step(1, at) {
+                return None;
+            }
             let mut common = true;
             for &other in &roots[1..] {
                 if !self.specializes_symbol(other, candidate, at)? {

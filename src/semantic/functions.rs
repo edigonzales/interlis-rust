@@ -23,6 +23,13 @@ pub(super) enum AssignmentContext {
     Function,
 }
 
+fn area_function(name: &str) -> bool {
+    matches!(
+        name,
+        "areAreas" | "areAreas2" | "areAreas3" | "areAreasWithoutGaps" | "areAreasWithoutGaps2"
+    )
+}
+
 impl Analyzer<'_, '_> {
     pub(super) fn bind_functions(&mut self) -> Option<()> {
         for owner in 0..self.symbols.len() {
@@ -266,7 +273,7 @@ impl Analyzer<'_, '_> {
         span: &Span,
     ) -> Option<bool> {
         match function {
-            BoundName::Predefined(name, _) => Some(name == "objectCount"),
+            BoundName::Predefined(name, _) => Some(name == "objectCount" || area_function(name)),
             BoundName::Declared(id) => {
                 let arguments = &self.symbols[id].declaration.function()?.arguments;
                 let has_objects = arguments.iter().any(|&id| {
@@ -436,6 +443,7 @@ impl Analyzer<'_, '_> {
             ) => 1,
             BoundName::Predefined("length" | "multilength" | "surface" | "multisurface", _) => 1,
             BoundName::Predefined("isEnumSubVal" | "isSubClass" | "isOfClass", _) => 2,
+            BoundName::Predefined(name, _) if area_function(name) => 3,
             BoundName::Predefined("inEnumRange", _) => 3,
             BoundName::Predefined(..) => {
                 self.unsupported_expression(span);
@@ -459,6 +467,9 @@ impl Analyzer<'_, '_> {
         name: &str,
         arguments: &[ExpressionId],
     ) -> Option<usize> {
+        if area_function(name) {
+            return self.bind_area_call(owner, name, arguments);
+        }
         if matches!(name, "isEnumSubVal" | "inEnumRange") {
             return self.bind_enum_builtin(name, arguments);
         }
@@ -553,6 +564,148 @@ impl Analyzer<'_, '_> {
         } else {
             Some(formal)
         }
+    }
+
+    fn bind_area_call(
+        &mut self,
+        owner: usize,
+        name: &str,
+        arguments: &[ExpressionId],
+    ) -> Option<usize> {
+        let [objects, bag, surface] = *arguments else {
+            unreachable!()
+        };
+        let population = underlying_expression(&self.expressions, objects);
+        if population.value_type != ExpressionType::ObjectSet {
+            let at = population.span.clone();
+            return self.invalid_area_argument(&at, "The area test requires an object set");
+        }
+        let at = population.span.clone();
+        let roots = self.attribute_argument_roots(objects, &at)?;
+        let text_paths = !matches!(name, "areAreas" | "areAreasWithoutGaps");
+        let bag_value = underlying_expression(&self.expressions, bag);
+        let bag_at = bag_value.span.clone();
+        let mut surface_roots = roots.clone();
+        if bag_value.value_type != ExpressionType::Undefined {
+            if text_paths {
+                let binding = self.bind_area_text_path(owner, bag, &roots, false)?;
+                surface_roots = self.attribute_argument_roots(binding, &bag_at)?;
+            } else if !self.area_attribute_matches(bag, &roots, false) {
+                return self.invalid_area_argument(
+                    &bag_at,
+                    "The second argument must select a BAG of structures from the object set",
+                );
+            } else {
+                surface_roots = self.attribute_argument_roots(bag, &bag_at)?;
+            }
+        }
+        if text_paths {
+            self.bind_area_text_path(owner, surface, &surface_roots, true)?;
+        } else if !self.area_attribute_matches(surface, &surface_roots, true) {
+            let at = self.expressions[surface.0 as usize].span.clone();
+            return self.invalid_area_argument(&at, "The last argument must select a surface attribute from the indicated structure or class");
+        }
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Boolean);
+        Some(ty)
+    }
+
+    fn bind_area_text_path(
+        &mut self,
+        owner: usize,
+        argument: ExpressionId,
+        roots: &BTreeSet<usize>,
+        surface: bool,
+    ) -> Option<ExpressionId> {
+        let actual = underlying_expression(&self.expressions, argument);
+        let at = actual.span.clone();
+        let BoundExpressionKind::Text { value, .. } = &actual.kind else {
+            return self.invalid_area_argument(&at, "The area paths must be TEXT constants");
+        };
+        if !self.step(value.len(), &at) {
+            return None;
+        }
+        let actual = underlying_expression(&self.expressions, argument);
+        let BoundExpressionKind::Text { value, .. } = &actual.kind else {
+            unreachable!()
+        };
+        let value = value.clone();
+        let path = crate::syntax::parse_path_literal(
+            &value,
+            &at,
+            self.expression_language(owner),
+            self.limits,
+            self.diagnostics,
+        )?;
+        let roots: Vec<_> = roots.iter().copied().collect();
+        let scope = self.common_path_scope(&roots, &at)?;
+        let (kind, value_type, ty) = self.expression_path(scope, &path)?;
+        if !ty.is_some_and(|ty| self.area_value_matches(ty, surface)) {
+            return self.invalid_area_argument(
+                &at,
+                if surface {
+                    "The path must select a surface attribute"
+                } else {
+                    "The path must select a BAG of structures"
+                },
+            );
+        }
+        let binding = self.record_expression(kind, value_type, ty, &at);
+        let mut id = argument;
+        loop {
+            let actual = &mut self.expressions[id.0 as usize];
+            if let BoundExpressionKind::Group { expression } = actual.kind {
+                id = expression;
+            } else {
+                actual.kind = BoundExpressionKind::TextPath { value, binding };
+                return Some(binding);
+            }
+        }
+    }
+
+    fn area_attribute_matches(
+        &self,
+        argument: ExpressionId,
+        roots: &BTreeSet<usize>,
+        surface: bool,
+    ) -> bool {
+        let value = underlying_expression(&self.expressions, argument);
+        let Some(TypeInfo::AttributePath(path)) = value.type_id.map(|ty| &self.types[ty]) else {
+            return false;
+        };
+        let scope_fits = roots.is_empty()
+            || match &path.owner {
+                Some(AttributePathOwner::Viewable(scope)) => {
+                    roots.len() == 1 && self.names.get(scope.target_name()) == roots.first()
+                }
+                _ => false,
+            };
+        scope_fits
+            && !path.restrictions.is_empty()
+            && path
+                .restrictions
+                .iter()
+                .all(|restriction| self.area_value_matches(restriction.ty, surface))
+    }
+
+    fn area_value_matches(&self, ty: usize, surface: bool) -> bool {
+        match (&self.types[ty], surface) {
+            (TypeInfo::Geometry(value), true) => matches!(
+                value.geometry_kind,
+                GeometryKind::Surface | GeometryKind::Area
+            ),
+            (TypeInfo::Collection(value), false) => {
+                value.kind == crate::CollectionKind::Bag
+                    && matches!(self.types[value.element], TypeInfo::Structure(_))
+            }
+            _ => false,
+        }
+    }
+
+    fn invalid_area_argument<T>(&mut self, at: &Span, message: &str) -> Option<T> {
+        self.diagnostics
+            .push("ILI-FUNCTION-AREA-ARGUMENT", message, Some(at.clone()));
+        None
     }
 
     fn bind_class_builtin(

@@ -787,6 +787,78 @@ pub(crate) fn parse(
     parse_source(sources, file, limits, budget, diagnostics, None)
 }
 
+pub(crate) fn parse_path_literal(
+    text: &str,
+    at: &Span,
+    language: Language,
+    limits: &Limits,
+    diagnostics: &mut Diagnostics,
+) -> Option<ObjectPath> {
+    let sources = SourceSet::new(vec![crate::SourceInput {
+        name: "path".into(),
+        text: text.to_owned(),
+    }])
+    .ok()?;
+    let mut local = Diagnostics::new(limits);
+    let mut budget = SyntaxBudget::new(limits);
+    let lexed = lexer::lex(&sources, 0, limits, &mut budget, &mut local);
+    let mut parser = Parser {
+        sources: &sources,
+        file: 0,
+        tokens: lexed.tokens,
+        trivia: lexed.trivia,
+        expressions: Vec::new(),
+        budget: &mut budget,
+        at: 0,
+        language,
+        depth: 0,
+        limits,
+        diagnostics: &mut local,
+    };
+    let parsed = parser.object_path();
+    let complete = parser.at == parser.tokens.len();
+    if local.limited || matches!(&parsed, Err(issue) if matches!(issue.kind, IssueKind::Limit)) {
+        diagnostics.limit("Object path syntax budget exceeded", Some(at.clone()));
+        return None;
+    }
+    let Some(mut path) = parsed.ok().filter(|_| complete && !local.syntax_invalid) else {
+        diagnostics.push(
+            "ILI-FUNCTION-PATH-SYNTAX",
+            "The constant must contain a complete INTERLIS object path",
+            Some(at.clone()),
+        );
+        return None;
+    };
+    // Escapes may change byte widths inside the string. The full authored
+    // literal provides the original source location for its path.
+    path.span = at.clone();
+    for element in &mut path.elements {
+        match element {
+            PathElement::Special(value) => value.span = at.clone(),
+            PathElement::Name {
+                name,
+                selector,
+                span,
+            } => {
+                name.span = at.clone();
+                *span = at.clone();
+                if let Some(selector) = selector {
+                    match selector {
+                        PathSelector::First(span) | PathSelector::Last(span) => *span = at.clone(),
+                        PathSelector::Index(index) => index.span = at.clone(),
+                        PathSelector::Association(relation) => relation.span = at.clone(),
+                    }
+                }
+            }
+            PathElement::AssociationAccess { name, span } => {
+                name.span = at.clone();
+                *span = at.clone();
+            }
+        }
+    }
+    Some(path)
+}
+
 pub(crate) fn parse_source(
     sources: &SourceSet,
     file: usize,
@@ -821,6 +893,8 @@ pub(crate) fn parse_source(
             {
                 catalog.push((text(name).to_owned(), None));
                 version_seen = false;
+            } else if text(token) == "=" {
+                version_seen = true;
             } else if token.kind == Kind::Word
                 && text(token) == "VERSION"
                 && !version_seen
@@ -1162,7 +1236,7 @@ mod unsupported_regressions {
     #[test]
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
-            let body = "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;";
+            let body = "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;";
             let text = format!(
                 "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
             );

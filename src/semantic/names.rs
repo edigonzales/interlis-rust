@@ -140,6 +140,8 @@ const PREDEFINED_24: &[(Kind, &[&str])] = &[
             "multisurface",
             "areAreas2",
             "areAreas3",
+            "areAreasWithoutGaps",
+            "areAreasWithoutGaps2",
         ],
     ),
 ];

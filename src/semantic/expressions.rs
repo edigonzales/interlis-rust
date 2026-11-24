@@ -30,18 +30,25 @@ impl Analyzer<'_, '_> {
     ) -> Option<ExpressionId> {
         enum Visit {
             Start(ExprId),
-            Argument(ExprId, ExprId),
+            Argument(ExprId, ExprId, Option<ExprId>),
             Finish(ExprId, Option<BoundName>),
         }
         let mut pending = vec![Visit::Start(root)];
-        let mut bound = BTreeMap::new();
+        let mut bound: BTreeMap<u32, ExpressionId> = BTreeMap::new();
         let mut literal_scopes = BTreeMap::new();
         let modern = self.expression_language(owner) == LanguageVersion::V24;
         let mut uses_objects = false;
         while let Some(visit) = pending.pop() {
             let id = match visit {
                 Visit::Start(id) | Visit::Finish(id, _) => id,
-                Visit::Argument(id, dependency) => {
+                Visit::Argument(id, dependency, fallback) => {
+                    let mut dependency = bound[&dependency.0];
+                    if let Some(fallback) = fallback
+                        && self.expressions[dependency.0 as usize].value_type
+                            == ValueType::Undefined
+                    {
+                        dependency = bound[&fallback.0];
+                    }
                     let mut literal = id;
                     while let ExpressionKind::Parenthesized { expression } =
                         expressions[literal.0 as usize].kind
@@ -59,8 +66,7 @@ impl Analyzer<'_, '_> {
                             ..
                         })
                     ) {
-                        let roots =
-                            self.attribute_argument_roots(bound[&dependency.0], &expression.span)?;
+                        let roots = self.attribute_argument_roots(dependency, &expression.span)?;
                         if roots.len() == 1 {
                             literal_scopes.insert(literal.0, *roots.first()?);
                         }
@@ -129,10 +135,21 @@ impl Analyzer<'_, '_> {
                                     binding.dependency.map_or(
                                         Visit::Start(argument),
                                         |dependency| {
-                                            Visit::Argument(argument, arguments[dependency])
+                                            Visit::Argument(argument, arguments[dependency], None)
                                         },
                                     )
                                 }));
+                            } else if let Some(BoundName::Predefined(
+                                "areAreas" | "areAreasWithoutGaps",
+                                _,
+                            )) = target
+                            {
+                                let [objects, bag, surface] = arguments.as_slice() else {
+                                    unreachable!()
+                                };
+                                pending.push(Visit::Argument(*surface, *bag, Some(*objects)));
+                                pending.push(Visit::Argument(*bag, *objects, None));
+                                pending.push(Visit::Start(*objects));
                             } else {
                                 pending.extend(arguments.iter().rev().copied().map(Visit::Start));
                             }

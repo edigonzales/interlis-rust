@@ -1429,6 +1429,7 @@ impl Analyzer<'_, '_> {
                 BoundExpressionKind::Call { arguments, .. } => {
                     pending.extend(arguments.iter().copied())
                 }
+                BoundExpressionKind::TextPath { binding, .. } => pending.push(*binding),
                 BoundExpressionKind::Inspection {
                     path, restriction, ..
                 } => {

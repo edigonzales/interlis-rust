@@ -736,7 +736,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     );
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
-        "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
+        "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;",
         "TOPIC T = CLASS X=route:POLYLINE; END X; VIEW V INSPECTION OF X->route; = END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -7709,7 +7709,7 @@ fn compile_only_exposes_a_schema_for_a_successfully_checked_closure() {
     for (input, expected, diagnostic) in [
         (
             single(
-                "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
+                "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;",
             ),
             CompilationStatus::Incomplete,
             "ILI-UNSUPPORTED",
@@ -7818,19 +7818,21 @@ fn compile_scopes_syntax_errors_to_selected_models_and_versioned_originals() {
         report.diagnostics()
     );
     assert_eq!(report.schema().unwrap().graph().models().len(), 2);
-    let malformed_version =
-        r#"INTERLIS 2.4; MODEL Original AT "x" VERSION = VERSION "2"; END Original."#;
-    let report = compile(
-        request(vec![
-            ("malformed.ili", malformed_version.into()),
-            ("old.ili", original.into()),
-            ("translated.ili", translated.into()),
-        ]),
-        Some(&["Local".into()]),
-    )
-    .unwrap();
-    assert_eq!(report.status(), CompilationStatus::Rejected);
-    assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
+    for header in ["VERSION =", "="] {
+        let malformed =
+            format!(r#"INTERLIS 2.4; MODEL Original AT "x" {header} VERSION "2"; END Original."#);
+        let report = compile(
+            request(vec![
+                ("malformed.ili", malformed),
+                ("old.ili", original.into()),
+                ("translated.ili", translated.into()),
+            ]),
+            Some(&["Local".into()]),
+        )
+        .unwrap();
+        assert_eq!(report.status(), CompilationStatus::Rejected);
+        assert_eq!(report.diagnostics()[0].code, "ILI-SYNTAX");
+    }
 
     let requiring = selected.replace("= END Selected", "= IMPORTS Other; END Selected");
     let report = compile(
@@ -8115,5 +8117,90 @@ fn formatted_constants_and_assignments_use_the_bound_components_and_ranges() {
         ("accepts(wide)", "ILI-FUNCTION-ARGUMENT"),
     ] {
         outcome(input(condition, "small"), Status::Rejected, Some(expected));
+    }
+}
+
+#[test]
+fn standard_area_functions_bind_attribute_and_text_paths_in_the_population_scope() {
+    let input = |version, condition: &str| {
+        request(vec![(
+            "areas.ili",
+            format!(
+                r#"INTERLIS {version}; MODEL M AT "x" VERSION "1" =
+            DOMAIN Vertex2=COORD 0.000..10.000,0.000..10.000;
+                Boundary=SURFACE WITH (STRAIGHTS) VERTEX Vertex2 WITHOUT OVERLAPS >0.010;
+            STRUCTURE Part=surface:Boundary; END Part;
+            STRUCTURE Container=parts:BAG OF Part; END Container;
+            TOPIC T=CLASS Item=surface:Boundary; pieces:BAG OF Part; nested:Container; label:TEXT;
+                SET CONSTRAINT {condition};
+            END Item; END T; END M."#
+            ),
+        )])
+    };
+    for edition in ["2.3", "2.4"] {
+        for predicate in [
+            "INTERLIS.areAreas(ALL, UNDEFINED, >>surface)",
+            "INTERLIS.areAreas(ALL, >>pieces, >>surface)",
+        ] {
+            outcome(input(edition, predicate), Status::CheckedSubset, None);
+        }
+    }
+    for name in ["areAreas2", "areAreas3", "areAreasWithoutGaps2"] {
+        let report = outcome(
+            input(
+                "2.4",
+                &format!(r#"INTERLIS.{name}(ALL, "nested->parts", "surface")"#),
+            ),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let paths: Vec<_> = graph
+            .expressions()
+            .iter()
+            .filter_map(|expression| match &expression.kind {
+                interlis::BoundExpressionKind::TextPath { binding, .. } => {
+                    graph.expression(*binding)
+                }
+                _ => None,
+            })
+            .collect();
+        let interlis::BoundExpressionKind::Path { steps } = &paths[0].kind else {
+            panic!("expected bound paths for the text constants");
+        };
+        assert_eq!(steps[0].reference.target_name(), "M.T.Item.nested");
+        assert_eq!(steps[1].reference.target_name(), "M.Container.parts");
+        let interlis::BoundExpressionKind::Path { steps } = &paths[1].kind else {
+            panic!("expected the surface path");
+        };
+        assert_eq!(steps[0].reference.target_name(), "M.Part.surface");
+    }
+    outcome(
+        input(
+            "2.4",
+            "INTERLIS.areAreasWithoutGaps(ALL, >>pieces, >>surface)",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    for (condition, code) in [
+        (
+            "INTERLIS.areAreas(ALL, >>label, >>surface)",
+            "ILI-FUNCTION-AREA-ARGUMENT",
+        ),
+        (
+            "INTERLIS.areAreas(ALL, UNDEFINED, >>label)",
+            "ILI-FUNCTION-AREA-ARGUMENT",
+        ),
+        (
+            r#"INTERLIS.areAreas2(ALL, UNDEFINED, "label")"#,
+            "ILI-FUNCTION-AREA-ARGUMENT",
+        ),
+        (
+            r#"INTERLIS.areAreas2(ALL, "nested->parts", "surface;")"#,
+            "ILI-FUNCTION-PATH-SYNTAX",
+        ),
+    ] {
+        outcome(input("2.4", condition), Status::Rejected, Some(code));
     }
 }

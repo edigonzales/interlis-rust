@@ -789,6 +789,10 @@ impl Comparison<'_> {
                     self.work.charge((a.len() + b.len()) as u32)?;
                     a == b
                 }
+                (TextPath { binding: left, .. }, TextPath { binding: right, .. }) => {
+                    pending.push((*left, *right));
+                    true
+                }
                 (Temporal { components: a, .. }, Temporal { components: b, .. }) => a == b,
                 (Formatted { components: a, .. }, Formatted { components: b, .. }) => {
                     a.len() == b.len()

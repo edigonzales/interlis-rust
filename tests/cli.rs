@@ -292,7 +292,7 @@ fn cli_outcomes_are_json_reports_and_text_diagnostics_have_logical_locations() {
             "rejected",
         ),
         (
-            "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T; END A.",
+            "INTERLIS 2.3; MODEL A AT \"x\" VERSION \"1\" = UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T; END A.",
             4,
             "incomplete",
         ),

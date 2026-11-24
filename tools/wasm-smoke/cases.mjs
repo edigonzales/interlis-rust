@@ -6,7 +6,7 @@ const syntaxRequest = (text) => JSON.stringify({ sources: [{ name: 'syntax', tex
 export const compileCases = [
   [request, 'compiled', 0],
   [syntaxRequest('INTERLIS 2.4; MODEL Broken AT "x" VERSION "1" = IMPORTS Missing; END Broken.'), 'rejected', 1],
-  [syntaxRequest('INTERLIS 2.4; MODEL Model AT "x" VERSION "1" = TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T; END Model.'), 'incomplete', 4],
+  [syntaxRequest('INTERLIS 2.4; MODEL Model AT "x" VERSION "1" = UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T; END Model.'), 'incomplete', 4],
   [limited, 'limit_exceeded', 5],
 ];
 export const parseCases = [
@@ -138,7 +138,7 @@ selected.sources.push({name:'unselected',text:'INTERLIS 2.4; MODEL Other AT "x" 
 const missing=pair('2.4');missing.sources.shift();
 const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('Base','Other');
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
-const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END Item;');
+const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('IMPORTS Base;','IMPORTS Base; UNIT Turn=PI[INTERLIS.rad];').replace('END Item;','angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END Item;');
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};

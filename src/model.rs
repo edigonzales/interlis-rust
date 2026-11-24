@@ -355,6 +355,10 @@ pub enum BoundExpressionKind {
         #[serde(rename = "canonicalLength")]
         canonical_length: usize,
     },
+    TextPath {
+        value: String,
+        binding: ExpressionId,
+    },
     Temporal {
         value: String,
         components: Vec<u16>,
