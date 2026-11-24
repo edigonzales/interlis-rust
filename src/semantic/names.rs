@@ -141,6 +141,23 @@ const PREDEFINED_24: &[(Kind, &[&str])] = &[
     ),
 ];
 
+// The same viewable inheritance is declared in Appendix A of both editions.
+pub(super) fn predefined_viewable_base(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "INTERLIS.REFSYSTEM" | "INTERLIS.SIGN" => "INTERLIS.METAOBJECT",
+        "INTERLIS.COORDSYSTEM" | "INTERLIS.SCALSYSTEM" => "INTERLIS.REFSYSTEM",
+        "INTERLIS.TIMESYSTEMS.CALENDAR" | "INTERLIS.TIMESYSTEMS.TIMEOFDAYSYS" => {
+            "INTERLIS.SCALSYSTEM"
+        }
+        "INTERLIS.UTC" => "INTERLIS.TimeOfDay",
+        "INTERLIS.GregorianDateTime" => "INTERLIS.GregorianDate",
+        "INTERLIS.StartSegment" | "INTERLIS.StraightSegment" | "INTERLIS.ArcSegment" => {
+            "INTERLIS.LineSegment"
+        }
+        _ => return None,
+    })
+}
+
 fn predefined(language: LanguageVersion, spelling: &str, kinds: &[Kind]) -> Option<BoundName> {
     let edition = match language {
         LanguageVersion::V23 => &[][..],

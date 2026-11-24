@@ -1203,6 +1203,10 @@ fn class_and_structure_value_restrictions_bind_their_declared_kinds() {
         let text = format!(
             "INTERLIS {language}; MODEL M AT \"x\" VERSION \"1\" = STRUCTURE S=END S;
              DOMAIN AnyObject=STRUCTURE; AnyClass EXTENDS AnyObject=CLASS;
+             Metaobjects=CLASS RESTRICTION (INTERLIS.METAOBJECT);
+             Scales EXTENDS Metaobjects=CLASS RESTRICTION (INTERLIS.SCALSYSTEM);
+             Segments=STRUCTURE RESTRICTION (INTERLIS.LineSegment);
+             Lines EXTENDS Segments=STRUCTURE RESTRICTION (INTERLIS.StraightSegment);
              TOPIC T=CLASS C EXTENDS S=END C; CLASS D EXTENDS C=END D;
              DOMAIN ClassValues=CLASS RESTRICTION (C; S);
              Narrow EXTENDS ClassValues=CLASS RESTRICTION (D);

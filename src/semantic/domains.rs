@@ -1,6 +1,6 @@
 use super::{
     Analyzer, DecimalLiteral, Effective, NumberError, RelatedLocation, TypeInfo, TypeSyntax,
-    collections::compare_count, units::unit_extends,
+    collections::compare_count, names::predefined_viewable_base, units::unit_extends,
 };
 use crate::{
     AxisRotation, CollectionKind, CoordinateType, DecimalInfo, LanguageVersion, Limits,
@@ -409,9 +409,15 @@ impl Analyzer<'_, '_> {
                 };
                 let candidate = &own.restrictions[index];
                 let target = &base.restrictions[base_index];
-                if candidate.target_name() == target.target_name()
-                    && candidate.predefined_language() == target.predefined_language()
-                    || match (
+                let specializes = if candidate.predefined_language().is_some()
+                    && target.predefined_language().is_some()
+                {
+                    std::iter::successors(Some(candidate.target_name()), |name| {
+                        predefined_viewable_base(name)
+                    })
+                    .any(|base| base == target.target_name())
+                } else {
+                    match (
                         self.names.get(candidate.target_name()),
                         self.names.get(target.target_name()),
                     ) {
@@ -420,7 +426,8 @@ impl Analyzer<'_, '_> {
                         }
                         _ => false,
                     }
-                {
+                };
+                if specializes {
                     allowed = true;
                     break;
                 }
