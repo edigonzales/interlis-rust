@@ -1136,6 +1136,10 @@ impl<'report> Serialize for TypeOutput<'report> {
                 attribute: Reference<'a>,
                 width: Option<&'a str>,
             },
+            Structure {
+                attribute: Reference<'a>,
+                format: Reference<'a>,
+            },
         }
         #[derive(Serialize)]
         struct ObjectTarget<'a> {
@@ -1323,6 +1327,10 @@ impl<'report> Serialize for TypeOutput<'report> {
                                     width: width.as_deref(),
                                 }
                             }
+                            crate::FormattedPart::Structure(part) => FormatPart::Structure {
+                                attribute: project_reference(&part.attribute, self.2),
+                                format: project_reference(&part.format, self.2),
+                            },
                         })
                         .collect(),
                     lower: format.bounds.as_ref().map(|(lower, _)| bound(lower)),

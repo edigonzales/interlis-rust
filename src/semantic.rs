@@ -167,18 +167,7 @@ fn supported_type(ty: &TypeSyntax) -> bool {
         | TypeSyntax::Reference { .. }
         | TypeSyntax::ClassValue { .. } => true,
         TypeSyntax::Geometry(_) => true,
-        TypeSyntax::Formatted { base, .. } => match base {
-            syntax::FormatBase::Structure { format, .. } => format.parts.iter().all(|part| {
-                !matches!(
-                    part,
-                    syntax::FormatPart::Attribute {
-                        attribute: syntax::FormatAttribute::Formatted { .. },
-                        ..
-                    }
-                )
-            }),
-            _ => true,
-        },
+        TypeSyntax::Formatted { .. } => true,
         TypeSyntax::AttributePathValue { restrictions, .. } => restrictions
             .iter()
             .all(|restriction| restriction.ty.as_ref().is_some_and(supported_type)),
@@ -2024,12 +2013,18 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 );
             }
         }
-        for id in 0..self.symbols.len() {
-            if self.symbols[id].declaration.kind == Kind::Domain {
-                self.resolve_domain(id);
+        let mut domains = vec![Vec::new(); self.models.len()];
+        for (id, symbol) in self.symbols.iter().enumerate() {
+            if symbol.declaration.kind == Kind::Domain {
+                domains[symbol.model].push(id);
             }
-            if self.diagnostics.limited {
-                return None;
+        }
+        for &model in &model_order {
+            for &id in &domains[model] {
+                self.resolve_domain(id);
+                if self.diagnostics.limited {
+                    return None;
+                }
             }
         }
         self.bind_oid_rules(&topics, &viewables)?;

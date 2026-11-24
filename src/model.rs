@@ -218,6 +218,14 @@ pub enum FormattedPart {
         attribute: TypeReference,
         width: Option<String>,
     },
+    Structure(FormattedStructurePart),
+}
+
+#[derive(Clone, Debug)]
+pub struct FormattedStructurePart {
+    pub attribute: TypeReference,
+    pub format: TypeReference,
+    pub(crate) type_id: usize,
 }
 
 #[derive(Debug)]
@@ -1279,6 +1287,15 @@ pub struct ModelGraph {
     pub(crate) names: BTreeMap<String, usize>,
 }
 impl ModelGraph {
+    pub fn format_component_type(&self, part: &FormattedPart) -> Option<&TypeInfo> {
+        match part {
+            FormattedPart::Structure(part) => self.types.get(part.type_id),
+            FormattedPart::Numeric { attribute, .. } => {
+                self.effective_type(attribute.target_name())
+            }
+            FormattedPart::Literal { .. } => None,
+        }
+    }
     pub fn drawing_rules(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
         Some(
             self.declaration(name)?

@@ -1158,7 +1158,7 @@ mod unsupported_regressions {
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
             for body in [
-                "STRUCTURE Inner=n:0..10; END Inner; DOMAIN Code=FORMAT BASED ON Inner (n); STRUCTURE Outer=part:Inner; END Outer; DOMAIN Nested=FORMAT BASED ON Outer (part/Code);",
+                "STRUCTURE Outer=date:INTERLIS.GregorianDate; END Outer; DOMAIN Nested=FORMAT BASED ON Outer (date/INTERLIS.XMLDate);",
                 "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
             ] {
                 let text = format!(

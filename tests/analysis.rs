@@ -7833,6 +7833,39 @@ fn compile_scopes_syntax_errors_to_selected_models_and_versioned_originals() {
         .location(report.diagnostics()[0].primary.as_ref().unwrap())
         .unwrap();
     assert_eq!(at.source, "unrelated.ili");
+    let damaged = r#"INTERLIS 2.4;
+        MODEL BrokenA AT "x" VERSION "1" = DOMAIN First=; END BrokenA.
+        MODEL BrokenB AT "x" VERSION "1" = DOMAIN Second=; END BrokenB.
+        MODEL Selected AT "x" VERSION "1" = END Selected."#;
+    let report = compile(
+        request(vec![("damaged.ili", damaged.into())]),
+        Some(&["BrokenB".into()]),
+    )
+    .unwrap();
+    assert_eq!(report.status(), CompilationStatus::Rejected);
+    assert_eq!(report.diagnostics().len(), 1);
+    let at = report
+        .sources()
+        .location(report.diagnostics()[0].primary.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(at.start_line, 3);
+    let incomplete_boundary = r#"INTERLIS 2.4; MODEL MissingEnd AT "x" VERSION "1" =
+        MODEL Selected AT "x" VERSION "1" = END Selected."#;
+    let report = compile(
+        request(vec![
+            ("unclosed.ili", incomplete_boundary.into()),
+            ("separate.ili", selected.into()),
+        ]),
+        Some(&["Selected".into()]),
+    )
+    .unwrap();
+    assert_eq!(report.status(), CompilationStatus::Rejected);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ILI-SYNTAX")
+    );
 }
 
 #[test]
@@ -7874,6 +7907,78 @@ fn convert_unit_checks_exact_converted_bounds_and_mandatory_values() {
             input("0.10 [INTERLIS.s]"),
             Status::Rejected,
             Some("ILI-CONVERT-UNIT"),
+        );
+    }
+}
+
+#[test]
+fn nested_formats_preserve_the_structure_path_and_its_own_bounds() {
+    for version in ["2.3", "2.4"] {
+        let model = |lower: &str, nested_structure: &str| {
+            request(vec![
+                (
+                    "a-use.ili",
+                    format!(
+                        r#"INTERLIS {version};
+                    MODEL Using AT "x" VERSION "1" =
+                      IMPORTS Layout;
+                      STRUCTURE Item=detail:{nested_structure}; total:0..99; END Item;
+                      DOMAIN Packed=FORMAT BASED ON Item ("v" detail/Layout.PairCode "/" total/2)
+                          "{lower}".."v07:00/99";
+                    END Using."#
+                    ),
+                ),
+                (
+                    "z-base.ili",
+                    format!(
+                        r#"INTERLIS {version};
+                    MODEL Layout AT "x" VERSION "1" =
+                      STRUCTURE Part=first:0..9; second:0..9; END Part;
+                      STRUCTURE Other=first:0..9; second:0..9; END Other;
+                      DOMAIN PairCode=FORMAT BASED ON Part (first/2 ":" second/2)
+                        "02:00".."07:00";
+                    END Layout."#
+                    ),
+                ),
+            ])
+        };
+        let report = outcome(
+            model("v02:00/00", "Layout.Part"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let TypeInfo::Formatted(format) = graph.effective_type("Using.Packed").unwrap() else {
+            panic!("expected a formatted domain");
+        };
+        let interlis::FormattedPart::Structure(part) = &format.parts[1] else {
+            panic!("expected a bound structure component");
+        };
+        assert_eq!(part.attribute.target_name(), "Using.Item.detail");
+        assert_eq!(part.format.target_name(), "Layout.PairCode");
+        assert!(matches!(
+            graph.format_component_type(&format.parts[1]),
+            Some(TypeInfo::Formatted(_))
+        ));
+        let (lower, upper) = format.bounds.as_ref().unwrap();
+        assert_eq!(
+            lower
+                .components
+                .iter()
+                .map(|number| number.coefficient())
+                .collect::<Vec<_>>(),
+            ["2", "0", "0"]
+        );
+        assert_eq!(upper.components.len(), 3);
+        outcome(
+            model("v01:00/00", "Layout.Part"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+        outcome(
+            model("v02:00/00", "Layout.Other"),
+            Status::Rejected,
+            Some("ILI-FORMAT-STRUCTURE"),
         );
     }
 }

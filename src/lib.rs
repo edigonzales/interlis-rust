@@ -15,6 +15,7 @@ mod wasm;
 mod wire;
 
 pub use limits::Limits;
+pub use model::FormattedStructurePart;
 pub use model::{
     AlignmentKind, AssociationInfo, AssociationPathStep, AttributePathOwner, AttributePathType,
     AttributeSubdivision, AxisRotation, BinaryOperator, BlackboxKind, BoundConstraint,
@@ -236,33 +237,67 @@ struct FailedSource {
     diagnostics: diagnostic::Diagnostics,
 }
 
-fn retain_unaffected_models(
+fn separate_model_diagnostics(
     document: &mut syntax::Document,
-    diagnostics: &diagnostic::Diagnostics,
-) -> Option<Vec<(String, Option<String>)>> {
-    let mut affected = std::collections::BTreeSet::new();
-    for diagnostic in &diagnostics.entries {
+    headers: &[(String, Option<String>)],
+    diagnostics: diagnostic::Diagnostics,
+    limits: &Limits,
+) -> Result<Vec<FailedSource>, diagnostic::Diagnostics> {
+    if headers.len() != document.models.len()
+        || !headers
+            .iter()
+            .zip(&document.models)
+            .all(|((name, version), model)| {
+                name == &model.name.value && version.as_ref() == Some(&model.version.value)
+            })
+    {
+        // Do not discard possible model headers consumed during error recovery.
+        return Err(diagnostics);
+    }
+    let model_at = |diagnostic: &Diagnostic| {
         let (_, at, end) = diagnostic.primary.as_ref()?.sort_key();
         let index = document
             .models
             .partition_point(|model| model.span.sort_key().2 <= at);
         let (_, start, stop) = document.models.get(index)?.span.sort_key();
-        if at < start || end > stop {
-            return None;
-        }
-        affected.insert(index);
+        (start <= at && end <= stop).then_some(index)
+    };
+    let Some(positions) = diagnostics
+        .entries
+        .iter()
+        .map(model_at)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Err(diagnostics);
+    };
+    let mut grouped = std::collections::BTreeMap::new();
+    for (position, diagnostic) in positions.into_iter().zip(diagnostics.entries) {
+        let local = grouped
+            .entry(position)
+            .or_insert_with(|| diagnostic::Diagnostics::new(limits));
+        local.push_related(
+            &diagnostic.code,
+            &diagnostic.message,
+            diagnostic.primary,
+            diagnostic.related,
+        );
     }
-    let mut failures = Vec::new();
     let mut position = 0;
+    let mut failures = Vec::with_capacity(grouped.len());
     document.models.retain(|model| {
-        let failed = affected.contains(&position);
+        let diagnostics = grouped.remove(&position);
         position += 1;
-        if failed {
-            failures.push((model.name.value.clone(), Some(model.version.value.clone())));
+        if let Some(diagnostics) = diagnostics {
+            failures.push(FailedSource {
+                models: vec![(model.name.value.clone(), Some(model.version.value.clone()))],
+                diagnostics,
+            });
+            false
+        } else {
+            true
         }
-        !failed
     });
-    Some(failures)
+    Ok(failures)
 }
 
 impl Frontend {
@@ -320,11 +355,20 @@ fn frontend(
                 } else if local.syntax_invalid || local.unsupported_version {
                     if !local.unsupported_version
                         && let Some(mut partially_parsed) = document.take()
-                        && let Some(affected) =
-                            retain_unaffected_models(&mut partially_parsed, &local)
                     {
-                        model_headers = affected;
-                        documents.push(partially_parsed);
+                        match separate_model_diagnostics(
+                            &mut partially_parsed,
+                            &model_headers,
+                            local,
+                            limits,
+                        ) {
+                            Ok(failures) => {
+                                failed_sources.extend(failures);
+                                documents.push(partially_parsed);
+                                continue;
+                            }
+                            Err(diagnostics) => local = diagnostics,
+                        }
                     }
                     model_headers.sort_unstable();
                     model_headers.dedup();

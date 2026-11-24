@@ -1,9 +1,11 @@
 use super::{
-    Analyzer, Effective, Kind, TypeInfo, collections::compare_count, functions::compare_decimal,
+    Analyzer, BoundName, Effective, Kind, TypeInfo,
+    collections::{compare_count, structure_targets},
+    functions::compare_decimal,
 };
 use crate::{
-    DecimalInfo, FormattedBound, FormattedPart, FormattedType, Limits, NumericBounds, Span,
-    TypeReference,
+    DecimalInfo, FormattedBound, FormattedPart, FormattedStructurePart, FormattedType, Limits,
+    NumericBounds, Span, TypeReference,
     limits::WorkBudget,
     number::{DecimalLiteral, NumberError},
     syntax::{FormatAttribute, FormatDefinition, FormatPart, Name, QualifiedName, StringRange},
@@ -43,7 +45,9 @@ impl Analyzer<'_, '_> {
                 }
                 parts = self.clone_format_parts(base, location)?;
                 for part in &mut parts {
-                    if let FormattedPart::Numeric { attribute, .. } = part {
+                    if let FormattedPart::Numeric { attribute, .. }
+                    | FormattedPart::Structure(FormattedStructurePart { attribute, .. }) = part
+                    {
                         let original = self.names[attribute.target_name()];
                         let name = Name {
                             value: self.symbols[original].declaration.name.clone(),
@@ -98,9 +102,33 @@ impl Analyzer<'_, '_> {
                         width,
                     });
                 }
-                FormatPart::Attribute { span, .. } => {
-                    self.unsupported_expression(span);
-                    return None;
+                FormatPart::Attribute {
+                    attribute: FormatAttribute::Formatted { name, domain },
+                    ..
+                } => {
+                    let attribute = self.format_member(scope, name)?;
+                    let target =
+                        self.expression_name(owner, domain, &[Kind::Domain], "ILI-FORMAT-DOMAIN")?;
+                    let BoundName::Declared(id) = target else {
+                        self.unsupported_expression(&domain.span);
+                        return None;
+                    };
+                    if !self.check_domain_order(owner, id, &domain.span) {
+                        return None;
+                    }
+                    let selected = self.resolve_domain(id)?;
+                    if !matches!(self.types[selected.ty], TypeInfo::Formatted(_)) {
+                        return self.format_error(
+                            "ILI-FORMAT-DOMAIN",
+                            "A structure component requires a formatted domain",
+                            &domain.span,
+                        );
+                    }
+                    parts.push(FormattedPart::Structure(FormattedStructurePart {
+                        attribute,
+                        format: self.bound_reference(owner, domain, target)?,
+                        type_id: selected.ty,
+                    }));
                 }
             }
         }
@@ -108,11 +136,12 @@ impl Analyzer<'_, '_> {
         for part in &parts {
             match part {
                 FormattedPart::Literal { value, .. } => separated |= !value.is_empty(),
-                FormattedPart::Numeric { attribute, .. } => {
+                FormattedPart::Numeric { attribute, .. }
+                | FormattedPart::Structure(FormattedStructurePart { attribute, .. }) => {
                     if !separated {
                         return self.format_error(
                             "ILI-FORMAT-SEPARATOR",
-                            "Numeric format components require a nonempty separator",
+                            "Format components require a nonempty separator",
                             attribute.source_span(),
                         );
                     }
@@ -150,6 +179,14 @@ impl Analyzer<'_, '_> {
                     1 + attribute.declared_name().len()
                         + attribute.target_name().len()
                         + width.as_ref().map_or(0, String::len)
+                }
+                FormattedPart::Structure(FormattedStructurePart {
+                    attribute, format, ..
+                }) => {
+                    1 + attribute.declared_name().len()
+                        + attribute.target_name().len()
+                        + format.declared_name().len()
+                        + format.target_name().len()
                 }
             })
             .sum();
@@ -241,10 +278,20 @@ impl Analyzer<'_, '_> {
             let TypeInfo::Formatted(format) = &self.types[ty] else {
                 continue;
             };
+            let at = format.span.clone();
+            let parts = self.clone_format_parts(ty, &at)?;
             let mut abstract_type = false;
-            for part in &format.parts {
-                let FormattedPart::Numeric { attribute, .. } = part else {
-                    continue;
+            for part in &parts {
+                let attribute = match part {
+                    FormattedPart::Literal { .. } => continue,
+                    FormattedPart::Numeric { attribute, .. } => attribute,
+                    FormattedPart::Structure(FormattedStructurePart {
+                        attribute, type_id, ..
+                    }) => {
+                        self.check_formatted_component(attribute, *type_id)?;
+                        abstract_type |= abstract_types.contains(type_id);
+                        continue;
+                    }
                 };
                 let member = &self.symbols[self.names[attribute.target_name()]].declaration;
                 let Some(TypeInfo::Numeric(number)) = member.type_id.map(|id| &self.types[id])
@@ -272,6 +319,9 @@ impl Analyzer<'_, '_> {
             if abstract_type {
                 abstract_types.insert(ty);
             }
+            let TypeInfo::Formatted(format) = &self.types[ty] else {
+                unreachable!()
+            };
             let Some((lower, upper)) = &format.bounds else {
                 continue;
             };
@@ -352,14 +402,63 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
+    fn check_formatted_component(
+        &mut self,
+        attribute: &TypeReference,
+        format: usize,
+    ) -> Option<()> {
+        let at = attribute.source_span();
+        let owner = self.names[attribute.target_name()];
+        let Some(TypeInfo::Structure(structure)) = self.symbols[owner]
+            .declaration
+            .type_id
+            .map(|ty| &self.types[ty])
+        else {
+            return self.format_error(
+                "ILI-FORMAT-ATTRIBUTE",
+                "A nested format requires a structure-valued attribute",
+                at,
+            );
+        };
+        let TypeInfo::Formatted(format) = &self.types[format] else {
+            unreachable!()
+        };
+        let expected = self.names[format.structure.target_name()];
+        let targets: Vec<_> = structure_targets(structure)
+            .iter()
+            .map(|target| self.names[target.target_name()])
+            .collect();
+        if targets.is_empty() {
+            return self.format_error(
+                "ILI-FORMAT-STRUCTURE",
+                "The component must have a concrete structure scope",
+                at,
+            );
+        }
+        for target in targets {
+            if !self.specializes_symbol(target, expected, at)? {
+                return self.format_error(
+                    "ILI-FORMAT-STRUCTURE",
+                    "The component structure must specialize the nested format's structure",
+                    at,
+                );
+            }
+        }
+        Some(())
+    }
+
     fn format_value(&mut self, ty: usize, text: &str, at: &Span) -> Option<Vec<DecimalInfo>> {
         if !self.step(text.len(), at) {
             return None;
         }
-        let TypeInfo::Formatted(format) = &self.types[ty] else {
-            unreachable!()
+        let parts = match format_operations(ty, &self.types, &mut self.work) {
+            Ok(parts) => parts,
+            Err(error) => {
+                self.number_error(error, at);
+                return None;
+            }
         };
-        let result = parse_value(format, text, self.limits, &mut self.work, |attribute| {
+        let result = parse_value(&parts, text, self.limits, &mut self.work, |attribute| {
             let ty = self.symbols[self.names[attribute.target_name()]]
                 .declaration
                 .type_id?;
@@ -388,8 +487,72 @@ impl Analyzer<'_, '_> {
     }
 }
 
+enum FormatOperation<'a> {
+    Literal(&'a str),
+    Numeric(&'a TypeReference, Option<&'a str>),
+    Bounds {
+        first: usize,
+        lower: &'a [DecimalInfo],
+        upper: &'a [DecimalInfo],
+    },
+}
+
+fn format_operations<'a>(
+    root: usize,
+    types: &'a [TypeInfo],
+    work: &mut WorkBudget,
+) -> Result<Vec<FormatOperation<'a>>, NumberError> {
+    let mut pending = vec![(root, 0, 0)];
+    let mut operations = Vec::new();
+    let mut components = 0;
+    while let Some((ty, position, _)) = pending.last_mut() {
+        work.charge(1).map_err(|_| NumberError::Work)?;
+        let TypeInfo::Formatted(format) = &types[*ty] else {
+            unreachable!()
+        };
+        match format.parts.get(*position) {
+            Some(FormattedPart::Literal { value, .. }) => {
+                *position += 1;
+                operations.push(FormatOperation::Literal(value));
+            }
+            Some(FormattedPart::Numeric { attribute, width }) => {
+                *position += 1;
+                components += 1;
+                operations.push(FormatOperation::Numeric(attribute, width.as_deref()));
+            }
+            Some(FormattedPart::Structure(part)) => {
+                *position += 1;
+                pending.push((part.type_id, 0, components));
+            }
+            None => {
+                let (ty, _, first) = pending.pop().expect("frame is active");
+                // Root bounds are handled by the caller. Nested bounds narrow
+                // each occurrence independently.
+                if !pending.is_empty() {
+                    let mut ancestor = Some(ty);
+                    while let Some(id) = ancestor {
+                        work.charge(1).map_err(|_| NumberError::Work)?;
+                        let TypeInfo::Formatted(domain) = &types[id] else {
+                            unreachable!()
+                        };
+                        if let Some((min, max)) = &domain.bounds {
+                            operations.push(FormatOperation::Bounds {
+                                first,
+                                lower: &min.components,
+                                upper: &max.components,
+                            });
+                        }
+                        ancestor = domain.base;
+                    }
+                }
+            }
+        }
+    }
+    Ok(operations)
+}
+
 fn parse_value<'a>(
-    format: &FormattedType,
+    operations: &[FormatOperation<'_>],
     text: &str,
     limits: &Limits,
     work: &mut WorkBudget,
@@ -415,7 +578,7 @@ fn parse_value<'a>(
         if let Some(value) = visit.value {
             values.push(value);
         }
-        let Some(part) = format.parts.get(visit.part) else {
+        let Some(part) = operations.get(visit.part) else {
             if visit.remaining.is_empty() {
                 return Ok(Some(values));
             }
@@ -423,10 +586,10 @@ fn parse_value<'a>(
         };
         let part_index = visit.part + 1;
         match part {
-            FormattedPart::Literal { value, .. } => {
+            FormatOperation::Literal(value) => {
                 work.charge(u32::try_from(value.len()).map_err(|_| NumberError::Limit)?)
                     .map_err(|_| NumberError::Work)?;
-                if let Some(rest) = visit.remaining.strip_prefix(value) {
+                if let Some(rest) = visit.remaining.strip_prefix(*value) {
                     pending.push(Visit {
                         part: part_index,
                         remaining: rest,
@@ -435,7 +598,23 @@ fn parse_value<'a>(
                     });
                 }
             }
-            FormattedPart::Numeric { attribute, width } => {
+            FormatOperation::Bounds {
+                first,
+                lower,
+                upper,
+            } => {
+                if compare_components(&values[*first..], lower, work)? != Ordering::Less
+                    && compare_components(&values[*first..], upper, work)? != Ordering::Greater
+                {
+                    pending.push(Visit {
+                        part: part_index,
+                        remaining: visit.remaining,
+                        prefix_len: values.len(),
+                        value: None,
+                    });
+                }
+            }
+            FormatOperation::Numeric(attribute, width) => {
                 let Some(range) = component_type(attribute) else {
                     return Ok(None);
                 };

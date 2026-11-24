@@ -1241,7 +1241,7 @@ impl Comparison<'_> {
                 }
                 for (a, b) in a.parts.iter().zip(&b.parts) {
                     self.work.charge(1)?;
-                    use crate::FormattedPart::{Literal, Numeric};
+                    use crate::FormattedPart::{Literal, Numeric, Structure};
                     let matches = match (a, b) {
                         (Literal { value: a, .. }, Literal { value: b, .. }) => {
                             self.work.charge((a.len() + b.len()) as u32)?;
@@ -1257,6 +1257,10 @@ impl Comparison<'_> {
                                 width: bw,
                             },
                         ) => aw == bw && self.reference(Some(a), Some(b))?,
+                        (Structure(a), Structure(b)) => {
+                            self.reference(Some(&a.attribute), Some(&b.attribute))?
+                                && self.reference(Some(&a.format), Some(&b.format))?
+                        }
                         _ => false,
                     };
                     if !matches {
