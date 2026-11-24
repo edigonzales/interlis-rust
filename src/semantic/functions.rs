@@ -2,11 +2,12 @@ use super::{
     Analyzer, BoundName, Kind, Namespace, QualifiedName, SyntaxDecl, TypeInfo,
     collections::compare_count,
     expressions::{scalar_type, underlying_expression},
+    object_references::object_targets,
     units::unit_extends,
 };
 use crate::{
     BoundExpressionKind, DecimalInfo, ExpressionId, ExpressionType, FunctionInfo, NumericRange,
-    RelatedLocation, Span, UnitConstant,
+    ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
     limits::WorkBudget,
     number::{DecimalLiteral, NumberError},
     syntax::ArgumentType,
@@ -36,18 +37,56 @@ impl Analyzer<'_, '_> {
     }
 
     fn bind_function_type(&mut self, owner: usize, argument: &ArgumentType) -> Option<()> {
-        let ArgumentType::Attribute(ty) = argument else {
-            unreachable!("unsupported function arguments are gated");
+        let (type_id, declared, mandatory) = match argument {
+            ArgumentType::Attribute(ty) => {
+                let resolved = self.concrete_type(
+                    owner,
+                    ty.ty.as_ref().expect("a concrete signature was checked"),
+                )?;
+                (
+                    resolved.ty,
+                    ty.mandatory,
+                    ty.mandatory || resolved.mandatory,
+                )
+            }
+            ArgumentType::Objects { plural, target, .. } => {
+                let target = self.bind_object_target(owner, target)?;
+                (self.object_selection_type(*plural, target), false, false)
+            }
+            _ => unreachable!("unsupported function arguments are gated"),
         };
-        let resolved = self.concrete_type(
-            owner,
-            ty.ty.as_ref().expect("a concrete signature was checked"),
-        )?;
         let declaration = &mut self.symbols[owner].declaration;
-        declaration.type_id = Some(resolved.ty);
-        declaration.declared_mandatory = Some(ty.mandatory);
-        declaration.effective_mandatory = Some(ty.mandatory || resolved.mandatory);
+        declaration.type_id = Some(type_id);
+        declaration.declared_mandatory = Some(declared);
+        declaration.effective_mandatory = Some(mandatory);
         Some(())
+    }
+
+    pub(super) fn object_selection_type(&mut self, plural: bool, target: ObjectTarget) -> usize {
+        let id = self.types.len();
+        self.types.push(TypeInfo::ObjectSelection(ObjectSelection {
+            plural,
+            targets: vec![target],
+        }));
+        id
+    }
+
+    pub(super) fn has_objects_parameter(
+        &mut self,
+        function: BoundName,
+        span: &Span,
+    ) -> Option<bool> {
+        match function {
+            BoundName::Predefined(name, _) => Some(name == "objectCount"),
+            BoundName::Declared(id) => {
+                let arguments = &self.symbols[id].declaration.function()?.arguments;
+                let has_objects = arguments.iter().any(|&id| {
+                    self.symbols[id].declaration.type_id
+                        .is_some_and(|ty| matches!(&self.types[ty], TypeInfo::ObjectSelection(selection) if selection.plural))
+                });
+                self.step(arguments.len(), span).then_some(has_objects)
+            }
+        }
     }
 
     pub(super) fn bind_call(
@@ -115,7 +154,10 @@ impl Analyzer<'_, '_> {
             self.expression_name(owner, function, &[Kind::Function], "ILI-FUNCTION-NAME")?;
         let expected = match target {
             BoundName::Declared(id) => self.symbols[id].declaration.function()?.arguments.len(),
-            BoundName::Predefined("len" | "lenM" | "trim" | "trimM", _) => 1,
+            BoundName::Predefined(
+                "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount",
+                _,
+            ) => 1,
             BoundName::Predefined(..) => {
                 self.unsupported_expression(span);
                 return None;
@@ -133,20 +175,43 @@ impl Analyzer<'_, '_> {
     }
 
     fn bind_predefined_call(&mut self, name: &str, argument: ExpressionId) -> Option<usize> {
+        let at = self.expressions[argument.0 as usize].span.clone();
+        if name == "elementCount" {
+            let value = &self.expressions[argument.0 as usize];
+            if value.value_type != ExpressionType::Undefined
+                && !value
+                    .type_id
+                    .is_some_and(|ty| matches!(self.types[ty], TypeInfo::Collection(_)))
+            {
+                self.diagnostics.push(
+                    "ILI-FUNCTION-ARGUMENT",
+                    "elementCount expects a BAG or LIST",
+                    Some(at),
+                );
+                return None;
+            }
+            return Some(self.unbounded_numeric_type());
+        }
         let allowed = match name {
             "len" | "trim" => TypeInfo::UnboundedText,
             "lenM" | "trimM" => TypeInfo::MultilineText { max_length: None },
+            "objectCount" => TypeInfo::ObjectSelection(ObjectSelection {
+                plural: true,
+                targets: vec![ObjectTarget {
+                    target: None,
+                    restrictions: Vec::new(),
+                }],
+            }),
             _ => unreachable!("unsupported predefined functions are gated"),
         };
         let formal = self.types.len();
         self.types.push(allowed);
-        let at = self.expressions[argument.0 as usize].span.clone();
         match self.argument_fits(argument, formal, false) {
             Ok(Some(true)) => {}
             Ok(Some(false)) => {
                 self.diagnostics.push(
                     "ILI-FUNCTION-ARGUMENT",
-                    "The argument must match the predefined text parameter",
+                    "The argument cannot be assigned to the predefined parameter",
                     Some(at),
                 );
                 return None;
@@ -160,19 +225,23 @@ impl Analyzer<'_, '_> {
                 return None;
             }
         }
-        if matches!(name, "len" | "lenM") {
-            let result = self.types.len();
-            self.types.push(TypeInfo::Numeric(NumericRange {
-                bounds: None,
-                unit: None,
-                reference_system: None,
-                circular: false,
-                direction: None,
-            }));
-            Some(result)
+        if matches!(name, "len" | "lenM" | "objectCount") {
+            Some(self.unbounded_numeric_type())
         } else {
             Some(formal)
         }
+    }
+
+    fn unbounded_numeric_type(&mut self) -> usize {
+        let result = self.types.len();
+        self.types.push(TypeInfo::Numeric(NumericRange {
+            bounds: None,
+            unit: None,
+            reference_system: None,
+            circular: false,
+            direction: None,
+        }));
+        result
     }
 
     fn argument_fits(
@@ -187,6 +256,37 @@ impl Analyzer<'_, '_> {
         if actual.value_type == ExpressionType::Undefined {
             return Ok(Some(!mandatory));
         }
+        let ty = actual.type_id.map(|id| &self.types[id]);
+        if let TypeInfo::ObjectSelection(target) = formal_type {
+            let sources = match ty {
+                Some(TypeInfo::Reference(reference)) => std::slice::from_ref(&reference.target),
+                Some(TypeInfo::ObjectSelection(source)) if target.plural || !source.plural => {
+                    &source.targets
+                }
+                _ => return Ok(Some(false)),
+            };
+            let expected = object_targets(&target.targets[0]);
+            if expected.is_empty() {
+                return Ok(Some(true));
+            }
+            let mut source_ids = Vec::new();
+            for source in sources {
+                let roots = object_targets(source);
+                if roots.is_empty() {
+                    return Ok(Some(false));
+                }
+                source_ids.extend(roots.iter().map(|link| self.names[link.target_name()]));
+            }
+            let target_ids: Vec<_> = expected
+                .iter()
+                .map(|link| self.names[link.target_name()])
+                .collect();
+            let at = actual.span.clone();
+            return self
+                .targets_specialize(&source_ids, &target_ids, &at)
+                .map(Some)
+                .ok_or(NumberError::Work);
+        }
         if actual.value_type != expected {
             // Contextual constants and object or class relations are checked by
             // their own type families as those become available.
@@ -197,7 +297,6 @@ impl Analyzer<'_, '_> {
         if actual.type_id == Some(formal) {
             return Ok(Some(true));
         }
-        let ty = actual.type_id.map(|id| &self.types[id]);
         match expected {
             ExpressionType::Boolean => Ok(Some(true)),
             ExpressionType::Text => Ok(text_argument_fits(actual, ty, formal_type)),

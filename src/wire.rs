@@ -270,12 +270,12 @@ impl Serialize for GraphOutput<'_> {
             },
         )?;
         if !expressions.is_empty() {
-            out.serialize_field("expressions", &ExpressionsOutput(expressions, self.sources))?;
+            out.serialize_field("expressions", &ExpressionsOutput(self.graph, self.sources))?;
         }
         out.end()
     }
 }
-struct ExpressionsOutput<'a>(&'a [crate::BoundExpression], &'a SourceSet);
+struct ExpressionsOutput<'a>(&'a ModelGraph, &'a SourceSet);
 impl Serialize for ExpressionsOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -300,15 +300,29 @@ impl Serialize for ExpressionsOutput<'_> {
         #[serde(rename_all = "camelCase")]
         struct Expression<'a> {
             value_type: crate::ExpressionType,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            effective_type: Option<TypeOutput<'a>>,
             #[serde(flatten)]
             kind: Kind<'a>,
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for expression in self.0 {
+        let expressions = self.0.expressions();
+        let mut seq = serializer.serialize_seq(Some(expressions.len()))?;
+        for (id, expression) in expressions.iter().enumerate() {
+            let effective_type = if matches!(
+                expression.kind,
+                crate::BoundExpressionKind::ObjectSet { .. }
+            ) {
+                self.0
+                    .expression_declared_type(crate::ExpressionId(id as u32))
+                    .map(|ty| TypeOutput(ty, self.0, self.1))
+            } else {
+                None
+            };
             seq.serialize_element(&Expression {
                 value_type: expression.value_type,
+                effective_type,
                 kind: match &expression.kind {
                     crate::BoundExpressionKind::Path { steps } => Kind::Path {
                         kind: "path",
@@ -679,6 +693,11 @@ impl<'report> Serialize for TypeOutput<'report> {
             #[serde(flatten)]
             location: Option<SourceLocation>,
         }
+        #[derive(Serialize)]
+        struct ObjectTarget<'a> {
+            target: Option<Reference<'a>>,
+            restrictions: Vec<Reference<'a>>,
+        }
         impl<'a> From<&'a crate::NumericRange> for Range<'a> {
             fn from(range: &'a crate::NumericRange) -> Self {
                 Self {
@@ -768,7 +787,7 @@ impl<'report> Serialize for TypeOutput<'report> {
             },
             ObjectSelection {
                 plural: bool,
-                targets: &'a [crate::ObjectTarget],
+                targets: Vec<ObjectTarget<'a>>,
             },
             Geometry {
                 #[serde(flatten)]
@@ -882,7 +901,21 @@ impl<'report> Serialize for TypeOutput<'report> {
             .serialize(serializer),
             TypeInfo::ObjectSelection(selection) => Type::ObjectSelection {
                 plural: selection.plural,
-                targets: &selection.targets,
+                targets: selection
+                    .targets
+                    .iter()
+                    .map(|target| ObjectTarget {
+                        target: target
+                            .target
+                            .as_ref()
+                            .map(|reference| project_reference(reference, self.2)),
+                        restrictions: target
+                            .restrictions
+                            .iter()
+                            .map(|reference| project_reference(reference, self.2))
+                            .collect(),
+                    })
+                    .collect(),
             }
             .serialize(serializer),
             TypeInfo::Geometry(geometry) => Type::Geometry { geometry }.serialize(serializer),

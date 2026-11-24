@@ -181,7 +181,11 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
 }
 
 fn supported_function_argument(argument: &syntax::ArgumentType) -> bool {
-    matches!(argument, syntax::ArgumentType::Attribute(ty) if ty.ty.as_ref().is_some_and(supported_type))
+    match argument {
+        syntax::ArgumentType::Attribute(ty) => ty.ty.as_ref().is_some_and(supported_type),
+        syntax::ArgumentType::Objects { .. } => true,
+        _ => false,
+    }
 }
 
 // Every newly parsed family must pass this gate before the I-0 analyzer runs.
@@ -224,7 +228,6 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Container {
                     properties,
                     parameters,
-                    constraints,
                     attributes,
                     parameter_section,
                     span,
@@ -239,9 +242,6 @@ fn ensure_supported_semantics(
                         )
                     }) || parameter_section.is_some()
                         || !parameters.is_empty()
-                        || constraints
-                            .iter()
-                            .any(|constraint| !constraints::supported_constraint(constraint))
                     {
                         Some(span)
                     } else {
@@ -321,17 +321,9 @@ fn ensure_supported_semantics(
                         .iter()
                         .any(|argument| !supported_function_argument(&argument.ty)))
                 .then_some(&function.span),
-                SyntaxDecl::Constraints(block) => block
-                    .constraints
-                    .iter()
-                    .any(|constraint| !constraints::supported_constraint(constraint))
-                    .then_some(&block.span),
+                SyntaxDecl::Constraints(_) => None,
                 SyntaxDecl::Association(association) => {
                     if association.derived_from.is_some()
-                        || association
-                            .constraints
-                            .iter()
-                            .any(|constraint| !constraints::supported_constraint(constraint))
                         || association
                             .roles
                             .iter()

@@ -288,6 +288,9 @@ pub enum BoundExpressionKind {
         canonical_length: usize,
     },
     This,
+    ObjectSet {
+        explicit: bool,
+    },
     Path {
         steps: Vec<BoundPathStep>,
     },
@@ -382,6 +385,11 @@ pub enum ConstraintRule {
     Existence {
         source_path: ExpressionId,
         required: Vec<ExistenceTarget>,
+    },
+    Set {
+        basket: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filter: Option<ExpressionId>,
     },
 }
 

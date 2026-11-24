@@ -736,7 +736,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     );
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
-        "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.objectCount(ALL) > 0; END C; END T;",
+        "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
         "TOPIC T = CLASS X=END X; VIEW V PROJECTION OF X; = ALL OF X; END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -4290,6 +4290,138 @@ fn existence_vertex_type_can_narrow_target_and_standard_oid_matches_text_oid() {
             (status == Status::Rejected).then_some("ILI-EXISTENCE-TYPE"),
         );
     }
+    outcome(
+        single(
+            r#"DOMAIN Bare=COORD 0..100,0..100;
+               Fine EXTENDS Bare=COORD 10..50,10..50 REFSYS "EPSG:2056";
+               TOPIC T=CLASS Lookup=point:Bare; END Lookup;
+               CLASS Source=line:POLYLINE WITH (STRAIGHTS) VERTEX Fine;
+                   EXISTENCE CONSTRAINT line REQUIRED IN Lookup:point;
+               END Source; END T;"#,
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+}
+
+#[test]
+fn set_constraints_bind_the_filter_and_targeted_object_sets() {
+    let report = outcome(
+        single(
+            "FUNCTION has(objects:OBJECTS OF M.T.Base RESTRICTION (M.T.Child)):BOOLEAN;
+             FUNCTION isChild(obj:OBJECT OF M.T.Child):BOOLEAN;
+             TOPIC T=CLASS Base=active:BOOLEAN; END Base;
+                CLASS Child EXTENDS Base=
+                    MANDATORY CONSTRAINT isChild(THIS);
+                    SET CONSTRAINT(BASKET) childSet: WHERE active: has(ALL) AND has(ALL(Child));
+                END Child;
+             END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let rules = graph.declaration("M.T.Child").unwrap().constraints();
+    let interlis::ConstraintRule::Set {
+        basket: true,
+        filter: Some(filter),
+    } = rules[1].rule
+    else {
+        panic!("expected a basket set constraint with a filter");
+    };
+    let interlis::BoundExpressionKind::Path { steps } = &graph.expression(filter).unwrap().kind
+    else {
+        panic!("expected a bound filter");
+    };
+    assert_eq!(steps[0].reference.target_name(), "M.T.Base.active");
+    let interlis::BoundExpressionKind::Binary { left, right, .. } =
+        graph.expression(rules[1].expression.unwrap()).unwrap().kind
+    else {
+        panic!("expected two calls");
+    };
+    for (id, expected_explicit) in [(left, false), (right, true)] {
+        let interlis::BoundExpressionKind::Call { arguments, .. } =
+            &graph.expression(id).unwrap().kind
+        else {
+            panic!("expected a call");
+        };
+        assert!(matches!(graph.expression(arguments[0]).unwrap().kind,
+            interlis::BoundExpressionKind::ObjectSet { explicit } if explicit == expected_explicit));
+        let Some(TypeInfo::ObjectSelection(objects)) = graph.expression_declared_type(arguments[0])
+        else {
+            panic!("expected object selection");
+        };
+        assert!(objects.plural);
+        assert_eq!(
+            objects.targets[0].target.as_ref().unwrap().target_name(),
+            "M.T.Child"
+        );
+    }
+}
+
+#[test]
+fn set_conditions_check_scope_edition_and_all_candidate_object_types() {
+    let body = "TOPIC T=CLASS Base=active:BOOLEAN; END Base;
+        CLASS Child EXTENDS Base=CONSTRAINT END Child; END T;";
+    for (constraint, code) in [
+        (
+            "SET CONSTRAINT INTERLIS.objectCount(ALL) > 0 AND active;",
+            "ILI-SET-OBJECT-VALUE",
+        ),
+        ("SET CONSTRAINT WHERE active: #true;", "ILI-SET-OBJECTS"),
+        (
+            "MANDATORY CONSTRAINT INTERLIS.objectCount(ALL) > 0;",
+            "ILI-CONSTRAINT-OBJECTS",
+        ),
+        ("SET CONSTRAINT has(ALL(Base));", "ILI-FUNCTION-ARGUMENT"),
+        (
+            "SET CONSTRAINT isChild(ALL) AND has(ALL);",
+            "ILI-FUNCTION-ARGUMENT",
+        ),
+        (
+            "SET CONSTRAINT INTERLIS.objectCount(ALL(M.T.Missing)) > 0;",
+            "ILI-NAME-NOT-FOUND",
+        ),
+        (
+            "SET CONSTRAINT WHERE 1: INTERLIS.objectCount(ALL) > 0;",
+            "ILI-CONSTRAINT-BOOLEAN",
+        ),
+    ] {
+        outcome(
+            single(&format!(
+                "FUNCTION has(objects:OBJECTS OF M.T.Child):BOOLEAN;
+                 FUNCTION isChild(obj:OBJECT OF M.T.Child):BOOLEAN;
+                 {}",
+                body.replace("=CONSTRAINT", &format!("={constraint}"))
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        request(vec![(
+            "legacy",
+            "INTERLIS 2.3; MODEL M AT \"x\" VERSION \"1\" =
+             TOPIC T=CLASS Child=END Child; CLASS Parent=END Parent;
+             ASSOCIATION ParentOf=children -- Child; parent -- {1} Parent; END ParentOf;
+             CONSTRAINTS OF Parent=MANDATORY CONSTRAINT INTERLIS.objectCount(children)>0;
+                 SET CONSTRAINT #true;
+             END; END T; END M."
+                .into(),
+        )]),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        single(
+            "TOPIC T=STRUCTURE Child=END Child;
+             CLASS Parent=children:LIST OF Child;
+                MANDATORY CONSTRAINT INTERLIS.elementCount(children)>0;
+             END Parent; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
 }
 
 #[test]

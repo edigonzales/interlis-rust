@@ -26,7 +26,15 @@ impl Analyzer<'_, '_> {
         let elements = match path.elements.split_first() {
             Some((PathElement::Special(special), tail)) if special.value == SpecialPath::This => {
                 if tail.is_empty() {
-                    let type_id = self.symbols[owner].declaration.type_id;
+                    let type_id = if matches!(
+                        self.symbols[owner].declaration.kind,
+                        Kind::Class | Kind::Association
+                    ) {
+                        let target = self.current_object_target(owner, "THIS", &special.span)?;
+                        Some(self.object_selection_type(false, target))
+                    } else {
+                        self.symbols[owner].declaration.type_id
+                    };
                     let value_type =
                         type_id.map_or(ExpressionType::Object, |ty| scalar_type(&self.types[ty]));
                     return Some((BoundExpressionKind::This, value_type, type_id));

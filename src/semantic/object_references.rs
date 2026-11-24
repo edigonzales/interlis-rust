@@ -1,10 +1,26 @@
 use super::{
-    Analyzer, BoundName, Kind, LookupError, QualifiedName, collections::structure_targets,
+    Analyzer, BoundName, Kind, LookupError, Name, QualifiedName, collections::structure_targets,
 };
 use crate::{LanguageVersion, ObjectTarget, ReferenceType, Span, TypeInfo, TypeReference, syntax};
 use std::collections::BTreeSet;
 
 impl Analyzer<'_, '_> {
+    pub(super) fn current_object_target(
+        &mut self,
+        owner: usize,
+        keyword: &str,
+        span: &Span,
+    ) -> Option<ObjectTarget> {
+        let name = Name {
+            value: keyword.into(),
+            span: span.clone(),
+        };
+        Some(ObjectTarget {
+            target: Some(self.reference_to_symbol(owner, owner, &name)?),
+            restrictions: Vec::new(),
+        })
+    }
+
     pub(super) fn reference_type(
         &mut self,
         owner: usize,

@@ -35,11 +35,12 @@ export function verify(report, expected = 'checked_subset') {
 // A few actual parser/position counterprobes; broad syntax assertions live in Rust.
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; FUNCTION gate(value:BOOLEAN):BOOLEAN; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=active:BOOLEAN; MANDATORY CONSTRAINT requiresActive: gate(active); END C; END T; END B.';
 const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
+const population = 'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=flag:BOOLEAN; SET CONSTRAINT (BASKET) nonempty: WHERE flag: INTERLIS.objectCount(ALL) > 0; END C; END T; END M.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = FUNCTION f(x:BOOLEAN):BOOLEAN; CLASS C=a:BOOLEAN := Missing(THIS); MANDATORY CONSTRAINT a OR b AND c == d; END C; END M.', 'rejected', 'ILI-FUNCTION-CONTRACTED'],
-  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = FUNCTION f():BOOLEAN; CLASS C=MANDATORY CONSTRAINT named: a == b AND c OR d + e * f => g; UNIQUE(BASKET) key: WHERE a: parts[FIRST]->name; SET CONSTRAINT(BASKET) all: WHERE a: Missing(ALL(ANYCLASS)); END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = FUNCTION f():BOOLEAN; CLASS C=MANDATORY CONSTRAINT named: a == b AND c OR d + e * f => g; UNIQUE(BASKET) key: WHERE a: parts[FIRST]->name; SET CONSTRAINT(BASKET) all: WHERE a: Missing(ALL(ANYCLASS)); END C; END M.', 'rejected', 'ILI-PATH-NAME'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT f(); END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=a:BOOLEAN := b AND c; END C; END T; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=a:BOOLEAN := b AND c; END C; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
@@ -50,6 +51,7 @@ export const syntaxCases = [
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate ("😀" Year/4 "-" Month/INTERLIS.XMLDate); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   [classValues, 'checked_subset'],
+  [population, 'checked_subset'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; CONTEXT first=G=X; empty= END M.', 'rejected', 'ILI-CONTEXT-GENERIC'],
@@ -101,6 +103,14 @@ export function verifySyntax(report, text, status, code) {
     const target = value.restrictions[0];
     if (value.kind !== 'class_value' || value.valueKind !== 'class' || target.predefinedLanguage !== '2.3' || text.slice(target.startByte, target.endByte) !== 'INTERLIS.METAOBJECT') throw new Error('Lost the class-value restriction');
   }
+  if (text === population) {
+    const { declarations, expressions } = report.model;
+    const constraint = declarations.find(d => d.qualifiedName === 'M.T.C').constraints[0];
+    const count = expressions[expressions[constraint.expression].left];
+    const objects = expressions[count.arguments[0]];
+    const target = objects.effectiveType.targets[0].target;
+    if (!constraint.basket || expressions[constraint.filter].steps[0].reference.targetName !== 'M.T.C.flag' || objects.explicit || target.targetName !== 'M.T.C' || text.slice(target.startByte, target.endByte) !== 'ALL') throw new Error('Lost the bound SET filter or population');
+  }
   if(text.includes('X=;')) {
     const errors=report.diagnostics.filter(d=>d.code==='ILI-SYNTAX');
     if(errors.length!==2 || errors[0].startByte!==55 || errors[0].startColumnUtf16!==54 || errors[1].startByte!==59 || errors[1].startColumnUtf16!==58) throw new Error('Lost Unicode syntax ranges: '+JSON.stringify(errors));
@@ -121,7 +131,7 @@ selected.sources.push({name:'unselected',text:'INTERLIS 2.4; MODEL Other AT "x" 
 const missing=pair('2.4');missing.sources.shift();
 const wrong=pair('2.4');wrong.sources[0].text=wrong.sources[0].text.replaceAll('Base','Other');
 const prefix=pair('2.4');prefix.sources[1].text=prefix.sources[1].text.replace('Base.Count','Wrong.Base.Count');
-const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','SET CONSTRAINT INTERLIS.objectCount(ALL) > 0; END Item;');
+const unsupported=pair('2.4');unsupported.sources[1].text=unsupported.sources[1].text.replace('END Item;','SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END Item;');
 const numericLimit=pair('2.4');numericLimit.limits={max_numeric_digits:4};
 const syntaxLimit=pair('2.4');syntaxLimit.limits={max_syntax_nodes:5};
 const workLimit=pair('2.4');workLimit.limits={max_parser_steps:1};
@@ -129,7 +139,7 @@ const deepEnumeration=pair('2.4');deepEnumeration.sources=[{name:'memory:///deep
 const flatExpression = Array(20000).fill('a').join(' AND ');
 const expressionRequest = (tail = '', limits) => JSON.stringify({sources:[{name:'memory:///expression-😀.ili',text:'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=SET CONSTRAINT '+flatExpression+tail+'; END C; END T; END M.'}],...(limits?{limits}:{})});
 export const semanticCases = [
-  [expressionRequest(),'incomplete','ILI-UNSUPPORTED'],
+  [expressionRequest(),'rejected','ILI-SET-OBJECT-VALUE'],
   [expressionRequest(' AND'),'rejected','ILI-SYNTAX'],
   [expressionRequest('',{max_syntax_nodes:100}),'limit_exceeded','ILI-LIMIT'],
   [JSON.stringify(valid24),'checked_subset','2.4'],

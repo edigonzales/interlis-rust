@@ -1,11 +1,19 @@
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
     BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ExpressionId,
-    ExpressionType as ValueType, RelatedLocation, Span, TypeReference, UnitConstant,
+    ExpressionType as ValueType, LanguageVersion, RelatedLocation, Span, TypeReference,
+    UnitConstant,
     syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
 use std::collections::BTreeMap;
 use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum ExpressionContext {
+    Value,
+    IndividualConstraint,
+    Set,
+}
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_expression(
@@ -13,6 +21,7 @@ impl Analyzer<'_, '_> {
         owner: usize,
         expressions: &[Expression],
         root: ExprId,
+        context: ExpressionContext,
     ) -> Option<ExpressionId> {
         enum Visit {
             Start(ExprId),
@@ -20,6 +29,8 @@ impl Analyzer<'_, '_> {
         }
         let mut pending = vec![Visit::Start(root)];
         let mut bound = BTreeMap::new();
+        let modern = self.models[self.symbols[owner].model].language == LanguageVersion::V24;
+        let mut uses_objects = false;
         while let Some(visit) = pending.pop() {
             let id = match visit {
                 Visit::Start(id) | Visit::Finish(id, _) => id,
@@ -36,12 +47,23 @@ impl Analyzer<'_, '_> {
                         arguments,
                     } = &expression.kind
                     {
-                        Some(self.resolve_call(
-                            owner,
-                            function,
-                            arguments.len(),
-                            &expression.span,
-                        )?)
+                        let target =
+                            self.resolve_call(owner, function, arguments.len(), &expression.span)?;
+                        if modern
+                            && context != ExpressionContext::Value
+                            && self.has_objects_parameter(target, &function.span)?
+                        {
+                            if context == ExpressionContext::IndividualConstraint {
+                                self.diagnostics.push(
+                                    "ILI-CONSTRAINT-OBJECTS",
+                                    "An individual constraint cannot call a function with an OBJECTS parameter in INTERLIS 2.4",
+                                    Some(function.span.clone()),
+                                );
+                                return None;
+                            }
+                            uses_objects = true;
+                        }
+                        Some(target)
                     } else {
                         None
                     };
@@ -73,7 +95,41 @@ impl Analyzer<'_, '_> {
                 ExpressionKind::Literal(literal) => {
                     self.expression_literal(owner, literal, &expression.span)?
                 }
-                ExpressionKind::Path(path) => self.expression_path(owner, path)?,
+                ExpressionKind::Path(path) => {
+                    if context == ExpressionContext::Set {
+                        self.diagnostics.push(
+                            "ILI-SET-OBJECT-VALUE",
+                            "An individual object value may appear in WHERE but cannot appear in a SET condition",
+                            Some(path.span.clone()),
+                        );
+                        return None;
+                    }
+                    self.expression_path(owner, path)?
+                }
+                ExpressionKind::ObjectSet(target) => {
+                    let selected = if let Some(target) = target {
+                        self.bind_object_target(owner, target)?
+                    } else if matches!(
+                        self.symbols[owner].declaration.kind,
+                        Kind::Class | Kind::Association
+                    ) {
+                        self.current_object_target(owner, "ALL", &expression.span)?
+                    } else {
+                        self.diagnostics.push(
+                            "ILI-ALL-CONTEXT",
+                            "ALL without an explicit target requires a class or association context",
+                            Some(expression.span.clone()),
+                        );
+                        return None;
+                    };
+                    (
+                        BoundKind::ObjectSet {
+                            explicit: target.is_some(),
+                        },
+                        ValueType::ObjectSet,
+                        Some(self.object_selection_type(true, selected)),
+                    )
+                }
                 ExpressionKind::Call {
                     function,
                     arguments,
@@ -168,7 +224,20 @@ impl Analyzer<'_, '_> {
             let result = self.record_expression(kind, value_type, type_id, &expression.span);
             bound.insert(id.0, result);
         }
-        bound.get(&root.0).copied()
+        let result = *bound.get(&root.0)?;
+        if modern
+            && context == ExpressionContext::Set
+            && !uses_objects
+            && self.expressions[result.0 as usize].value_type == ValueType::Boolean
+        {
+            self.diagnostics.push(
+                "ILI-SET-OBJECTS",
+                "A SET condition in INTERLIS 2.4 requires a call with an OBJECTS parameter",
+                Some(expressions[root.0 as usize].span.clone()),
+            );
+            return None;
+        }
+        Some(result)
     }
 
     pub(super) fn record_expression(

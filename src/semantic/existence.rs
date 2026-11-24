@@ -156,24 +156,28 @@ impl Analyzer<'_, '_> {
                 numeric_compatible(source, target)
             }
             (TypeInfo::Coordinate(source), TypeInfo::Coordinate(target)) => {
-                let same_axes = source.kind == target.kind
-                    && source.reference_system == target.reference_system
-                    && source.axes.len() == target.axes.len()
-                    && source
-                        .axes
-                        .iter()
-                        .zip(&target.axes)
-                        .all(|(source, target)| numeric_compatible(source, target));
-                if from_vertex_domain && same_axes {
+                if source.axes.len() != target.axes.len() {
+                    return Some(false);
+                }
+                if from_vertex_domain {
                     let language = self.models[self.symbols[owner].model].language;
-                    return match scalar_extension(
-                        &self.types[actual],
-                        &self.types[expected],
-                        language,
-                        self.limits,
-                        &mut self.work,
-                        false,
-                    ) {
+                    let check = self
+                        .check_unit_specialization(actual, expected, false)
+                        .and_then(|reason| {
+                            if reason.is_some() {
+                                Ok(reason)
+                            } else {
+                                scalar_extension(
+                                    &self.types[actual],
+                                    &self.types[expected],
+                                    language,
+                                    self.limits,
+                                    &mut self.work,
+                                    false,
+                                )
+                            }
+                        });
+                    return match check {
                         Ok(reason) => Some(reason.is_none()),
                         Err(error) => {
                             self.number_error(error, at);
@@ -181,7 +185,13 @@ impl Analyzer<'_, '_> {
                         }
                     };
                 }
-                same_axes
+                source.kind == target.kind
+                    && source.reference_system == target.reference_system
+                    && source
+                        .axes
+                        .iter()
+                        .zip(&target.axes)
+                        .all(|(source, target)| numeric_compatible(source, target))
             }
             (TypeInfo::Oid(source), TypeInfo::Oid(target)) => oid_compatible(source, target),
             (TypeInfo::Boolean, TypeInfo::Boolean) => true,

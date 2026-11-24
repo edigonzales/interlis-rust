@@ -1,5 +1,7 @@
 use super::{
-    Analyzer, BoundName, Kind, SyntaxDecl, TypeInfo, expressions::scalar_type, paths::PathContext,
+    Analyzer, BoundName, Kind, SyntaxDecl, TypeInfo,
+    expressions::{ExpressionContext, scalar_type},
+    paths::PathContext,
 };
 use crate::{
     BoundConstraint, BoundExpressionKind, BoundPathStep, ConstraintRule, ExpressionId,
@@ -7,16 +9,6 @@ use crate::{
     syntax::{ConstraintKind, ConstraintSyntax, ExprId, Expression, UniqueKey},
 };
 use std::collections::BTreeMap;
-
-pub(super) fn supported_constraint(constraint: &ConstraintSyntax) -> bool {
-    matches!(
-        constraint.kind,
-        ConstraintKind::Mandatory { .. }
-            | ConstraintKind::Plausibility { .. }
-            | ConstraintKind::Unique { .. }
-            | ConstraintKind::Existence { .. }
-    )
-}
 
 impl Analyzer<'_, '_> {
     pub(super) fn bind_constraints(&mut self) -> Option<()> {
@@ -178,6 +170,46 @@ impl Analyzer<'_, '_> {
                     }
                     continue;
                 }
+                ConstraintKind::Set {
+                    basket,
+                    filter,
+                    expression,
+                } => {
+                    if !matches!(
+                        self.symbols[owner].declaration.kind,
+                        Kind::Class | Kind::Association
+                    ) {
+                        self.diagnostics.push(
+                            "ILI-SET-CONTEXT",
+                            "A SET constraint requires a class or association",
+                            Some(constraint.span.clone()),
+                        );
+                        continue;
+                    }
+                    let filter = if let Some(root) = filter {
+                        let Some(filter) = self.bind_boolean_expression(
+                            owner,
+                            expressions,
+                            *root,
+                            ExpressionContext::Value,
+                        ) else {
+                            if self.diagnostics.limited {
+                                return None;
+                            }
+                            continue;
+                        };
+                        Some(filter)
+                    } else {
+                        None
+                    };
+                    (
+                        ConstraintRule::Set {
+                            basket: basket.is_some(),
+                            filter,
+                        },
+                        *expression,
+                    )
+                }
                 ConstraintKind::Mandatory { expression } => {
                     (ConstraintRule::Mandatory, *expression)
                 }
@@ -213,7 +245,6 @@ impl Analyzer<'_, '_> {
                         *expression,
                     )
                 }
-                _ => unreachable!("unsupported constraint forms are gated"),
             };
             if let Some(constraint) = self.bind_constraint(
                 owner,
@@ -241,7 +272,14 @@ impl Analyzer<'_, '_> {
         root: ExprId,
         span: &Span,
     ) -> Option<BoundConstraint> {
-        let expression = self.bind_boolean_expression(owner, expressions, root)?;
+        let context = match rule {
+            ConstraintRule::Set { .. } => ExpressionContext::Set,
+            ConstraintRule::Mandatory | ConstraintRule::Plausibility { .. } => {
+                ExpressionContext::IndividualConstraint
+            }
+            _ => ExpressionContext::Value,
+        };
+        let expression = self.bind_boolean_expression(owner, expressions, root, context)?;
         Some(BoundConstraint {
             name: name.map(str::to_owned),
             rule,
@@ -255,8 +293,9 @@ impl Analyzer<'_, '_> {
         owner: usize,
         expressions: &[Expression],
         root: ExprId,
+        context: ExpressionContext,
     ) -> Option<ExpressionId> {
-        let expression = self.bind_expression(owner, expressions, root)?;
+        let expression = self.bind_expression(owner, expressions, root, context)?;
         let bound = &self.expressions[expression.0 as usize];
         if bound.value_type != ValueType::Boolean {
             self.diagnostics.push(
@@ -359,7 +398,12 @@ impl Analyzer<'_, '_> {
             }
         };
         let expression = match filter {
-            Some(filter) => Some(self.bind_boolean_expression(owner, expressions, filter)?),
+            Some(filter) => Some(self.bind_boolean_expression(
+                owner,
+                expressions,
+                filter,
+                ExpressionContext::Value,
+            )?),
             None => None,
         };
         Some(BoundConstraint {
