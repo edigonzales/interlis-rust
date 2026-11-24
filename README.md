@@ -128,8 +128,8 @@ npm run test:node
 npm run test:browser
 ```
 
-Generated packages export `compilerVersion()`, `parseJson(string)`, and
-`analyzeJson(string)`. Malformed
+Generated packages export `compilerVersion()`, `compile(request)`,
+`parseJson(string)` and `analyzeJson(string)`. Malformed
 requests (including unpaired JavaScript surrogates) throw controlled boundary
 errors. Language outcomes are normal JSON reports. The browser test loads the
 real web package in a module worker over a local HTTP server; it has no UI.

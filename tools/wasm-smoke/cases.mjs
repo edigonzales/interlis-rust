@@ -42,6 +42,7 @@ export function verify(report, expected = 'checked_subset') {
 const syntaxDocument = 'INTERLIS 2.4; MODEL A AT "x" VERSION "1" = UNIT FullTurn = 2*PI [INTERLIS.rad]; DOMAIN N=-1..2; D EXTENDS N = MANDATORY; Angle=0..360 CIRCULAR [INTERLIS.rad]; Calendar=FORMAT INTERLIS.XMLDate "2005-02-03".."2030-12-31"; END A. MODEL B NOINCREMENTALTRANSFER AT "x" VERSION "1" // notes // = CHARSET "csUTF8"; IMPORTS A; FUNCTION gate(value:BOOLEAN):BOOLEAN; TOPIC T=OID AS INTERLIS.I32OID; CLASS C=active:BOOLEAN; MANDATORY CONSTRAINT requiresActive: gate(active); END C; END T; END B.';
 const classValues = 'INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN D=CLASS RESTRICTION (INTERLIS.METAOBJECT); END M. MODEL N AT "x" VERSION "1" = END N.';
 const population = 'INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=flag:BOOLEAN; SET CONSTRAINT (BASKET) nonempty: WHERE flag: INTERLIS.objectCount(ALL) > 0; END C; END T; END M.';
+const signedModel = 'INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.';
 export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = SIGN BASKET B ~ S.T OBJECTS OF Mark: A; VIEW TOPIC T=VIEW V PROJECTION OF b ~ C; = ALL OF b; END V; GRAPHIC G BASED ON V=r:WHERE ready (Sign:={B.A}; Level:=ACCORDING b->kind (1 WHEN IN #a .. #b)); END G; END T; END M.', 'rejected', 'ILI-NAME-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=VIEW V JOIN OF C; = END V; END T; END M.', 'rejected', 'ILI-SYNTAX'],
@@ -61,7 +62,7 @@ export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'rejected', 'ILI-ATTRIBUTE-TYPE'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; CONTEXT first=G=X; empty= END M.', 'rejected', 'ILI-CONTEXT-GENERIC'],
-  ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'checked_subset', null],
+  [signedModel, 'checked_subset', null],
   ['INTERLIS 2.4; MODEL Original AT "x" VERSION "old" = END Original. CONTRACTED TYPE MODEL M (de) NOINCREMENTALTRANSFER AT "x" VERSION "1" // details // TRANSLATION OF Original ["old"] = CHARSET "UTF-8"; XMLNS "urn:x"; IMPORTS UNQUALIFIED Missing, INTERLIS; END M.', 'rejected', 'ILI-IMPORT-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=END C; ASSOCIATION = first -- {9007199254740993..*} C OR ANYCLASS; second -<#> {1} C; ATTRIBUTE flag:BOOLEAN; END; END T; END M.', 'rejected', 'ILI-ROLE-ALTERNATIVES'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; Y=BOOLEAN; CONTEXT first=G=X OR Y; TOPIC T=DEFERRED GENERICS G; CLASS C (ABSTRACT) EXTENDS INTERLIS.METAOBJECT = NO OID; ATTRIBUTE SUBDIVISION n (EXTENDED):BOOLEAN; PARAMETER p:METAOBJECT; END C; END T; END M.', 'rejected', 'ILI-TOPIC-ABSTRACT'],
@@ -89,7 +90,7 @@ export const syntaxCases = [
 export function verifySyntax(report, text, status, code) {
   if(report.status!==status || report.fullValidation!==false || (status==='checked_subset') !== (report.model!==null)) throw new Error('Unexpected syntax contract: '+JSON.stringify(report));
   if(code && !report.diagnostics.some(d=>d.code===code)) throw new Error('Missing actual syntax diagnostic');
-  if(status==='checked_subset' && (report.model.models.length!==(text===population ? 1 : 2) || report.diagnostics.length!==0)) throw new Error('Expected checked models');
+  if(status==='checked_subset' && (report.model.models.length!==(text===population || text===signedModel ? 1 : 2) || report.diagnostics.length!==0)) throw new Error('Expected checked models');
   if(text===syntaxDocument) {
     const declaration = name => report.model.declarations.find(d => d.qualifiedName === name);
     const angle = declaration('A.Angle').effectiveType;
