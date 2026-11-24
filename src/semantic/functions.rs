@@ -308,6 +308,16 @@ impl Analyzer<'_, '_> {
                 .map(Some)
                 .ok_or(NumberError::Work);
         }
+        if let Some(source) = actual.type_id
+            && self.is_enum_type(formal)
+            && self.is_enum_type(source)
+        {
+            let at = actual.span.clone();
+            return self
+                .enum_specializes(source, formal, &at)
+                .map(Some)
+                .ok_or(NumberError::Work);
+        }
         if actual.value_type != expected {
             // Contextual constants and object or class relations are checked by
             // their own type families as those become available.
@@ -321,15 +331,7 @@ impl Analyzer<'_, '_> {
         match expected {
             ExpressionType::Boolean => Ok(Some(true)),
             ExpressionType::Text => Ok(text_argument_fits(actual, ty, formal_type)),
-            ExpressionType::Enumeration => {
-                let Some(source) = actual.type_id else {
-                    return Ok(Some(false));
-                };
-                let at = actual.span.clone();
-                self.enum_specializes(source, formal, &at)
-                    .map(Some)
-                    .ok_or(NumberError::Work)
-            }
+            ExpressionType::Enumeration => Ok(Some(false)),
             ExpressionType::Numeric => {
                 let TypeInfo::Numeric(target) = formal_type else {
                     unreachable!("the expected type is numeric");

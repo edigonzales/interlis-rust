@@ -4540,6 +4540,31 @@ fn enumeration_comparisons_distinguish_bad_values_and_unrelated_or_unordered_typ
 }
 
 #[test]
+fn predefined_enum_leaves_fit_their_tree_formals_and_existence_targets() {
+    for version in ["2.3", "2.4"] {
+        outcome(
+            request(vec![(
+                "memory:///model.ili",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                     DOMAIN Flags=ALL OF INTERLIS.BOOLEAN; Alignments=ALL OF INTERLIS.HALIGNMENT;
+                     FUNCTION accepts(flag:Flags; alignment:Alignments):BOOLEAN;
+                     TOPIC T=CLASS Lookup=flag:Flags; alignment:Alignments; END Lookup;
+                        CLASS Source=flag:BOOLEAN; alignment:HALIGNMENT;
+                            MANDATORY CONSTRAINT accepts(flag, alignment);
+                            EXISTENCE CONSTRAINT flag REQUIRED IN Lookup:flag;
+                            EXISTENCE CONSTRAINT alignment REQUIRED IN Lookup:alignment;
+                        END Source;
+                     END T; END M."
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+    }
+}
+
+#[test]
 fn attribute_derivations_keep_bound_values_transience_and_constant_override_finality() {
     for version in ["2.3", "2.4"] {
         let report = outcome(
@@ -4590,6 +4615,10 @@ fn attribute_derivations_reject_wrong_values_and_invalid_transient_overrides() {
             "ILI-ATTRIBUTE-DERIVATION-TYPE",
         ),
         (
+            "CLASS Item=x (TRANSIENT):BOOLEAN := #True; END Item;",
+            "ILI-ENUM-CONSTANT",
+        ),
+        (
             "CLASS Item=x:0..3 := 4; END Item;",
             "ILI-ATTRIBUTE-DERIVATION-TYPE",
         ),
@@ -4606,6 +4635,12 @@ fn attribute_derivations_reject_wrong_values_and_invalid_transient_overrides() {
             "CLASS Base=x:0..10; END Base;
              CLASS Child EXTENDS Base=x (EXTENDED):0..10 := 7; END Child;
              CLASS Leaf EXTENDS Child=x (EXTENDED):0..10; END Leaf;",
+            "ILI-ATTRIBUTE-OVERRIDE",
+        ),
+        (
+            "CLASS Base=x:TEXT*8; END Base;
+             CLASS Child EXTENDS Base=x (EXTENDED):TEXT*8 := UNDEFINED; END Child;
+             CLASS Leaf EXTENDS Child=x (EXTENDED):TEXT*8 := \"new\"; END Leaf;",
             "ILI-ATTRIBUTE-OVERRIDE",
         ),
     ] {

@@ -194,8 +194,6 @@ impl Analyzer<'_, '_> {
                         .all(|(source, target)| numeric_compatible(source, target))
             }
             (TypeInfo::Oid(source), TypeInfo::Oid(target)) => oid_compatible(source, target),
-            (TypeInfo::Boolean, TypeInfo::Boolean) => true,
-            (TypeInfo::Alignment(source), TypeInfo::Alignment(target)) => source == target,
             (TypeInfo::Blackbox(source), TypeInfo::Blackbox(target)) => source == target,
             (TypeInfo::Temporal(source), TypeInfo::Temporal(target)) => source == target,
             (TypeInfo::TemporalRange(source), TypeInfo::TemporalRange(target)) => {
@@ -204,10 +202,7 @@ impl Analyzer<'_, '_> {
             (TypeInfo::TemporalRange(range), TypeInfo::Temporal(kind))
             | (TypeInfo::Temporal(kind), TypeInfo::TemporalRange(range)) => range.kind == *kind,
             (source, target) if text_compatible(source, target) => true,
-            (
-                TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. },
-                TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. },
-            ) => {
+            _ if self.is_enum_type(actual) && self.is_enum_type(expected) => {
                 return self.enum_existence_compatible(actual, expected, at);
             }
             (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_))

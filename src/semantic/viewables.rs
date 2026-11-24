@@ -414,7 +414,8 @@ impl Analyzer<'_, '_> {
                 && derivations.len() == 1
                 && matches!(
                     underlying_expression(&self.expressions, *value).kind,
-                    BoundExpressionKind::Boolean { .. }
+                    BoundExpressionKind::Undefined
+                        | BoundExpressionKind::Boolean { .. }
                         | BoundExpressionKind::Number { .. }
                         | BoundExpressionKind::Text { .. }
                         | BoundExpressionKind::Enumeration { .. }
