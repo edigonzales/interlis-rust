@@ -492,9 +492,10 @@ pub(super) fn scalar_type(ty: &TypeInfo) -> ValueType {
         TypeInfo::Structure(_) | TypeInfo::Reference(_) => ValueType::Object,
         TypeInfo::ObjectSelection(selection) if selection.plural => ValueType::ObjectSet,
         TypeInfo::ObjectSelection(_) => ValueType::Object,
-        TypeInfo::Enumeration { .. } | TypeInfo::EnumTree { .. } | TypeInfo::Alignment(_) => {
-            ValueType::Enumeration
-        }
+        TypeInfo::Enumeration { .. }
+        | TypeInfo::EnumTree { .. }
+        | TypeInfo::EnumArgument { .. }
+        | TypeInfo::Alignment(_) => ValueType::Enumeration,
         _ => ValueType::Other,
     }
 }

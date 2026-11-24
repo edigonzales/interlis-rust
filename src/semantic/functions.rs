@@ -53,7 +53,13 @@ impl Analyzer<'_, '_> {
                 let target = self.bind_object_target(owner, target)?;
                 (self.object_selection_type(*plural, target), false, false)
             }
-            _ => unreachable!("unsupported function arguments are gated"),
+            ArgumentType::EnumValue(_) | ArgumentType::EnumTreeValue(_) => {
+                let id = self.types.len();
+                self.types.push(TypeInfo::EnumArgument {
+                    tree_values: matches!(argument, ArgumentType::EnumTreeValue(_)),
+                });
+                (id, false, false)
+            }
         };
         let declaration = &mut self.symbols[owner].declaration;
         declaration.type_id = Some(type_id);
@@ -119,9 +125,7 @@ impl Analyzer<'_, '_> {
                 }
                 self.symbols[target].declaration.type_id?
             }
-            BoundName::Predefined(name, _) => {
-                self.bind_predefined_call(owner, name, arguments[0])?
-            }
+            BoundName::Predefined(name, _) => self.bind_predefined_call(owner, name, &arguments)?,
         };
         let reference = self.bound_reference(owner, function, target)?;
         Some((
@@ -149,6 +153,8 @@ impl Analyzer<'_, '_> {
                 "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount",
                 _,
             ) => 1,
+            BoundName::Predefined("isEnumSubVal", _) => 2,
+            BoundName::Predefined("inEnumRange", _) => 3,
             BoundName::Predefined(..) => {
                 self.unsupported_expression(span);
                 return None;
@@ -169,8 +175,12 @@ impl Analyzer<'_, '_> {
         &mut self,
         owner: usize,
         name: &str,
-        argument: ExpressionId,
+        arguments: &[ExpressionId],
     ) -> Option<usize> {
+        if matches!(name, "isEnumSubVal" | "inEnumRange") {
+            return self.bind_enum_builtin(name, arguments);
+        }
+        let argument = arguments[0];
         let at = self.expressions[argument.0 as usize].span.clone();
         if name == "elementCount" {
             let value = &self.expressions[argument.0 as usize];
@@ -215,6 +225,74 @@ impl Analyzer<'_, '_> {
             Some(self.unbounded_numeric_type())
         } else {
             Some(formal)
+        }
+    }
+
+    fn bind_enum_builtin(&mut self, name: &str, arguments: &[ExpressionId]) -> Option<usize> {
+        let anchor = arguments.iter().find_map(|&id| {
+            self.expressions[id.0 as usize]
+                .type_id
+                .filter(|&ty| self.is_enum_type(ty))
+        });
+        let mut tree = None;
+        for (index, &argument) in arguments.iter().enumerate() {
+            let allow_tree = name == "isEnumSubVal" || index > 0;
+            let value = &self.expressions[argument.0 as usize];
+            if value.value_type == ExpressionType::Undefined {
+                continue;
+            }
+            let at = value.span.clone();
+            if !self.enum_argument_fits(argument, allow_tree) {
+                self.diagnostics.push(
+                    "ILI-FUNCTION-ARGUMENT",
+                    "The predefined function expects an enumeration value of the declared kind",
+                    Some(at),
+                );
+                return None;
+            }
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            if let Some(actual) = value.type_id {
+                if self.is_enum_type(actual)
+                    && (self.enum_specializes(anchor, actual, &at)?
+                        || self.enum_specializes(actual, anchor, &at)?)
+                {
+                    continue;
+                }
+                self.diagnostics.push(
+                    "ILI-ENUM-ARGUMENT-TYPES",
+                    "The arguments must refer to the same enumeration or an extension of it",
+                    Some(at),
+                );
+                return None;
+            }
+            let context = match (allow_tree, &self.types[anchor]) {
+                (true, TypeInfo::Enumeration { .. }) => {
+                    *tree.get_or_insert_with(|| self.new_enum_tree(anchor, None))
+                }
+                (false, TypeInfo::EnumTree { base, .. }) => *base,
+                _ => anchor,
+            };
+            self.bind_enum_literal(argument, context)?;
+        }
+        let result = self.types.len();
+        self.types.push(TypeInfo::Boolean);
+        Some(result)
+    }
+
+    fn enum_argument_fits(&self, argument: ExpressionId, allow_tree: bool) -> bool {
+        let actual = underlying_expression(&self.expressions, argument);
+        match actual.type_id {
+            Some(ty) => match self.types[ty] {
+                TypeInfo::EnumTree { .. } => allow_tree,
+                TypeInfo::EnumArgument { tree_values } => allow_tree || !tree_values,
+                _ => self.is_enum_type(ty),
+            },
+            None => matches!(
+                actual.kind,
+                BoundExpressionKind::Boolean { .. } | BoundExpressionKind::Enumeration { .. }
+            ),
         }
     }
 
@@ -267,6 +345,9 @@ impl Analyzer<'_, '_> {
         let expected = scalar_type(formal_type);
         if actual.value_type == ExpressionType::Undefined {
             return Ok(Some(!mandatory));
+        }
+        if let TypeInfo::EnumArgument { tree_values } = formal_type {
+            return Ok(Some(self.enum_argument_fits(argument, *tree_values)));
         }
         let ty = actual.type_id.map(|id| &self.types[id]);
         if let TypeInfo::ObjectSelection(target) = formal_type {

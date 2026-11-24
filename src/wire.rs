@@ -755,7 +755,10 @@ impl<'report> Serialize for TypeOutput<'report> {
                 declared_order: Option<crate::EnumerationOrder>,
             },
             EnumTree {
-                domain: &'a str,
+                domain: Option<&'a str>,
+            },
+            EnumArgument {
+                tree_values: bool,
             },
             Numeric {
                 #[serde(flatten)]
@@ -851,7 +854,14 @@ impl<'report> Serialize for TypeOutput<'report> {
                 declared_order: *declared_order,
             }
             .serialize(serializer),
-            TypeInfo::EnumTree { domain } => Type::EnumTree { domain }.serialize(serializer),
+            TypeInfo::EnumTree { domain, .. } => Type::EnumTree {
+                domain: domain.as_deref(),
+            }
+            .serialize(serializer),
+            TypeInfo::EnumArgument { tree_values } => Type::EnumArgument {
+                tree_values: *tree_values,
+            }
+            .serialize(serializer),
             TypeInfo::Numeric(range) => Type::Numeric {
                 range: range.into(),
             }

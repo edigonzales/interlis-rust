@@ -188,11 +188,11 @@ fn enumerations_preserve_sibling_order_final_subtrees_and_tree_domains() {
         );
         for root in ["M.AllColours", "M.S.value"] {
             assert!(
-                matches!(graph.effective_type(root), Some(TypeInfo::EnumTree { domain }) if domain == "M.Colour")
+                matches!(graph.effective_type(root), Some(TypeInfo::EnumTree { domain, .. }) if domain.as_deref() == Some("M.Colour"))
             );
         }
         assert!(
-            matches!(graph.effective_type("M.AllBoolean"), Some(TypeInfo::EnumTree { domain }) if domain == "INTERLIS.BOOLEAN")
+            matches!(graph.effective_type("M.AllBoolean"), Some(TypeInfo::EnumTree { domain, .. }) if domain.as_deref() == Some("INTERLIS.BOOLEAN"))
         );
         assert!(
             matches!(graph.effective_type("M.Empty"), Some(TypeInfo::Enumeration { values, .. }) if values.is_final() && values.elements().is_empty())
@@ -4497,7 +4497,7 @@ fn enumeration_literals_bind_to_leaf_tree_and_formal_types() {
         panic!("expected enumeration comparison");
     };
     assert!(matches!(graph.expression_declared_type(right),
-        Some(TypeInfo::EnumTree { domain }) if domain == "M.Extended"));
+        Some(TypeInfo::EnumTree { domain, .. }) if domain.as_deref() == Some("M.Extended")));
     let interlis::BoundExpressionKind::Group { expression } = graph.expression(right).unwrap().kind
     else {
         panic!("expected group");
@@ -4560,6 +4560,78 @@ fn predefined_enum_leaves_fit_their_tree_formals_and_existence_targets() {
             )]),
             Status::CheckedSubset,
             None,
+        );
+    }
+}
+
+#[test]
+fn enum_functions_bind_polymorphic_arguments_and_check_relation_of_known_types() {
+    let definitions = "DOMAIN Value=(group(a,b), c) ORDERED; Nodes=ALL OF Value;
+        FUNCTION accepts(leaf:ENUMVAL; node:ENUMTREEVAL):BOOLEAN;
+        TOPIC T=CLASS Item=leaf:Value; tree:Nodes; unrelated:(group(a,b),c) ORDERED;";
+    let report = outcome(
+        single(&format!(
+            "{definitions}
+                MANDATORY CONSTRAINT accepts(leaf,tree);
+                MANDATORY CONSTRAINT INTERLIS.isEnumSubVal(leaf,(#group));
+                MANDATORY CONSTRAINT INTERLIS.inEnumRange(#group.a,tree,#c);
+                MANDATORY CONSTRAINT INTERLIS.isEnumSubVal(#group.a,#group);
+            END Item; END T;"
+        )),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let args = graph
+        .function_arguments("M.accepts")
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        graph.effective_type(args[0].qualified_name()),
+        Some(TypeInfo::EnumArgument { tree_values: false })
+    ));
+    assert!(matches!(
+        graph.effective_type(args[1].qualified_name()),
+        Some(TypeInfo::EnumArgument { tree_values: true })
+    ));
+    let constraints = graph.declaration("M.T.Item").unwrap().constraints();
+    let interlis::BoundExpressionKind::Call {
+        function,
+        arguments,
+    } = &graph
+        .expression(constraints[1].expression.unwrap())
+        .unwrap()
+        .kind
+    else {
+        panic!("expected a bound enum function");
+    };
+    assert_eq!(function.target_name(), "INTERLIS.isEnumSubVal");
+    let ty = graph.expression_declared_type(arguments[1]).unwrap();
+    assert!(matches!(ty, TypeInfo::EnumTree { domain: None, .. }));
+    assert!(std::ptr::eq(
+        graph.enum_tree_leaf_type(ty).unwrap(),
+        graph.effective_type("M.Value").unwrap()
+    ));
+
+    for (condition, code) in [
+        ("accepts(tree,leaf)", "ILI-FUNCTION-ARGUMENT"),
+        (
+            "INTERLIS.isEnumSubVal(leaf,unrelated)",
+            "ILI-ENUM-ARGUMENT-TYPES",
+        ),
+        ("INTERLIS.isEnumSubVal(leaf,#missing)", "ILI-ENUM-CONSTANT"),
+        ("INTERLIS.inEnumRange(#group,tree,#c)", "ILI-ENUM-CONSTANT"),
+        (
+            "INTERLIS.inEnumRange(tree,#group,#c)",
+            "ILI-FUNCTION-ARGUMENT",
+        ),
+    ] {
+        outcome(
+            single(&format!(
+                "{definitions} MANDATORY CONSTRAINT {condition}; END Item; END T;"
+            )),
+            Status::Rejected,
+            Some(code),
         );
     }
 }

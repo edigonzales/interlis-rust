@@ -177,7 +177,11 @@ pub enum TypeInfo {
         declared_order: Option<EnumerationOrder>,
     },
     EnumTree {
-        domain: String,
+        domain: Option<String>,
+        base: usize,
+    },
+    EnumArgument {
+        tree_values: bool,
     },
     Numeric(NumericRange),
     Coordinate(CoordinateType),
@@ -965,6 +969,12 @@ impl ModelGraph {
     }
     pub fn expression_declared_type(&self, id: ExpressionId) -> Option<&TypeInfo> {
         self.types.get(self.expression(id)?.type_id?)
+    }
+    pub fn enum_tree_leaf_type(&self, ty: &TypeInfo) -> Option<&TypeInfo> {
+        let TypeInfo::EnumTree { base, .. } = ty else {
+            return None;
+        };
+        self.types.get(*base)
     }
     pub fn function_arguments(&self, name: &str) -> Option<impl Iterator<Item = &Declaration>> {
         Some(

@@ -642,7 +642,7 @@ pub(super) fn scalar_extension(
         (Boolean, Boolean) => true,
         (Alignment(a), Alignment(b)) => a == b,
         (Blackbox(a), Blackbox(b)) => a == b,
-        (EnumTree { domain: a }, EnumTree { domain: b }) => a == b,
+        (EnumTree { domain: a, .. }, EnumTree { domain: b, .. }) => a == b,
         (Oid(OidType::Typed(carrier)), Oid(OidType::Any)) if !carrier.has_unbounded_range() => true,
         (Oid(_), _) | (_, Oid(_)) => {
             return Ok(Some((

@@ -263,20 +263,23 @@ impl Analyzer<'_, '_> {
             .reference
             .as_ref()
             .expect("enumeration domain reference has been bound");
-        let ty = self.types.len();
-        self.enum_bases.insert(ty, base.ty);
-        self.types.push(TypeInfo::EnumTree {
-            domain: reference.target.clone(),
-        });
+        let domain = reference.target.clone();
+        let ty = self.new_enum_tree(base.ty, Some(domain));
         Some(Effective {
             ty,
             mandatory: false,
         })
     }
 
+    pub(super) fn new_enum_tree(&mut self, base: usize, domain: Option<String>) -> usize {
+        let ty = self.types.len();
+        self.types.push(TypeInfo::EnumTree { domain, base });
+        ty
+    }
+
     fn enum_root(&self, ty: usize) -> (usize, bool) {
-        if matches!(self.types[ty], TypeInfo::EnumTree { .. }) {
-            (self.enum_bases[&ty], true)
+        if let TypeInfo::EnumTree { base, .. } = self.types[ty] {
+            (base, true)
         } else {
             (ty, false)
         }

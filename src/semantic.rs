@@ -184,8 +184,9 @@ fn supported_specialization(ty: &TypeSyntax) -> bool {
 fn supported_function_argument(argument: &syntax::ArgumentType) -> bool {
     match argument {
         syntax::ArgumentType::Attribute(ty) => ty.ty.as_ref().is_some_and(supported_type),
-        syntax::ArgumentType::Objects { .. } => true,
-        _ => false,
+        syntax::ArgumentType::Objects { .. }
+        | syntax::ArgumentType::EnumValue(_)
+        | syntax::ArgumentType::EnumTreeValue(_) => true,
     }
 }
 
