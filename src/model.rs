@@ -891,6 +891,7 @@ pub struct Declaration {
     pub(crate) effective_mandatory: Option<bool>,
     pub(crate) reference: Option<TypeReference>,
     pub(crate) base_reference: Option<TypeReference>,
+    pub(crate) translation_of: Option<TypeReference>,
     pub(crate) unit: Option<Box<UnitInfo>>,
     pub(crate) oids: Option<Box<OidRules>>,
     pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
@@ -939,6 +940,9 @@ impl Declaration {
     }
     pub fn base_reference(&self) -> Option<&TypeReference> {
         self.base_reference.as_ref()
+    }
+    pub fn translation_of(&self) -> Option<&TypeReference> {
+        self.translation_of.as_ref()
     }
     pub fn unit(&self) -> Option<&UnitInfo> {
         self.unit.as_deref()

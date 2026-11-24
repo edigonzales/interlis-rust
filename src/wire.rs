@@ -388,6 +388,8 @@ impl Serialize for ModelsOutput<'_> {
             #[serde(skip_serializing_if = "Option::is_none")]
             xml_namespace: Option<&'a str>,
             effective_xml_namespace: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            translation_of: Option<Reference<'a>>,
             issuer_location: Option<SourceLocation>,
             version_location: Option<SourceLocation>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -414,6 +416,11 @@ impl Serialize for ModelsOutput<'_> {
                 charset: model.charset(),
                 xml_namespace: model.xml_namespace(),
                 effective_xml_namespace: model.effective_xml_namespace(),
+                translation_of: self
+                    .0
+                    .declaration(model.name())
+                    .and_then(|declaration| declaration.translation_of())
+                    .map(|reference| project_reference(reference, self.1)),
                 issuer_location: self.1.location(model.issuer_span()),
                 version_location: self.1.location(model.version_span()),
                 charset_location: model.charset_span().and_then(|span| self.1.location(span)),
@@ -518,6 +525,8 @@ impl Serialize for DeclarationsOutput<'_> {
             type_reference: Option<Reference<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             base_reference: Option<Reference<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            translation_of: Option<Reference<'a>>,
             effective_type: Option<TypeOutput<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             unit: Option<&'a crate::UnitInfo>,
@@ -574,6 +583,9 @@ impl Serialize for DeclarationsOutput<'_> {
                 base_reference: declaration
                     .base_reference()
                     .map(|r| project_reference(r, self.sources)),
+                translation_of: declaration
+                    .translation_of()
+                    .map(|reference| project_reference(reference, self.sources)),
                 effective_type: declaration
                     .type_id
                     .and_then(|id| self.graph.types.get(id))

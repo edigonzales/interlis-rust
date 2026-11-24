@@ -877,14 +877,14 @@ fn selected_translation_depends_on_exact_original_and_its_imports() {
             ("c-other-version", "INTERLIS 2.4; MODEL Original AT \"x\" VERSION \"3\" = IMPORTS Unused; END Original.".into()),
         ])
     };
+    let report = analyze_roots(input("1", ""), &["French".into()]).unwrap();
+    assert_eq!(report.status(), Status::CheckedSubset);
+    let declaration = report.graph().unwrap().declaration("French").unwrap();
+    assert_eq!(
+        declaration.translation_of().unwrap().target_name(),
+        "Original"
+    );
     for (version, imports, expected_status, code, source) in [
-        (
-            "1",
-            "",
-            Status::Incomplete,
-            "ILI-UNSUPPORTED",
-            "a-translation",
-        ),
         (
             "1",
             "IMPORTS Missing;",
@@ -1155,7 +1155,11 @@ fn direct_references_keep_their_namespace_when_other_semantics_are_pending() {
 fn translation_original_is_not_an_implicit_import() {
     for (imports, status, code) in [
         ("", Status::Rejected, "ILI-TYPE-NOT-FOUND"),
-        ("IMPORTS Base;", Status::Incomplete, "ILI-UNSUPPORTED"),
+        (
+            "IMPORTS Base;",
+            Status::Rejected,
+            "ILI-TRANSLATION-STRUCTURE",
+        ),
     ] {
         let input = request(vec![(
             "one-document",
@@ -1166,6 +1170,75 @@ fn translation_original_is_not_an_implicit_import() {
         let report = analyze_roots(input, &["French".into()]).unwrap();
         assert_eq!(report.status(), status);
         assert_eq!(report.diagnostics()[0].code, code);
+    }
+}
+
+#[test]
+fn translations_bind_renamed_declarations_and_imported_counterparts() {
+    let input = || {
+        request(vec![
+        ("lib", "INTERLIS 2.3; TYPE MODEL Types AT \"x\" VERSION \"1\" =
+            DOMAIN Size=0.0..10.0; END Types.".into()),
+        ("local-lib", "INTERLIS 2.3; TYPE MODEL TypesFr AT \"x\" VERSION \"2\" TRANSLATION OF Types [\"1\"] =
+            DOMAIN Taille=0.0..10.0; END TypesFr.".into()),
+        ("original", "INTERLIS 2.4; MODEL Original (de) AT \"x\" VERSION \"1\" =
+            IMPORTS Types; DOMAIN Mode=(a,b(c,d)) ORDERED;
+            TOPIC T=CLASS Item=size:Types.Size; mode:Mode; END Item; END T;
+            END Original.".into()),
+        ("translated", "INTERLIS 2.4; MODEL French (fr) AT \"x\" VERSION \"2\" TRANSLATION OF Original [\"1\"] =
+            IMPORTS TypesFr; DOMAIN Modele=(e,f(g,h)) ORDERED;
+            TOPIC D=CLASS Objet=taille:TypesFr.Taille; version:Modele; END Objet; END D;
+            END French.".into()),
+    ])
+    };
+    let report = analyze_roots(input(), &["French".into()]).unwrap();
+    assert_eq!(
+        report.status(),
+        Status::CheckedSubset,
+        "{:?}",
+        report.diagnostics()
+    );
+    let graph = report.graph().unwrap();
+    for (localized, original) in [
+        ("French", "Original"),
+        ("French.Modele", "Original.Mode"),
+        ("French.D.Objet", "Original.T.Item"),
+        ("French.D.Objet.taille", "Original.T.Item.size"),
+        ("TypesFr.Taille", "Types.Size"),
+    ] {
+        assert_eq!(
+            graph
+                .declaration(localized)
+                .unwrap()
+                .translation_of()
+                .unwrap()
+                .target_name(),
+            original
+        );
+    }
+    for (needle, replacement, code) in [
+        (
+            "0.0..10.0; END TypesFr",
+            "0.00..10.00; END TypesFr",
+            "ILI-TRANSLATION-DEFINITION",
+        ),
+        (
+            "(e,f(g,h)) ORDERED",
+            "(e,f(g)) ORDERED",
+            "ILI-TRANSLATION-DEFINITION",
+        ),
+        (
+            "taille:TypesFr.Taille; version:Modele;",
+            "version:Modele; taille:TypesFr.Taille;",
+            "ILI-TRANSLATION-DEFINITION",
+        ),
+        ("version:Modele;", "", "ILI-TRANSLATION-STRUCTURE"),
+    ] {
+        let mut request = input();
+        for source in &mut request.sources {
+            source.text = source.text.replace(needle, replacement);
+        }
+        outcome(request, Status::Rejected, Some(code));
     }
 }
 

@@ -19,6 +19,7 @@ mod references;
 mod subdivisions;
 mod temporal;
 mod topics;
+mod translations;
 mod units;
 mod viewables;
 
@@ -382,7 +383,7 @@ fn ensure_supported_semantics(
                     }
                     _ => false,
                 });
-        let span = if !kind_supported || model.translation.is_some() {
+        let span = if !kind_supported {
             Some(&model.span)
         } else {
             declarations(&model.declarations, work, diagnostics)
@@ -530,6 +531,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 effective_mandatory: None,
                 reference: None,
                 base_reference: None,
+                translation_of: None,
                 unit: None,
                 oids: None,
                 topic_dependencies: None,
@@ -1983,6 +1985,9 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
         self.bind_constraints(&expressions)?;
+        if !self.diagnostics.rejected && !self.diagnostics.incomplete {
+            self.bind_translations()?;
+        }
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }
