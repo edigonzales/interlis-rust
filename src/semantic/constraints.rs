@@ -14,6 +14,7 @@ pub(super) fn supported_constraint(constraint: &ConstraintSyntax) -> bool {
         ConstraintKind::Mandatory { .. }
             | ConstraintKind::Plausibility { .. }
             | ConstraintKind::Unique { .. }
+            | ConstraintKind::Existence { .. }
     )
 }
 
@@ -147,6 +148,16 @@ impl Analyzer<'_, '_> {
             }
             let expressions = documents[&constraint.span.sort_key().0];
             let (rule, root) = match &constraint.kind {
+                ConstraintKind::Existence { path, required } => {
+                    if let Some(existence) = self.bind_existence(owner, constraint, path, required)
+                    {
+                        bound.push(existence);
+                    }
+                    if self.diagnostics.limited {
+                        return None;
+                    }
+                    continue;
+                }
                 ConstraintKind::Unique {
                     basket,
                     filter,

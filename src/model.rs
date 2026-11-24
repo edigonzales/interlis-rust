@@ -379,6 +379,16 @@ pub enum ConstraintRule {
         local_prefix: Option<ExpressionId>,
         keys: Vec<ExpressionId>,
     },
+    Existence {
+        source: ExpressionId,
+        required: Vec<ExistenceTarget>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExistenceTarget {
+    pub viewable: TypeReference,
+    pub path: ExpressionId,
 }
 
 #[derive(Debug)]

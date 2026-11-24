@@ -361,16 +361,7 @@ impl Analyzer<'_, '_> {
             );
             return None;
         }
-        let dependencies = self.symbols[source].declaration.topic_dependencies().len();
-        if !self.step(dependencies, location) {
-            return None;
-        }
-        if !self.symbols[source]
-            .declaration
-            .topic_dependencies()
-            .iter()
-            .any(|dependency| self.names[dependency.target_name()] == target)
-        {
+        if !self.topic_has_dependency(source, target, location)? {
             self.diagnostics.push(
                 "ILI-REFERENCE-DEPENDS-ON",
                 "A reference to another topic requires a DEPENDS ON declaration",
@@ -379,6 +370,25 @@ impl Analyzer<'_, '_> {
             return None;
         }
         Some(())
+    }
+
+    pub(super) fn topic_has_dependency(
+        &mut self,
+        source: usize,
+        target: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        let count = self.symbols[source].declaration.topic_dependencies().len();
+        if !self.step(count, at) {
+            return None;
+        }
+        Some(
+            self.symbols[source]
+                .declaration
+                .topic_dependencies()
+                .iter()
+                .any(|dependency| self.names[dependency.target_name()] == target),
+        )
     }
 }
 

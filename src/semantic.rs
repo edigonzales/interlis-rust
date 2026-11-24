@@ -5,6 +5,7 @@ mod constraints;
 mod contexts;
 mod domains;
 mod enumeration;
+mod existence;
 mod expressions;
 mod functions;
 mod geometry;

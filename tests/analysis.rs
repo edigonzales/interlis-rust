@@ -4136,6 +4136,102 @@ fn role_paths_distinguish_link_endpoints_from_collections_of_related_objects() {
 }
 
 #[test]
+fn existence_constraints_bind_each_required_viewable_and_attribute_path() {
+    let report = outcome(
+        single(
+            "DOMAIN Point=COORD 0.00..10.00, 0.00..10.00;
+             TOPIC Values=CLASS Item=code:TEXT*20; vertex:Point; END Item; END Values;
+             TOPIC Links=DEPENDS ON Values;
+                 CLASS Item=code:TEXT*5; line:POLYLINE WITH (STRAIGHTS) VERTEX Point;
+                     EXISTENCE CONSTRAINT codeExists:code REQUIRED IN M.Values.Item:code OR Item:code;
+                     EXISTENCE CONSTRAINT pointExists:line REQUIRED IN M.Values.Item:vertex;
+                 END Item;
+             END Links;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let rules = graph.declaration("M.Links.Item").unwrap().constraints();
+    let interlis::ConstraintRule::Existence { source, required } = &rules[0].rule else {
+        panic!("expected an existence constraint");
+    };
+    assert!(rules[0].expression.is_none());
+    assert_eq!(
+        required
+            .iter()
+            .map(|target| target.viewable.target_name())
+            .collect::<Vec<_>>(),
+        ["M.Values.Item", "M.Links.Item"]
+    );
+    let steps = |id| match &graph.expression(id).unwrap().kind {
+        interlis::BoundExpressionKind::Path { steps } => steps,
+        _ => panic!("expected a bound attribute path"),
+    };
+    assert_eq!(
+        steps(*source)[0].reference.target_name(),
+        "M.Links.Item.code"
+    );
+    assert_eq!(
+        steps(required[0].path)[0].reference.target_name(),
+        "M.Values.Item.code"
+    );
+}
+
+#[test]
+fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
+    for (dependencies, ty, path, code) in [
+        (
+            "",
+            "0..10 [INTERLIS.m]",
+            "value",
+            "ILI-EXISTENCE-DEPENDS-ON",
+        ),
+        (
+            "DEPENDS ON Values;",
+            "0..10 [INTERLIS.s]",
+            "value",
+            "ILI-EXISTENCE-TYPE",
+        ),
+        (
+            "DEPENDS ON Values;",
+            "TEXT*4",
+            "value",
+            "ILI-EXISTENCE-TYPE",
+        ),
+        (
+            "DEPENDS ON Values;",
+            "0..10 [INTERLIS.m]",
+            "THIS",
+            "ILI-EXISTENCE-PATH",
+        ),
+    ] {
+        outcome(
+            single(&format!(
+                "TOPIC Values=CLASS Target=value:0..20 [INTERLIS.m]; END Target; END Values;
+                 TOPIC Links={dependencies}
+                    CLASS Obj=value:{ty};
+                       EXISTENCE CONSTRAINT value REQUIRED IN M.Values.Target:{path};
+                    END Obj;
+                 END Links;"
+            )),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=STRUCTURE Part=x:TEXT*5; END Part;
+            CLASS Values=v:BAG OF Part; END Values;
+            CLASS Links=v:LIST OF Part; EXISTENCE CONSTRAINT v REQUIRED IN Values:v; END Links;
+            END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-EXISTENCE-TYPE"),
+    );
+}
+
+#[test]
 fn generic_usage_includes_unrestricted_structures_and_indirect_line_vertices() {
     let domains =
         "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; A=COORD 0..10,0..10; B=COORD 20..30,20..30;
