@@ -1735,7 +1735,10 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
                  TOPIC T =
                     CLASS A=number:0..10; END A;
                     CLASS B=index:0..10; END B;
-                    VIEW U UNION OF a0~A,b0~B; = {attributes} END U;
+                    CLASS Child EXTENDS A=childValue:0..10; END Child;
+                    VIEW U UNION OF a0~A,b0~B;
+                       BASE a0 EXTENDED BY child~Child
+                       = {attributes} END U;
                     VIEW Grouped AGGREGATION OF a0~A EQUAL(a0->number);
                         = rows:BAG OF ANYSTRUCTURE := AGGREGATES;
                           MANDATORY CONSTRAINT INTERLIS.elementCount(AGGREGATES) > 0;
@@ -1809,7 +1812,7 @@ fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() 
         );
         outcome(
             input(
-                "key:MANDATORY 0..10 := combine(a0->number,a0->number),combine(b0->index,b0->index);",
+                "key:MANDATORY 0..10 := combine(a0->number,a0->number),combine(b0->index,b0->index),child->childValue;",
             ),
             Status::CheckedSubset,
             None,

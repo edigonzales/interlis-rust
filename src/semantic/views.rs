@@ -25,6 +25,8 @@ struct ViewAttributeDependencies {
 struct UnionBranch {
     bases: BTreeSet<usize>,
     attributes: BTreeSet<usize>,
+    nested_attributes: BTreeSet<usize>,
+    nullable: bool,
 }
 
 impl Analyzer<'_, '_> {
@@ -928,14 +930,7 @@ impl Analyzer<'_, '_> {
                             |id| &self.expressions[id.0 as usize].span,
                         )
                         .clone();
-                    if nullable[*member] && decl.mandatory() == Some(true) {
-                        self.diagnostics.push(
-                            "ILI-VIEW-NULLABLE-ATTRIBUTE",
-                            "A mandatory view attribute cannot use an optional basis, including through another attribute",
-                            Some(at),
-                        );
-                        return None;
-                    }
+                    let mandatory = decl.mandatory() == Some(true);
                     let owner = decl.parent?;
                     if let Some(view) = self.symbols[owner].declaration.view()
                         && view.formation == ViewFormation::Union
@@ -943,15 +938,19 @@ impl Analyzer<'_, '_> {
                         if !self.step(view.bases.len() + dep.union_branches.len(), &at) {
                             return None;
                         }
-                        let covered =
-                            self.union_coverage(*member, &dep.union_branches, &union_bases, &at)?;
+                        let covered = self.union_coverage(
+                            *member,
+                            &dep.union_branches,
+                            &union_bases,
+                            &nullable,
+                            &at,
+                        )?;
                         let view = self.symbols[owner].declaration.view()?;
-                        if self.symbols[*member].declaration.mandatory() == Some(true)
-                            && view.bases.iter().any(|basis| {
-                                self.symbols[*basis].declaration.base_reference().is_none()
-                                    && !covered.contains(basis)
-                            })
-                        {
+                        nullable[*member] = view.bases.iter().any(|basis| {
+                            self.symbols[*basis].declaration.base_reference().is_none()
+                                && !covered.contains(basis)
+                        });
+                        if mandatory && nullable[*member] {
                             self.diagnostics.push(
                                 "ILI-VIEW-UNION-ATTRIBUTE",
                                 "A mandatory UNION attribute needs a derivation for every basis",
@@ -960,6 +959,13 @@ impl Analyzer<'_, '_> {
                             return None;
                         }
                         union_bases.insert(*member, covered);
+                    } else if mandatory && nullable[*member] {
+                        self.diagnostics.push(
+                            "ILI-VIEW-NULLABLE-ATTRIBUTE",
+                            "A mandatory view attribute cannot use an optional basis, including through another attribute",
+                            Some(at),
+                        );
+                        return None;
                     }
                     stack.pop();
                     continue;
@@ -1029,6 +1035,9 @@ impl Analyzer<'_, '_> {
                         let id = self.names[step.reference.target_name()];
                         let target = &self.symbols[id].declaration;
                         result.nullable |= target.is_nullable_view_base();
+                        if union {
+                            branch.nullable |= target.is_nullable_view_base();
+                        }
                         if union && position == 0 && target.kind == Kind::ViewBase {
                             branch.bases.insert(id);
                         }
@@ -1040,8 +1049,12 @@ impl Analyzer<'_, '_> {
                             result
                                 .attributes
                                 .push((id, step.reference.source_span().clone()));
-                            if union && position == 0 {
-                                branch.attributes.insert(id);
+                            if union {
+                                if position == 0 {
+                                    branch.attributes.insert(id);
+                                } else {
+                                    branch.nested_attributes.insert(id);
+                                }
                             }
                         }
                     }
@@ -1064,6 +1077,7 @@ impl Analyzer<'_, '_> {
         member: usize,
         branches: &[UnionBranch],
         previous: &BTreeMap<usize, BTreeSet<usize>>,
+        nullable: &[bool],
         at: &Span,
     ) -> Option<BTreeSet<usize>> {
         let mut covered = BTreeSet::new();
@@ -1077,6 +1091,17 @@ impl Analyzer<'_, '_> {
             covered.extend(inherited);
         }
         for branch in branches {
+            if !self.step(branch.nested_attributes.len() + 1, at) {
+                return None;
+            }
+            if branch.nullable
+                || branch
+                    .nested_attributes
+                    .iter()
+                    .any(|&attribute| nullable[attribute])
+            {
+                continue;
+            }
             // Each union row supplies one primary basis. All paths of this
             // particular alternative must be available in that same row.
             let candidates = match branch.bases.len() {
