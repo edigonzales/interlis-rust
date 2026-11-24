@@ -1,11 +1,13 @@
 use super::{
     Analyzer, Kind, Namespace, SyntaxDecl,
     collections::{cardinality_narrows, compare_count},
+    expressions::{ExpressionContext, underlying_expression},
+    functions::AssignmentContext,
     object_references::object_targets,
 };
 use crate::{
-    AssociationInfo, Cardinality, ObjectTarget, OidKind, RelatedLocation, RoleInfo, RoleStrength,
-    Span, syntax,
+    AssociationInfo, BoundExpressionKind, Cardinality, ExpressionId, ObjectTarget, OidKind,
+    RelatedLocation, RoleInfo, RoleStrength, Span, syntax,
 };
 use std::{
     cmp::Ordering,
@@ -20,6 +22,183 @@ pub(super) struct AssociationAccess {
 }
 
 impl Analyzer<'_, '_> {
+    pub(super) fn bind_association_view_bases(&mut self, viewables: &[usize]) -> Option<()> {
+        for &owner in viewables {
+            let Some(SyntaxDecl::Association(syntax)) = self.symbols[owner].ast else {
+                continue;
+            };
+            let parent = self.symbols[owner].base_scope;
+            let inherited = parent
+                .and_then(|id| self.symbols[id].declaration.derived_from())
+                .cloned();
+            let derived = if let Some(base) = &syntax.derived_from {
+                let basis = self.bind_view_base(owner, base, false)?;
+                let view = self.symbols[basis].declaration.type_reference()?.clone();
+                let id = self.names[view.target_name()];
+                if self.symbols[id].declaration.kind != Kind::View {
+                    self.diagnostics.push(
+                        "ILI-ASSOCIATION-DERIVED-VIEW",
+                        "DERIVED FROM must name a view",
+                        Some(base.target.span.clone()),
+                    );
+                    return None;
+                }
+                if let Some(inherited) = &inherited {
+                    let original = self.names[inherited.target_name()];
+                    if !self.specializes_symbol(id, original, &base.span)? {
+                        self.diagnostics.push(
+                            "ILI-ASSOCIATION-DERIVED-EXTENSION",
+                            "A derived extension must use the inherited view or an extension of it",
+                            Some(base.target.span.clone()),
+                        );
+                        return None;
+                    }
+                } else if parent
+                    .is_some_and(|parent| !self.symbols[parent].declaration.is_abstract())
+                {
+                    self.diagnostics.push(
+                        "ILI-ASSOCIATION-DERIVED-EXTENSION",
+                        "Only an abstract association can become derived in an extension",
+                        Some(base.span.clone()),
+                    );
+                    return None;
+                }
+                Some(view)
+            } else {
+                inherited
+            };
+            if derived.is_some() && self.symbols[owner].declaration.is_abstract() {
+                self.diagnostics.push(
+                    "ILI-ASSOCIATION-DERIVED-ABSTRACT",
+                    "A derived association cannot be abstract",
+                    Some(syntax.span.clone()),
+                );
+                return None;
+            }
+            self.symbols[owner].declaration.derived_from = derived;
+        }
+        Some(())
+    }
+
+    pub(super) fn bind_association_derivations(
+        &mut self,
+        viewables: &[usize],
+        documents: &BTreeMap<u32, &[syntax::Expression]>,
+    ) -> Option<()> {
+        for &owner in viewables {
+            let Some(SyntaxDecl::Association(syntax)) = self.symbols[owner].ast else {
+                continue;
+            };
+            let derived = self.symbols[owner].declaration.derived_from().is_some();
+            for role in &syntax.roles {
+                let id = self.scope_names[&(owner, Namespace::Member, role.name.value.clone())];
+                let Some(root) = role.derivation else {
+                    continue;
+                };
+                if !derived {
+                    self.diagnostics.push(
+                        "ILI-ROLE-DERIVATION-CONTEXT",
+                        "A role assignment requires a derived association",
+                        Some(role.span.clone()),
+                    );
+                    return None;
+                }
+                let value = self.bind_expression(
+                    owner,
+                    documents[&role.span.sort_key().0],
+                    root,
+                    ExpressionContext::Value,
+                )?;
+                self.require_association_view_path(value, &role.span)?;
+                let targets = &self.symbols[id].declaration.role()?.targets;
+                let restrictions = if targets
+                    .iter()
+                    .any(|target| object_targets(target).is_empty())
+                {
+                    Vec::new()
+                } else {
+                    targets.iter().flat_map(object_targets).cloned().collect()
+                };
+                let ty = self.object_selection_type(
+                    false,
+                    ObjectTarget {
+                        target: None,
+                        restrictions,
+                    },
+                );
+                if !self.value_fits(owner, value, ty, true, AssignmentContext::Function)? {
+                    self.diagnostics.push_related(
+                        "ILI-ROLE-DERIVATION-TYPE",
+                        "The view path must select one object accepted by the role",
+                        Some(self.expressions[value.0 as usize].span.clone()),
+                        vec![RelatedLocation {
+                            span: role.name.span.clone(),
+                            message: "Role declaration".into(),
+                        }],
+                    );
+                    return None;
+                }
+                self.symbols[id].declaration.derivations = Some(Box::new([value]));
+            }
+            if !derived {
+                continue;
+            }
+            let association = &self.symbols[owner].declaration;
+            let members: Vec<_> = association
+                .association()?
+                .roles
+                .iter()
+                .chain(
+                    association
+                        .effective_attributes
+                        .as_deref()
+                        .unwrap_or_default(),
+                )
+                .copied()
+                .collect();
+            for member in members {
+                let declaration = &self.symbols[member].declaration;
+                let at = declaration.span.clone();
+                if !self.step(1, &at) {
+                    return None;
+                }
+                let assignments = self.symbols[member].declaration.derivations().to_vec();
+                if assignments.is_empty() {
+                    self.diagnostics.push(
+                        "ILI-ASSOCIATION-DERIVATION-MISSING",
+                        "Each effective role and attribute needs an assignment from the view",
+                        Some(at),
+                    );
+                    return None;
+                }
+                for value in assignments {
+                    self.require_association_view_path(value, &at)?;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn require_association_view_path(&mut self, value: ExpressionId, at: &Span) -> Option<()> {
+        let expression = underlying_expression(&self.expressions, value);
+        if matches!(&expression.kind, BoundExpressionKind::Path { steps }
+            if steps.first().and_then(|step| self.names.get(step.reference.target_name()))
+                .is_some_and(|&root| self.symbols[root].declaration.kind == Kind::ViewBase))
+        {
+            return Some(());
+        }
+        self.diagnostics.push_related(
+            "ILI-ASSOCIATION-DERIVATION-PATH",
+            "A derived association assignment must start at its view basis",
+            Some(expression.span.clone()),
+            vec![RelatedLocation {
+                span: at.clone(),
+                message: "Assigned member".into(),
+            }],
+        );
+        None
+    }
+
     pub(super) fn bind_associations(&mut self, viewables: &[usize]) -> Option<()> {
         for &owner in viewables {
             let Some(SyntaxDecl::Association(syntax)) = self.symbols[owner].ast else {
@@ -458,6 +637,13 @@ impl Analyzer<'_, '_> {
             let topic = self.containing_topic(owner);
             let at = self.symbols[owner].name_span.clone();
             let roles = association.roles.to_vec();
+            for &role in &roles {
+                let name = &self.symbols[role].declaration.name;
+                let candidates = self.associations_by_role.entry(name.clone()).or_default();
+                if candidates.last() != Some(&owner) {
+                    candidates.push(owner);
+                }
+            }
             for (position, &source) in roles.iter().enumerate() {
                 let source = self.symbols[source].declaration.role().unwrap();
                 if source.external {
@@ -538,7 +724,12 @@ impl Analyzer<'_, '_> {
         let object_topic = self.containing_topic(scope);
         let mut candidates = Vec::new();
         let mut declared_later = false;
-        for association in 0..self.symbols.len() {
+        let candidates_by_name = self
+            .associations_by_role
+            .get(&name.value)
+            .cloned()
+            .unwrap_or_default();
+        for association in candidates_by_name {
             if !self.step(1, at) {
                 return Err(LookupError::Limit);
             }
@@ -559,52 +750,52 @@ impl Analyzer<'_, '_> {
             {
                 continue;
             }
-            for &target in &roles {
-                if !outgoing && self.symbols[target].declaration.name != name.value {
+            if !self.step(roles.len(), at) {
+                return Err(LookupError::Limit);
+            }
+            let Some(named) = roles
+                .iter()
+                .copied()
+                .find(|&role| self.symbols[role].declaration.name == name.value)
+            else {
+                continue;
+            };
+            for source in roles {
+                if outgoing != (source == named) {
                     continue;
                 }
-                for &source in &roles {
-                    if outgoing != (source == target)
-                        || outgoing && self.symbols[source].declaration.name != name.value
+                let role = self.symbols[source].declaration.role().unwrap();
+                let external = role.external;
+                let targets = self.role_target_ids(&role.targets);
+                let mut accepts = !first && targets.is_empty();
+                for root in targets {
+                    if self
+                        .specializes_symbol(scope, root, at)
+                        .ok_or(LookupError::Limit)?
                     {
-                        continue;
-                    }
-                    if !self.step(1, at) {
-                        return Err(LookupError::Limit);
-                    }
-                    let role = self.symbols[source].declaration.role().unwrap();
-                    let external = role.external;
-                    let targets = self.role_target_ids(&role.targets);
-                    let mut accepts = !first && targets.is_empty();
-                    for root in targets {
-                        if self
-                            .specializes_symbol(scope, root, at)
-                            .ok_or(LookupError::Limit)?
-                        {
-                            accepts = !first
-                                || !external
-                                    && (self.containing_topic(
-                                        self.symbols[source].declaration.parent.unwrap(),
-                                    ) == self.containing_topic(root)
-                                        || topic == object_topic
-                                            && matches!(self.symbols[scope].ast,
-                                        Some(SyntaxDecl::Container { properties, .. }) if properties.iter()
-                                            .any(|property| property.value == syntax::Property::Extended)));
-                            if accepts {
-                                break;
-                            }
+                        accepts = !first
+                            || !external
+                                && (self.containing_topic(
+                                    self.symbols[source].declaration.parent.unwrap(),
+                                ) == self.containing_topic(root)
+                                    || topic == object_topic
+                                        && matches!(self.symbols[scope].ast,
+                                    Some(SyntaxDecl::Container { properties, .. }) if properties.iter()
+                                        .any(|property| property.value == syntax::Property::Extended)));
+                        if accepts {
+                            break;
                         }
                     }
-                    if accepts && !available {
-                        declared_later |=
-                            first && qualifier.is_none_or(|qualifier| qualifier == association);
-                    } else if accepts {
-                        candidates.push(AssociationAccess {
-                            association,
-                            source,
-                            target: (!outgoing).then_some(target),
-                        });
-                    }
+                }
+                if accepts && !available {
+                    declared_later |=
+                        first && qualifier.is_none_or(|qualifier| qualifier == association);
+                } else if accepts {
+                    candidates.push(AssociationAccess {
+                        association,
+                        source,
+                        target: (!outgoing).then_some(named),
+                    });
                 }
             }
         }
@@ -693,6 +884,7 @@ impl Analyzer<'_, '_> {
                 };
                 cardinality.lower = multiply(&cardinality.lower, &links.lower)?;
                 cardinality.upper = match (cardinality.upper, links.upper) {
+                    (Some(ref upper), _) | (_, Some(ref upper)) if upper == "0" => Some("0".into()),
                     (Some(a), Some(b)) => Some(multiply(&a, &b)?),
                     _ => None,
                 };

@@ -85,8 +85,7 @@ impl<'a> Symbol<'a> {
                 base, properties, ..
             }) => self.base_scope.is_none() && (base.is_some() || extended(properties)),
             Some(SyntaxDecl::Association(a)) => {
-                self.base_scope.is_none()
-                    && (a.base.is_some() || a.derived_from.is_some() || extended(&a.properties))
+                self.base_scope.is_none() && (a.base.is_some() || extended(&a.properties))
             }
             Some(SyntaxDecl::MetadataBasket(b)) => self.base_scope.is_none() && b.base.is_some(),
             Some(SyntaxDecl::Graphic(g)) => g.base.is_some() || extended(&g.properties),
@@ -144,6 +143,7 @@ struct Analyzer<'a, 'd> {
     temporal_languages: BTreeMap<usize, crate::LanguageVersion>,
     constraint_blocks: Vec<(usize, &'a syntax::ConstraintsDecl)>,
     constraint_topic: Option<usize>,
+    associations_by_role: BTreeMap<String, Vec<usize>>,
     generic_types: BTreeMap<usize, usize>,
 }
 fn supported_type(ty: &TypeSyntax) -> bool {
@@ -334,16 +334,7 @@ fn ensure_supported_semantics(
                 .then_some(&function.span),
                 SyntaxDecl::Constraints(_) => None,
                 SyntaxDecl::Association(association) => {
-                    if association.derived_from.is_some()
-                        || association
-                            .roles
-                            .iter()
-                            .any(|role| role.derivation.is_some())
-                    {
-                        Some(&association.span)
-                    } else {
-                        declarations(&association.attributes, work, diagnostics)
-                    }
+                    declarations(&association.attributes, work, diagnostics)
                 }
                 SyntaxDecl::Context(_) => None,
                 SyntaxDecl::View(view) => {
@@ -438,6 +429,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             temporal_languages: BTreeMap::new(),
             constraint_blocks: vec![],
             constraint_topic: None,
+            associations_by_role: BTreeMap::new(),
             generic_types: BTreeMap::new(),
         }
     }
@@ -1233,12 +1225,12 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                     self.symbols[id]
                         .declaration
                         .is_predefined()
-                        .then_some(self.models[self.symbols[owner].model].language()),
+                        .then_some(self.expression_language(owner)),
                 )
             }
             BoundName::Predefined(name, _) => (
                 format!("INTERLIS.{name}"),
-                Some(self.models[self.symbols[owner].model].language),
+                Some(self.expression_language(owner)),
             ),
         };
         Some(TypeReference {
@@ -2031,6 +2023,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
             .iter()
             .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
             .collect();
+        self.bind_association_view_bases(&viewables)?;
         viewables.extend(self.bind_views(&expressions)?);
         self.validate_formatted_types()?;
         self.validate_reference_types(&viewables)?;
@@ -2038,6 +2031,7 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.bind_contexts(&model_order, &topics, &viewables)?;
         self.bind_attribute_path_owners()?;
         self.bind_attribute_derivations(&expressions)?;
+        self.bind_association_derivations(&viewables, &expressions)?;
         self.validate_view_derivations()?;
         self.bind_constraints(&expressions)?;
         if !self.diagnostics.rejected && !self.diagnostics.incomplete {

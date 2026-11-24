@@ -128,7 +128,7 @@ impl Analyzer<'_, '_> {
                 } else {
                     None
                 };
-                let Some((source, base)) = source else {
+                let Some((mut source, base)) = source else {
                     let (formation, bases) = pending.remove(view)?;
                     self.complete_view_formation(*view, formation, bases)?;
                     self.bind_view_members(*view, documents)?;
@@ -137,6 +137,11 @@ impl Analyzer<'_, '_> {
                     continue;
                 };
                 *next += 1;
+                if self.symbols[source].declaration.kind == Kind::Association
+                    && let Some(view) = self.symbols[source].declaration.derived_from()
+                {
+                    source = self.names[view.target_name()];
+                }
                 if self.symbols[source].declaration.kind != Kind::View {
                     continue;
                 }
@@ -446,7 +451,7 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
-    fn bind_view_base(
+    pub(super) fn bind_view_base(
         &mut self,
         owner: usize,
         base: &RenamedViewable,

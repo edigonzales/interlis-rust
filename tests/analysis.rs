@@ -5629,6 +5629,115 @@ fn inherited_constraints_belong_to_the_extending_topic_and_use_its_members() {
 }
 
 #[test]
+fn inherited_constraint_uses_the_edition_of_its_own_source() {
+    let report = outcome(
+        request(vec![
+            (
+                "Base.ili",
+                "INTERLIS 2.3; MODEL Base AT \"x\" VERSION \"1\" =
+                DOMAIN XY=COORD 0.0..10.0,0.0..10.0;
+                    Curve=POLYLINE WITH (STRAIGHTS) VERTEX XY;
+                TOPIC Common=CLASS Item=track:Curve; END Item; END Common; END Base."
+                    .into(),
+            ),
+            (
+                "Use.ili",
+                "INTERLIS 2.4; MODEL Use AT \"x\" VERSION \"1\" =
+                IMPORTS Base; TOPIC Child EXTENDS Base.Common =
+                    CONSTRAINTS OF Item=MANDATORY CONSTRAINT INTERLIS.length(track)>=0; END;
+                END Child; END Use."
+                    .into(),
+            ),
+        ]),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let resolved = graph
+        .expressions()
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            interlis::BoundExpressionKind::Call { function, .. } => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(resolved.target_name(), "INTERLIS.length");
+    assert_eq!(resolved.predefined_language(), Some(LanguageVersion::V24));
+}
+
+#[test]
+fn derived_associations_bind_view_paths_and_require_effective_assignments() {
+    for version in ["2.3", "2.4"] {
+        let model = |basis: &str, members: &str| {
+            request(vec![(
+                "derived",
+                format!(
+                    r#"INTERLIS {version}; MODEL M AT "x" VERSION "1" =
+                    TOPIC T=CLASS A=flag:BOOLEAN; END A; CLASS B=END B;
+                    VIEW JoinView JOIN OF A,B;=END JoinView;
+                    ASSOCIATION Link DERIVED FROM row~{basis}=
+                        {members}
+                    END Link; END T; END M."#
+                ),
+            )])
+        };
+        let members = "left -- A := row->A; right -- B := row->B; enabled:BOOLEAN := row->A->flag;";
+        let report = outcome(model("JoinView", members), Status::CheckedSubset, None);
+        let graph = report.graph().unwrap();
+        let relation = graph.declaration("M.T.Link").unwrap();
+        assert_eq!(
+            relation.derived_from().unwrap().target_name(),
+            "M.T.JoinView"
+        );
+        let left = graph.declaration("M.T.Link.left").unwrap().derivations()[0];
+        let interlis::BoundExpressionKind::Path { steps } = &graph.expression(left).unwrap().kind
+        else {
+            panic!("expected an object path");
+        };
+        assert_eq!(steps[0].reference.target_name(), "M.T.Link.row");
+        assert_eq!(steps[1].reference.target_name(), "M.T.JoinView.A");
+        assert_eq!(
+            graph
+                .declaration("M.T.Link.enabled")
+                .unwrap()
+                .derivations()
+                .len(),
+            1
+        );
+        outcome(
+            model("A", members),
+            Status::Rejected,
+            Some("ILI-ASSOCIATION-DERIVED-VIEW"),
+        );
+        outcome(
+            model(
+                "JoinView",
+                &members.replace("left -- A := row->A", "left -- A := row->B"),
+            ),
+            Status::Rejected,
+            Some("ILI-ROLE-DERIVATION-TYPE"),
+        );
+        outcome(
+            model(
+                "JoinView",
+                &members.replace("right -- B := row->B", "right -- B"),
+            ),
+            Status::Rejected,
+            Some("ILI-ASSOCIATION-DERIVATION-MISSING"),
+        );
+    }
+    outcome(
+        single(
+            "TOPIC T=CLASS A=END A; CLASS B=END B;
+            VIEW Rows PROJECTION OF Link;=END Rows;
+            ASSOCIATION Link DERIVED FROM Rows=left -- A; right -- B; END Link; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-VIEW-CYCLE"),
+    );
+}
+
+#[test]
 fn role_paths_check_declaration_order_multiplicity_and_following_external_access() {
     let base = "TOPIC T=OID AS INTERLIS.I32OID;
         CLASS A=END A; CLASS B=active:BOOLEAN; END B; CLASS C=END C;";
