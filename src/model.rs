@@ -853,6 +853,8 @@ pub struct Declaration {
     pub(crate) topic_dependencies: Option<Box<TopicDependencies>>,
     pub(crate) effective_attributes: Option<Box<[usize]>>,
     pub(crate) subdivision: Option<AttributeSubdivision>,
+    pub(crate) transient: bool,
+    pub(crate) derivations: Option<Box<[ExpressionId]>>,
     pub(crate) constraints: Option<Box<[BoundConstraint]>>,
     pub(crate) function: Option<Box<FunctionInfo>>,
     pub(crate) association: Option<Box<AssociationInfo>>,
@@ -900,6 +902,12 @@ impl Declaration {
     }
     pub fn subdivision(&self) -> Option<&AttributeSubdivision> {
         self.subdivision.as_ref()
+    }
+    pub fn is_transient(&self) -> bool {
+        self.transient
+    }
+    pub fn derivations(&self) -> &[ExpressionId] {
+        self.derivations.as_deref().unwrap_or_default()
     }
     pub fn constraints(&self) -> &[BoundConstraint] {
         self.constraints.as_deref().unwrap_or_default()

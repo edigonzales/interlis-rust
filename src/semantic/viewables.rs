@@ -1,7 +1,8 @@
 use super::{
     Analyzer, BoundName, Effective, Kind, LookupError, QualifiedName, SyntaxDecl, TypeSyntax,
+    expressions::{ExpressionContext, underlying_expression},
 };
-use crate::{RelatedLocation, TypeReference, syntax};
+use crate::{BoundExpressionKind, RelatedLocation, TypeReference, syntax};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Analyzer<'_, '_> {
@@ -333,6 +334,110 @@ impl Analyzer<'_, '_> {
         let declaration = &mut self.symbols[id].declaration;
         declaration.type_id = Some(effective.ty);
         declaration.effective_mandatory = Some(mandatory);
+        if let Some(SyntaxDecl::Attribute { properties, .. }) = self.symbols[id].ast {
+            self.symbols[id].declaration.transient = properties
+                .iter()
+                .any(|property| property.value == syntax::Property::Transient);
+        }
+        Some(())
+    }
+
+    pub(super) fn bind_attribute_derivations(
+        &mut self,
+        documents: &BTreeMap<u32, &[syntax::Expression]>,
+    ) -> Option<()> {
+        for id in 0..self.symbols.len() {
+            let Some(SyntaxDecl::Attribute {
+                derivations,
+                properties,
+                span,
+                ..
+            }) = self.symbols[id].ast
+            else {
+                continue;
+            };
+            let declaration = &self.symbols[id].declaration;
+            if let Some(base) = self.symbols[id].base_scope
+                && declaration.is_transient() != self.symbols[base].declaration.is_transient()
+            {
+                self.report_type_override(
+                    id,
+                    "ILI-ATTRIBUTE-TRANSIENT-OVERRIDE",
+                    "An override must preserve the inherited attribute's TRANSIENT mode",
+                    span,
+                );
+                continue;
+            }
+            if derivations.is_empty() {
+                if declaration.is_transient() && !declaration.is_abstract() {
+                    let modifier = properties
+                        .iter()
+                        .find(|property| property.value == syntax::Property::Transient)?;
+                    self.diagnostics.push(
+                        "ILI-TRANSIENT-DERIVATION",
+                        "A concrete TRANSIENT attribute requires a derivation",
+                        Some(modifier.span.clone()),
+                    );
+                }
+                continue;
+            }
+            let ty = declaration.type_id?;
+            let owner = declaration.parent?;
+            let mandatory = declaration.mandatory() == Some(true);
+            let statements = documents[&span.sort_key().0];
+            let mut bound = Vec::with_capacity(derivations.len());
+            for &root in derivations {
+                let value = self
+                    .bind_expression(owner, statements, root, ExpressionContext::Value)
+                    .and_then(|value| {
+                        self.value_fits(owner, value, ty, mandatory)
+                            .map(|fits| (value, fits))
+                    });
+                match value {
+                    Some((value, true)) => bound.push(value),
+                    Some((value, false)) => self.diagnostics.push_related(
+                        "ILI-ATTRIBUTE-DERIVATION-TYPE",
+                        "The derived value cannot be assigned to the attribute type",
+                        Some(self.expressions[value.0 as usize].span.clone()),
+                        vec![RelatedLocation {
+                            span: self.symbols[id].name_span.clone(),
+                            message: "Attribute declaration".into(),
+                        }],
+                    ),
+                    None if self.diagnostics.limited => return None,
+                    None => {}
+                }
+            }
+            let symbol = &mut self.symbols[id];
+            if symbol.base_scope.is_some()
+                && let [value] = bound.as_slice()
+                && derivations.len() == 1
+                && matches!(
+                    underlying_expression(&self.expressions, *value).kind,
+                    BoundExpressionKind::Boolean { .. }
+                        | BoundExpressionKind::Number { .. }
+                        | BoundExpressionKind::Text { .. }
+                        | BoundExpressionKind::Enumeration { .. }
+                )
+            {
+                symbol.declaration.final_declaration = true;
+            }
+            symbol.declaration.derivations = Some(bound.into_boxed_slice());
+        }
+        for id in 0..self.symbols.len() {
+            if self.symbols[id].declaration.kind == Kind::Attribute
+                && let Some(base) = self.symbols[id].base_scope
+                && self.symbols[base].declaration.is_final()
+            {
+                let span = self.symbols[id].name_span.clone();
+                self.report_type_override(
+                    id,
+                    "ILI-ATTRIBUTE-OVERRIDE",
+                    "A constant attribute override is FINAL",
+                    &span,
+                );
+            }
+        }
         Some(())
     }
 

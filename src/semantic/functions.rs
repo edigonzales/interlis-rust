@@ -104,31 +104,17 @@ impl Analyzer<'_, '_> {
                     let ty = declaration.type_id?;
                     let mandatory = declaration.mandatory() == Some(true);
                     let at = self.expressions[argument.0 as usize].span.clone();
-                    if self.is_enum_type(ty) {
-                        self.bind_enum_literal(argument, ty)?;
-                    }
-                    match self.argument_fits(owner, argument, ty, mandatory) {
-                        Ok(Some(true)) => {}
-                        Ok(Some(false)) => {
-                            self.diagnostics.push_related(
-                                "ILI-FUNCTION-ARGUMENT",
-                                "The argument cannot be assigned to the declared parameter",
-                                Some(at),
-                                vec![RelatedLocation {
-                                    span: self.symbols[formal].name_span.clone(),
-                                    message: "Formal parameter".into(),
-                                }],
-                            );
-                            return None;
-                        }
-                        Ok(None) => {
-                            self.unsupported_expression(&at);
-                            return None;
-                        }
-                        Err(error) => {
-                            self.number_error(error, &at);
-                            return None;
-                        }
+                    if !self.value_fits(owner, argument, ty, mandatory)? {
+                        self.diagnostics.push_related(
+                            "ILI-FUNCTION-ARGUMENT",
+                            "The argument cannot be assigned to the declared parameter",
+                            Some(at),
+                            vec![RelatedLocation {
+                                span: self.symbols[formal].name_span.clone(),
+                                message: "Formal parameter".into(),
+                            }],
+                        );
+                        return None;
                     }
                 }
                 self.symbols[target].declaration.type_id?
@@ -217,29 +203,43 @@ impl Analyzer<'_, '_> {
         };
         let formal = self.types.len();
         self.types.push(allowed);
-        match self.argument_fits(owner, argument, formal, false) {
-            Ok(Some(true)) => {}
-            Ok(Some(false)) => {
-                self.diagnostics.push(
-                    "ILI-FUNCTION-ARGUMENT",
-                    "The argument cannot be assigned to the predefined parameter",
-                    Some(at),
-                );
-                return None;
-            }
-            Ok(None) => {
-                self.unsupported_expression(&at);
-                return None;
-            }
-            Err(error) => {
-                self.number_error(error, &at);
-                return None;
-            }
+        if !self.value_fits(owner, argument, formal, false)? {
+            self.diagnostics.push(
+                "ILI-FUNCTION-ARGUMENT",
+                "The argument cannot be assigned to the predefined parameter",
+                Some(at),
+            );
+            return None;
         }
         if matches!(name, "len" | "lenM" | "objectCount") {
             Some(self.unbounded_numeric_type())
         } else {
             Some(formal)
+        }
+    }
+
+    pub(super) fn value_fits(
+        &mut self,
+        owner: usize,
+        expression: ExpressionId,
+        target: usize,
+        mandatory: bool,
+    ) -> Option<bool> {
+        if self.is_enum_type(target) {
+            self.bind_enum_literal(expression, target)?;
+        }
+        match self.argument_fits(owner, expression, target, mandatory) {
+            Ok(Some(result)) => Some(result),
+            Ok(None) => {
+                let at = self.expressions[expression.0 as usize].span.clone();
+                self.unsupported_expression(&at);
+                None
+            }
+            Err(error) => {
+                let at = self.expressions[expression.0 as usize].span.clone();
+                self.number_error(error, &at);
+                None
+            }
         }
     }
 

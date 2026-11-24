@@ -11,12 +11,10 @@ use crate::{
 use std::collections::BTreeMap;
 
 impl Analyzer<'_, '_> {
-    pub(super) fn bind_constraints(&mut self) -> Option<()> {
-        let documents: BTreeMap<_, _> = self
-            .documents
-            .iter()
-            .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
-            .collect();
+    pub(super) fn bind_constraints(
+        &mut self,
+        documents: &BTreeMap<u32, &[Expression]>,
+    ) -> Option<()> {
         let mut attached = BTreeMap::<usize, Vec<&ConstraintSyntax>>::new();
         for index in 0..self.constraint_blocks.len() {
             let (topic, block) = self.constraint_blocks[index];
@@ -108,7 +106,7 @@ impl Analyzer<'_, '_> {
             if !inline.is_empty() || !external.is_empty() {
                 self.bind_named_constraints(
                     owner,
-                    &documents,
+                    documents,
                     inline.iter().chain(external),
                     &mut bound,
                 )?;

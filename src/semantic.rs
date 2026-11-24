@@ -252,7 +252,6 @@ fn ensure_supported_semantics(
                 SyntaxDecl::Attribute {
                     properties,
                     type_use,
-                    derivations,
                     span,
                     ..
                 } => {
@@ -262,9 +261,9 @@ fn ensure_supported_semantics(
                             syntax::Property::Abstract
                                 | syntax::Property::Extended
                                 | syntax::Property::Final
+                                | syntax::Property::Transient
                         )
-                    }) || !derivations.is_empty()
-                    {
+                    }) {
                         Some(span)
                     } else {
                         type_use
@@ -523,6 +522,8 @@ impl<'a, 'd> Analyzer<'a, 'd> {
                 topic_dependencies: None,
                 effective_attributes: None,
                 subdivision: None,
+                transient: false,
+                derivations: None,
                 constraints: None,
                 function: None,
                 association: None,
@@ -1950,7 +1951,13 @@ impl<'a, 'd> Analyzer<'a, 'd> {
         self.validate_domain_reference_systems()?;
         self.validate_geometries()?;
         self.bind_contexts(&model_order, &topics, &viewables)?;
-        self.bind_constraints()?;
+        let expressions: BTreeMap<_, _> = self
+            .documents
+            .iter()
+            .map(|document| (document.span.sort_key().0, document.expressions.as_slice()))
+            .collect();
+        self.bind_attribute_derivations(&expressions)?;
+        self.bind_constraints(&expressions)?;
         if self.diagnostics.rejected || self.diagnostics.incomplete {
             return None;
         }

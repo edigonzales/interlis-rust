@@ -1209,17 +1209,15 @@ mod continuation_regressions {
             }
             let marker = "value:TEXT*4 := \"X\";";
             let source = format!("{head} {data} TOPIC T=CLASS C={marker} END C; END T; END Data.");
-            let expected = source.find(marker).unwrap();
+            let expected = source.find("\"X\"").unwrap();
             let report = run(source);
-            assert_eq!(report.status(), AnalysisStatus::Incomplete);
-            let d = &report.diagnostics()[0];
-            assert_eq!(d.code, "ILI-UNSUPPORTED");
-            let location = report
-                .sources()
-                .location(d.primary.as_ref().unwrap())
-                .unwrap();
+            assert_eq!(report.status(), AnalysisStatus::CheckedSubset);
+            let graph = report.graph().unwrap();
+            let value = graph.declaration("Data.T.C.value").unwrap();
+            let expression = graph.expression(value.derivations()[0]).unwrap();
+            let location = report.sources().location(expression.source_span()).unwrap();
             assert_eq!(location.start_byte as usize, expected);
-            assert_eq!(location.end_byte as usize, expected + marker.len());
+            assert_eq!(location.end_byte as usize, expected + 3);
         }
         let valid = "INTERLIS 2.4; MODEL A (en) NOINCREMENTALTRANSFER AT \"https://example.invalid\" VERSION \"1\" = END A.";
         let report = run(valid.into());

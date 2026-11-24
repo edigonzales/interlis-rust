@@ -4540,6 +4540,84 @@ fn enumeration_comparisons_distinguish_bad_values_and_unrelated_or_unordered_typ
 }
 
 #[test]
+fn attribute_derivations_keep_bound_values_transience_and_constant_override_finality() {
+    for version in ["2.3", "2.4"] {
+        let report = outcome(
+            request(vec![(
+                "model.ili",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                     TOPIC T=CLASS Base=active:BOOLEAN; rank:0..10; END Base;
+                     CLASS Child EXTENDS Base=
+                         flag (TRANSIENT):BOOLEAN := active;
+                         rank (EXTENDED):0..10 := 7;
+                     END Child;
+                     CLASS Grandchild EXTENDS Child=END Grandchild;
+                     END T; END M.",
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let flag = graph.declaration("M.T.Child.flag").unwrap();
+        assert!(flag.is_transient());
+        let interlis::BoundExpressionKind::Path { steps } =
+            &graph.expression(flag.derivations()[0]).unwrap().kind
+        else {
+            panic!("expected a derivation from an inherited attribute");
+        };
+        assert_eq!(steps[0].reference.target_name(), "M.T.Base.active");
+        let rank = graph.declaration("M.T.Child.rank").unwrap();
+        assert!(rank.is_final());
+        assert!(!rank.is_transient());
+        assert_eq!(
+            rank.base_reference().unwrap().target_name(),
+            "M.T.Base.rank"
+        );
+    }
+}
+
+#[test]
+fn attribute_derivations_reject_wrong_values_and_invalid_transient_overrides() {
+    for (body, code) in [
+        (
+            "CLASS Item=x (TRANSIENT):BOOLEAN; END Item;",
+            "ILI-TRANSIENT-DERIVATION",
+        ),
+        (
+            "CLASS Item=x:BOOLEAN := 7; END Item;",
+            "ILI-ATTRIBUTE-DERIVATION-TYPE",
+        ),
+        (
+            "CLASS Item=x:0..3 := 4; END Item;",
+            "ILI-ATTRIBUTE-DERIVATION-TYPE",
+        ),
+        (
+            "CLASS Item=x:MANDATORY TEXT := UNDEFINED; END Item;",
+            "ILI-ATTRIBUTE-DERIVATION-TYPE",
+        ),
+        (
+            "CLASS Base=x (TRANSIENT):BOOLEAN := #true; END Base;
+             CLASS Child EXTENDS Base=x (EXTENDED):BOOLEAN; END Child;",
+            "ILI-ATTRIBUTE-TRANSIENT-OVERRIDE",
+        ),
+        (
+            "CLASS Base=x:0..10; END Base;
+             CLASS Child EXTENDS Base=x (EXTENDED):0..10 := 7; END Child;
+             CLASS Leaf EXTENDS Child=x (EXTENDED):0..10; END Leaf;",
+            "ILI-ATTRIBUTE-OVERRIDE",
+        ),
+    ] {
+        outcome(
+            single(&format!("TOPIC T={body} END T;")),
+            Status::Rejected,
+            Some(code),
+        );
+    }
+}
+
+#[test]
 fn existence_constraints_reject_missing_dependencies_and_incompatible_values() {
     for (dependencies, ty, path, code) in [
         (

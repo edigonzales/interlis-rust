@@ -1314,7 +1314,7 @@ mod tests {
         for (body, status) in [
             (
                 "STRUCTURE S=ATTRIBUTE x (TRANSIENT):BOOLEAN; END S;",
-                AnalysisStatus::Incomplete,
+                AnalysisStatus::Rejected,
             ),
             (
                 "STRUCTURE S=SUBDIVISION x:BOOLEAN; END S;",

@@ -1296,7 +1296,7 @@ mod tests {
     }
     #[test]
     fn expression_semantics_keep_unsupported_constructs_explicit() {
-        use AnalysisStatus::{CheckedSubset, Incomplete, Rejected};
+        use AnalysisStatus::{CheckedSubset, Rejected};
         for (v, body, status) in [
             (
                 "2.3",
@@ -1304,7 +1304,11 @@ mod tests {
                 Rejected,
             ),
             ("2.4", "FUNCTION f():BOOLEAN;", CheckedSubset),
-            ("2.4", "CLASS C=a:BOOLEAN := Missing(); END C;", Incomplete),
+            (
+                "2.4",
+                "TOPIC T=CLASS C=a:BOOLEAN := Missing(); END C; END T;",
+                Rejected,
+            ),
             (
                 "2.4",
                 "DOMAIN D=TEXT*4 CONSTRAINTS check: THIS == \"X\";",

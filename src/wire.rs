@@ -511,6 +511,10 @@ impl Serialize for DeclarationsOutput<'_> {
             effective_attributes: Option<Vec<&'a str>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             subdivision: Option<Subdivision>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            transient: bool,
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            derivations: &'a [crate::ExpressionId],
             #[serde(skip_serializing_if = "Vec::is_empty")]
             constraints: Vec<Constraint<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -576,6 +580,8 @@ impl Serialize for DeclarationsOutput<'_> {
                     continuous: subdivision.continuous,
                     location: self.sources.location(subdivision.source_span()),
                 }),
+                transient: declaration.is_transient(),
+                derivations: declaration.derivations(),
                 constraints: declaration
                     .constraints()
                     .iter()
