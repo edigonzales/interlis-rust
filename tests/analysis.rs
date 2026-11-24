@@ -3914,3 +3914,28 @@ fn generic_uses_include_references_introduced_by_the_selected_coordinates() {
         Some("ILI-GENERIC-CONTEXT-MISSING"),
     );
 }
+
+#[test]
+fn generic_dependencies_never_switch_an_alternative_between_axes() {
+    for alternatives in ["Left OR Right", "Right OR Left"] {
+        let report = outcome(
+            single(&format!(
+                "DOMAIN G (GENERIC)=COORD NUMERIC,NUMERIC; Ghost (GENERIC)=COORD NUMERIC;
+                 Left=COORD 0..9 <G[2]>,0..9; Right=COORD 0..9,0..9 <Ghost[1]>;
+                 Measure=0..9 <G[1]>;
+                 CONTEXT Primary=G={alternatives};
+                 TOPIC T=DEFERRED GENERICS G; CLASS Item=value:Measure; END Item; END T;"
+            )),
+            Status::CheckedSubset,
+            None,
+        );
+        let bindings = report
+            .graph()
+            .unwrap()
+            .declaration("M.T")
+            .unwrap()
+            .generic_bindings();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].generic_domain, "M.G");
+    }
+}

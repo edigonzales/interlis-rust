@@ -14,6 +14,21 @@ struct Alternatives {
 type ContextAlternatives = BTreeMap<usize, Alternatives>;
 type TypeUse = (usize, Option<usize>);
 
+#[derive(Clone, Copy)]
+enum Axes {
+    All,
+    Index(usize),
+    Direction,
+}
+
+#[derive(Clone)]
+struct ReferenceUse {
+    target: usize,
+    axes: Axes,
+    source: Option<TypeUse>,
+    location: Span,
+}
+
 impl Analyzer<'_, '_> {
     pub(super) fn bind_contexts(
         &mut self,
@@ -353,7 +368,7 @@ impl Analyzer<'_, '_> {
                         "ILI-GENERIC-CONTEXT-MISSING",
                         "A deferred generic domain needs an effective context",
                     ))
-                } else if !used.contains_key(&id) {
+                } else if !used.contains(&id) {
                     Some((
                         "ILI-GENERIC-DEFERRED-UNUSED",
                         "The topic does not use this deferred generic domain",
@@ -369,7 +384,7 @@ impl Analyzer<'_, '_> {
                 local_deferred.push(reference);
             }
             let mut bindings = Vec::new();
-            for (generic, type_uses) in used {
+            for generic in used {
                 let selection = alternatives[model].get(&generic);
                 let choice = selection.map_or(&[][..], |selection| selection.domains.as_slice());
                 if choice.is_empty() && !self.symbols[topic].declaration.is_abstract() {
@@ -387,24 +402,6 @@ impl Analyzer<'_, '_> {
                         Some(span),
                     );
                     return None;
-                }
-                for &alternative in choice {
-                    let selected = self.symbols[alternative].declaration.type_id?;
-                    self.check_context_reference_cycles(
-                        selected,
-                        (generic, alternative),
-                        &alternatives[model],
-                        &span,
-                    )?;
-                    for &type_use in &type_uses {
-                        self.validate_context_use(type_use, generic, alternative, &span)?;
-                        self.check_context_reference_cycles(
-                            type_use.0,
-                            (generic, alternative),
-                            &alternatives[model],
-                            &span,
-                        )?;
-                    }
                 }
                 let bytes = choice
                     .iter()
@@ -445,101 +442,138 @@ impl Analyzer<'_, '_> {
         Some(())
     }
 
-    fn check_context_reference_cycles(
+    fn follow_context_references(
         &mut self,
-        source_type: usize,
-        (generic, alternative): (usize, usize),
+        root: ReferenceUse,
         alternatives: &ContextAlternatives,
+        used: &mut BTreeSet<usize>,
         topic: &Span,
     ) -> Option<()> {
-        // A branch uses a single choice for every generic, even when its
-        // reference path reaches different axes of that generic.
+        // Discover dependencies and validate them along the same branch. An
+        // alternative remains selected until every axis reached from it returns.
         type Axis = (usize, usize);
         enum Walk {
-            Enter(Axis, Span),
+            Follow(ReferenceUse),
+            Read(Axis, Span),
             Leave(Axis),
             Select {
                 generic: usize,
-                axis: Axis,
-                at: Span,
+                candidate: usize,
+                reference: ReferenceUse,
+                remember: bool,
             },
             Unselect(usize),
         }
 
-        let mut pending = Vec::new();
-        for index in (0..reference_ranges(&self.types[source_type]).len()).rev() {
-            pending.push(Walk::Enter((source_type, index), topic.clone()));
-        }
-        let mut selected =
-            BTreeMap::from([(generic, self.symbols[alternative].declaration.type_id?)]);
+        let mut pending = vec![Walk::Follow(root)];
+        let mut selected = BTreeMap::new();
         let mut active = BTreeSet::new();
-        while let Some(next) = pending.pop() {
-            let (node, at) = match next {
-                Walk::Enter(node, at) => (node, at),
-                Walk::Leave(node) => {
-                    active.remove(&node);
-                    continue;
+        while let Some(event) = pending.pop() {
+            match event {
+                Walk::Follow(reference) => {
+                    if !self.step(1, &reference.location) {
+                        return None;
+                    }
+                    if let Some(&generic) = self.generic_types.get(&reference.target) {
+                        used.insert(generic);
+                        if let Some(&candidate) = selected.get(&generic) {
+                            pending.push(Walk::Select {
+                                generic,
+                                candidate,
+                                reference,
+                                remember: false,
+                            });
+                        } else if let Some(choices) = alternatives.get(&generic) {
+                            if !self.step(choices.domains.len(), &reference.location) {
+                                return None;
+                            }
+                            for &candidate in choices.domains.iter().rev() {
+                                pending.push(Walk::Select {
+                                    generic,
+                                    candidate,
+                                    reference: reference.clone(),
+                                    remember: true,
+                                });
+                            }
+                        }
+                    } else {
+                        for index in
+                            (0..reference_ranges(&self.types[reference.target]).len()).rev()
+                        {
+                            if matches!(reference.axes, Axes::All)
+                                || matches!(reference.axes, Axes::Index(axis) if axis == index)
+                            {
+                                pending.push(Walk::Read(
+                                    (reference.target, index),
+                                    reference.location.clone(),
+                                ));
+                            }
+                        }
+                    }
                 }
-                Walk::Select { generic, axis, at } => {
-                    selected.insert(generic, axis.0);
-                    pending.push(Walk::Unselect(generic));
-                    (axis, at)
+                Walk::Select {
+                    generic,
+                    candidate,
+                    mut reference,
+                    remember,
+                } => {
+                    if remember {
+                        selected.insert(generic, candidate);
+                        pending.push(Walk::Unselect(generic));
+                    }
+                    if let Some(source) = reference.source.take() {
+                        self.validate_context_use(source, generic, candidate, topic)?;
+                    }
+                    reference.target = self.symbols[candidate].declaration.type_id?;
+                    pending.push(Walk::Follow(reference));
                 }
                 Walk::Unselect(generic) => {
                     selected.remove(&generic);
-                    continue;
                 }
-            };
-            if !self.step(1, &at) {
-                return None;
-            }
-            if !active.insert(node) {
-                self.diagnostics.push_related(
-                    "ILI-REFSYSTEM-CYCLE",
-                    "Selecting coordinate alternatives closes a reference-system cycle",
-                    Some(at),
-                    vec![RelatedLocation {
-                        span: self.symbols[alternative].name_span.clone(),
-                        message: "Selected coordinate alternative".into(),
-                    }],
-                );
-                return None;
-            }
-            pending.push(Walk::Leave(node));
-            let Some(reference) = reference_ranges(&self.types[node.0])
-                .get(node.1)
-                .and_then(|range| range.reference_system.as_ref())
-            else {
-                continue;
-            };
-            let Some(&target) = self.names.get(reference.domain.target_name()) else {
-                continue;
-            };
-            let at = reference.domain.span.clone();
-            let ty = self.symbols[target].declaration.type_id?;
-            let axis = match reference.axis {
-                Some(axis) => usize::from(axis - 1),
-                None if matches!(self.types[ty], TypeInfo::Numeric(_)) => 0,
-                None => continue,
-            };
-            if self.symbols[target].declaration.is_generic() {
-                if let Some(&chosen) = selected.get(&target) {
-                    pending.push(Walk::Enter((chosen, axis), at));
-                } else if let Some(choices) = alternatives.get(&target) {
-                    if !self.step(choices.domains.len(), &at) {
+                Walk::Leave(node) => {
+                    active.remove(&node);
+                }
+                Walk::Read(node, at) => {
+                    if !self.step(1, &at) {
                         return None;
                     }
-                    for &candidate in choices.domains.iter().rev() {
-                        let ty = self.symbols[candidate].declaration.type_id?;
-                        pending.push(Walk::Select {
-                            generic: target,
-                            axis: (ty, axis),
-                            at: at.clone(),
-                        });
+                    if !active.insert(node) {
+                        self.diagnostics.push_related(
+                            "ILI-REFSYSTEM-CYCLE",
+                            "Selecting coordinate alternatives closes a reference-system cycle",
+                            Some(at),
+                            selected
+                                .values()
+                                .take(8)
+                                .map(|&alternative| RelatedLocation {
+                                    span: self.symbols[alternative].name_span.clone(),
+                                    message: "Selected coordinate alternative".into(),
+                                })
+                                .collect(),
+                        );
+                        return None;
                     }
+                    pending.push(Walk::Leave(node));
+                    let Some(reference) =
+                        &reference_ranges(&self.types[node.0])[node.1].reference_system
+                    else {
+                        continue;
+                    };
+                    let Some(target) = self.context_type(&reference.domain) else {
+                        continue;
+                    };
+                    let axes = match reference.axis {
+                        Some(axis) => Axes::Index(usize::from(axis - 1)),
+                        None if matches!(self.types[target], TypeInfo::Numeric(_)) => Axes::All,
+                        None => Axes::Direction,
+                    };
+                    pending.push(Walk::Follow(ReferenceUse {
+                        target,
+                        axes,
+                        source: Some((node.0, Some(node.1))),
+                        location: reference.domain.span.clone(),
+                    }));
                 }
-            } else {
-                pending.push(Walk::Enter((ty, axis), at));
             }
         }
         Some(())
@@ -553,7 +587,7 @@ impl Analyzer<'_, '_> {
         visible_models: &BTreeSet<usize>,
         alternatives: &ContextAlternatives,
         span: &Span,
-    ) -> Option<BTreeMap<usize, BTreeSet<TypeUse>>> {
+    ) -> Option<BTreeSet<usize>> {
         let mut scope = Some(topic);
         let mut containers = Vec::new();
         let mut visible_topics = BTreeSet::new();
@@ -573,7 +607,7 @@ impl Analyzer<'_, '_> {
         }
         let mut checked_containers = BTreeSet::new();
         let mut checked_types = BTreeSet::new();
-        let mut generic_domains = BTreeMap::<usize, BTreeSet<TypeUse>>::new();
+        let mut generic_domains = BTreeSet::new();
         let mut expanded_any = false;
         while let Some(container) = containers.pop() {
             if !self.step(1, span) {
@@ -589,32 +623,16 @@ impl Analyzer<'_, '_> {
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|&id| self.symbols[id].declaration.type_id)
-                .map(|id| (id, None))
                 .collect();
-            while let Some((id, axis)) = types.pop() {
+            while let Some(id) = types.pop() {
                 if !self.step(1, span) {
                     return None;
                 }
-                if !checked_types.insert((id, axis)) {
-                    continue;
-                }
-                if let Some(&generic) = self.generic_types.get(&id) {
-                    generic_domains.entry(generic).or_default();
-                    if let Some(choices) = alternatives.get(&generic) {
-                        if !self.step(choices.domains.len(), span) {
-                            return None;
-                        }
-                        types.extend(choices.domains.iter().filter_map(|&candidate| {
-                            self.symbols[candidate]
-                                .declaration
-                                .type_id
-                                .map(|ty| (ty, axis))
-                        }));
-                    }
+                if !checked_types.insert(id) {
                     continue;
                 }
                 match &self.types[id] {
-                    TypeInfo::Collection(collection) => types.push((collection.element, None)),
+                    TypeInfo::Collection(collection) => types.push(collection.element),
                     TypeInfo::Structure(structure) => {
                         let targets = structure_targets(structure);
                         if targets.is_empty() && !expanded_any {
@@ -642,37 +660,35 @@ impl Analyzer<'_, '_> {
                     }
                     TypeInfo::Geometry(geometry) => {
                         if let Some(vertex) = &geometry.vertex
-                            && let Some(ty) = self.referenced_context_type(
-                                (id, None),
-                                vertex,
-                                &mut generic_domains,
-                            )
+                            && let Some(target) = self.context_type(vertex)
                         {
-                            types.push((ty, None));
-                        }
-                    }
-                    ty => {
-                        for (index, range) in reference_ranges(ty).iter().enumerate() {
-                            if axis.is_some_and(|axis| axis != index) {
-                                continue;
-                            }
-                            let Some(reference) = &range.reference_system else {
-                                continue;
-                            };
-                            let Some(ty) = self.referenced_context_type(
-                                (id, axis),
-                                &reference.domain,
+                            self.follow_context_references(
+                                ReferenceUse {
+                                    target,
+                                    axes: Axes::All,
+                                    source: Some((id, None)),
+                                    location: vertex.span.clone(),
+                                },
+                                alternatives,
                                 &mut generic_domains,
-                            ) else {
-                                continue;
-                            };
-                            if let Some(axis) = reference.axis {
-                                types.push((ty, Some(usize::from(axis - 1))));
-                            } else if matches!(self.types[ty], TypeInfo::Numeric(_)) {
-                                types.push((ty, None));
-                            }
+                                span,
+                            )?;
                         }
                     }
+                    ty if !reference_ranges(ty).is_empty() => {
+                        self.follow_context_references(
+                            ReferenceUse {
+                                target: id,
+                                axes: Axes::All,
+                                source: None,
+                                location: span.clone(),
+                            },
+                            alternatives,
+                            &mut generic_domains,
+                            span,
+                        )?;
+                    }
+                    _ => {}
                 }
             }
             let owner_scope = self.containing_topic(container);
@@ -693,17 +709,8 @@ impl Analyzer<'_, '_> {
         Some(generic_domains)
     }
 
-    fn referenced_context_type(
-        &self,
-        use_type: TypeUse,
-        reference: &TypeReference,
-        used: &mut BTreeMap<usize, BTreeSet<TypeUse>>,
-    ) -> Option<usize> {
+    fn context_type(&self, reference: &TypeReference) -> Option<usize> {
         let &id = self.names.get(reference.target_name())?;
-        let declaration = &self.symbols[id].declaration;
-        if declaration.is_generic() {
-            used.entry(id).or_default().insert(use_type);
-        }
-        declaration.type_id
+        self.symbols[id].declaration.type_id
     }
 }
