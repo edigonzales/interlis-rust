@@ -38,6 +38,7 @@ impl Analyzer<'_, '_> {
         }
         let mut steps = Vec::with_capacity(elements.len());
         let mut scope = owner;
+        let topic = self.containing_topic(owner);
         for (position, element) in elements.iter().enumerate() {
             let PathElement::Name { name, selector, .. } = element else {
                 self.unsupported_expression(&path.span);
@@ -85,7 +86,7 @@ impl Analyzer<'_, '_> {
                     Some(value),
                 ));
             }
-            scope = self.path_scope(value, &name.span)?;
+            scope = self.path_scope(value, topic, &name.span)?;
         }
         unreachable!("a parsed path contains at least one step")
     }
@@ -180,7 +181,7 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn path_scope(&mut self, mut ty: usize, at: &Span) -> Option<usize> {
+    fn path_scope(&mut self, mut ty: usize, topic: Option<usize>, at: &Span) -> Option<usize> {
         while let TypeInfo::Collection(collection) = &self.types[ty] {
             if collection
                 .cardinality
@@ -214,12 +215,17 @@ impl Analyzer<'_, '_> {
             .iter()
             .map(|target| self.names.get(target.target_name()).copied())
             .collect();
-        let Some(roots) = roots.filter(|roots| !roots.is_empty()) else {
+        let Some(mut roots) = roots.filter(|roots| !roots.is_empty()) else {
             self.unsupported_expression(at);
             return None;
         };
         if !self.step(roots.len(), at) {
             return None;
+        }
+        if let Some(topic) = topic {
+            for root in &mut roots {
+                *root = self.contextual_path_scope(topic, *root, at)?;
+            }
         }
         let mut base = Some(roots[0]);
         while let Some(candidate) = base {
@@ -240,6 +246,24 @@ impl Analyzer<'_, '_> {
             "The possible objects have no common declared scope for this path",
             at,
         )
+    }
+
+    fn contextual_path_scope(&mut self, topic: usize, root: usize, at: &Span) -> Option<usize> {
+        let Some(base_topic) = self.containing_topic(root) else {
+            return Some(root);
+        };
+        if topic == base_topic || !self.specializes_symbol(topic, base_topic, at)? {
+            return Some(root);
+        }
+        let declaration = &self.symbols[root].declaration;
+        let name = declaration.name.clone();
+        let kind = declaration.kind;
+        if let Some(local) = self.visible_name(topic, &name, Some(&[kind]), at).ok()?
+            && self.specializes_symbol(local, root, at)?
+        {
+            return Some(local);
+        }
+        Some(root)
     }
 
     fn path_error<T>(&mut self, code: &str, message: &str, at: &Span) -> Option<T> {

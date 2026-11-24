@@ -3871,6 +3871,37 @@ fn object_path_selectors_and_traversal_enforce_actual_shapes() {
 }
 
 #[test]
+fn object_paths_resolve_reference_targets_in_the_extending_topic() {
+    let report = outcome(
+        single(
+            "TOPIC Parent=OID AS INTERLIS.I32OID;
+                CLASS A=active:BOOLEAN; END A;
+                STRUCTURE Link=pointer:REFERENCE TO A; END Link;
+                CLASS Item=link:Link; END Item;
+             END Parent;
+             TOPIC Child EXTENDS Parent=
+                CLASS A (EXTENDED)=extra:BOOLEAN; END A;
+                CLASS Item (EXTENDED)=
+                    MANDATORY CONSTRAINT link->pointer->extra;
+                END Item;
+             END Child;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    let graph = report.graph().unwrap();
+    let expression = graph.declaration("M.Child.Item").unwrap().constraints()[0].expression;
+    let interlis::BoundExpressionKind::Path { steps } = &graph.expression(expression).unwrap().kind
+    else {
+        panic!("expected an object path");
+    };
+    assert_eq!(
+        steps.last().unwrap().reference.target_name(),
+        "M.Child.A.extra"
+    );
+}
+
+#[test]
 fn same_topic_constraint_blocks_augment_the_target_in_source_order() {
     let report = outcome(
         single(
