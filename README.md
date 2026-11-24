@@ -1,75 +1,25 @@
 # interlis-rust
 
-INTERLIS 2.3 and 2.4 syntax parsing and experimental model analysis, shared by
-native and WebAssembly hosts. `parse(CompileRequest)` returns an owned syntax
-report. `analyze(CompileRequest)` checks the implemented model subset and returns
-`checked_subset` with a read-only provisional model graph on success.
+The Rust library, native CLI and WebAssembly package share one parser and model
+compiler for INTERLIS 2.3 and 2.4. Provide every source in the selected models'
+transitive dependency closure. The compiler uses each source's declared edition.
 
-The syntax report uses `validationScope: "syntax"` and `fullValidation: false`.
-Its statuses in descending priority are `limit_exceeded`, `invalid`,
-`unsupported_version`, and `parsed`. JSON includes document and model summaries
-only for `parsed`. A header-only file has an empty `models` list. A model summary
-contains `name`, `kind`, `version`, and original source positions. The `kind`
-values are `data`, `type`, `refsystem`, and `symbology`. Each document uses the
-language version in its own header. Name and import binding belong to model analysis.
+- \`compile(CompileRequest, Option<&[String]>)\` returns a compilation report. The
+  \`compiled\` outcome contains a read-only \`CompiledSchema\` with the checked model
+  graph. \`rejected\` exposes language diagnostics, \`incomplete\` identifies a
+  language feature whose checks are still missing, and \`limit_exceeded\` or
+  \`internal_error\` report an operational failure. These outcomes have no schema.
+- \`parse(CompileRequest)\` returns the syntax result, with document and model
+  summaries on success. Its statuses are \`parsed\`, \`invalid\`,
+  \`unsupported_version\` and \`limit_exceeded\`.
+- \`analyze(CompileRequest)\` and \`analyze_roots\` retain the provisional
+  \`checked_subset\` report for conformance work.
 
-The current subset includes simple data-model headers, ordinary explicit imports,
-topics, classes within topics, structures, scalar text, Boolean, alignment,
-date/time, blackbox and unitless numeric and coordinate types, enumeration definitions and
-extensions, `ALL OF` references, and ordered attributes. It checks model
-identities, missing imports, duplicate
-names in supported scopes, closing names, supported domain binding/cycles,
-mandatory flags, positive text lengths and exact numeric bounds/written precision.
-Domain dependencies use `Alias EXTENDS Base = MANDATORY;`; direct domain
-`Alias = Base;` definitions are invalid. Mandatory domains contribute to the
-effective requirement of attributes; their declared references remain available.
-
-The private syntax tree also preserves model kinds, contracted/transfer options,
-explanations, translation headers, charset/XML namespace declarations and ordered
-qualified/unqualified imports. It represents topic inheritance/dependencies/OIDs,
-2.4 deferred generics and contexts, container properties/inheritance/OIDs, attribute
-properties/subdivisions, parameter sections and associations with ordered roles,
-restricted target alternatives and exact cardinalities. Anonymous associations
-retain absent names. Mandatory-only attribute/parameter uses retain an absent
-concrete type. Class references preserve the reserved predefined classes in their
-allowed contexts. These constructs pass through the same bounded frontend;
-the analyzer explicitly returns `incomplete` before binding their unimplemented
-semantics. An optional ATTRIBUTE section marker is semantically inert.
-
-Type syntax covers text families, alignments, 2.4 temporal values, nested
-and dotted enumerations, numeric units/directions/reference systems, formatted
-parts and bounds, coordinates/rotation/CRS, geometry variants and line options,
-OID carriers, blackboxes, class and attribute-path values, references and
-version-specific BAG/LIST elements. Units retain ordered factors/operators,
-symbolic PI/LNBASE and descriptive FUNCTION explanations; no conversion runs.
-Line-form declarations and domain properties/inheritance/mandatory-only forms
-remain structured. Model binding, type compatibility, coordinate interpretation,
-unit evaluation and geometry topology are separate.
-
-Expression syntax preserves constants, paths, calls, object sets, inspections,
-runtime parameters and edition-specific operator precedence in a document-local
-arena. Function declarations, domain/attribute/role derivations, all five
-constraint kinds and external constraint blocks are structured syntax. Long flat
-chains use indices, including during error recovery and destruction. View
-formations, filters, attributes, metadata basket groups and graphic assignments
-are structured syntax. Expressions, constraints and graphic rules are not evaluated.
-
-General inheritance, structure-valued attributes, units, directions/reference
-systems, views, constraints and other omitted constructs produce `incomplete`.
-Broader namespace/visibility and declaration-order rules, issuer URI validation
-and full FLOAT transfer semantics are outside this subset check. Metadata is
-preserved without claiming those rules are validated. There is no transfer-object,
-geometry or database validation. The subset supports mixed 2.3/2.4 model sources.
-The compiler binds imports by declared model name, detects import cycles, and
-uses the referring model's edition for references to predefined domains.
-`IMPORTS UNQUALIFIED` exposes direct model-level types after local scope lookup.
-An INTERLIS header alone is a valid document with no model declarations.
-`TRANSLATION OF` adds the original model at the exact stated version to the
-selected closure. Its name space is available through a separate `IMPORTS`
-declaration. Models may import a later declaration in the same source.
-Direct declaration and visibility errors can be diagnosed in an otherwise
-incomplete model. References which need effective inherited names are deferred
-to the corresponding semantic checks.
+Model queries expose resolved declarations, member order, types, references,
+constraints, units, metadata and original locations. Compilation checks model
+definitions. Transfer-object validation and geometry topology belong to
+downstream components. Some features still report \`incomplete\`, including
+nested custom formatted types and custom-segment geometry inspections.
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,
@@ -103,9 +53,18 @@ cargo build --locked
 cargo run -- version
 cargo run -- parse --json model.ili
 cargo run -- parse --request request.json --json
+cargo run -- compile --json --root Root base.ili model.ili
+cargo run -- compile --request request.json --json
 cargo run -- probe --json model.ili
 cargo run -- probe --request request.json --json
 ```
+
+The CLI compile command returns exit code 0 for a schema, 1 for a rejected
+model, 2 for a malformed request, 3 for an operational failure, 4 for an
+incomplete check, and 5 for a resource limit. For JavaScript, \`compile(request)\`
+accepts an object containing explicit sources, optional roots and optional limits.
+It returns the same report shape as \`compile --json\`, with the checked graph in
+\`schema\`. JSON is a host representation of the result.
 
 Requests have `{"sources":[{"name":"memory:///a.ili","text":"INTERLIS 2.3; MODEL A AT \"https://example.invalid\" VERSION \"1\" = END A."}]}`;
 optional `limits` fields use the snake_case Rust field names. Unknown and duplicate

@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse, compileCases } from './cases.mjs';
 test('Chromium module worker loads generated web package and shares the core', { timeout: 45_000 }, async () => {
   const assets = new Map([
     ['/', [new URL('./index.html', import.meta.url), 'text/html']],
@@ -44,14 +47,32 @@ test('Chromium module worker loads generated web package and shares the core', {
       const r=await page.evaluate(input=>window.callWorker(input),input);assert.equal(r.ok,true);
       verifySemantic(JSON.parse(r.response),input,status,detail);
     }
-    const badSyntaxInput = await page.evaluate(() => window.callWorker('\uD800', true));
+    const badSyntaxInput = await page.evaluate(() => window.callWorker('\uD800', 'parse'));
     assert.equal(badSyntaxInput.ok, false);
     assert.equal(badSyntaxInput.fatal, false);
     assert.match(badSyntaxInput.error, /REQUEST_UTF16/);
     for (const [input, status] of parseCases) {
-      const result = await page.evaluate((text) => window.callWorker(text, true), input);
+      const result = await page.evaluate((text) => window.callWorker(text, 'parse'), input);
       assert.equal(result.ok, true);
       verifyParse(JSON.parse(result.response), status);
+    }
+    const directory = await mkdtemp(join(tmpdir(), 'interlis-compile-browser-'));
+    try {
+      const cli = fileURLToPath(new URL(`../../target/debug/interlis-compiler${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
+      const path = join(directory, 'request.json');
+      for (const [input, status, exit] of compileCases) {
+        await writeFile(path, input);
+        const native = spawnSync(cli, ['compile', '--request', path, '--json'], { encoding: 'utf8', timeout: 10_000 });
+        assert.ifError(native.error);
+        assert.equal(native.status, exit);
+        assert.equal(native.stderr, '');
+        const result = await page.evaluate((request) => window.callWorker(request, 'compile'), JSON.parse(input));
+        assert.equal(result.ok, true);
+        assert.equal(result.response.status, status);
+        assert.deepEqual(result.response, JSON.parse(native.stdout));
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
     assert.deepEqual(errors, []); assert.equal(requests.length, initialRequests, 'No network after initialization');
   } finally {

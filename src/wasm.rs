@@ -15,6 +15,13 @@ pub fn parse_json(input: js_sys::JsString) -> Result<js_sys::JsString, JsValue> 
     invoke_json(input, crate::parse_json)
 }
 
+#[wasm_bindgen]
+pub fn compile(input: JsValue) -> Result<JsValue, JsValue> {
+    let request = js_sys::JSON::stringify(&input)?;
+    let report = invoke_json(request, crate::compile_json)?;
+    js_sys::JSON::parse(&String::from(report))
+}
+
 fn invoke_json(
     input: js_sys::JsString,
     operation: fn(&str) -> Result<String, crate::RequestError>,

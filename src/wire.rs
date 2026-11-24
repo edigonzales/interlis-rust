@@ -1,4 +1,6 @@
-use crate::{AnalysisReport, CompileRequest, RequestError, SourceLocation, SyntaxReport};
+use crate::{
+    AnalysisReport, CompilationReport, CompileRequest, RequestError, SourceLocation, SyntaxReport,
+};
 use crate::{DecimalInfo, Limits, ModelGraph, SourceInput, SourceSet, TypeInfo};
 use serde::{
     Deserialize, Serialize, Serializer,
@@ -16,24 +18,65 @@ pub fn analyze_json(input: &str) -> Result<String, RequestError> {
 
 /// Strict JSON boundary returning the owned report for native host presentation.
 pub fn analyze_request_json(input: &str) -> Result<AnalysisReport, RequestError> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct AnalysisInput {
-        sources: Vec<SourceInput>,
-        #[serde(default)]
-        limits: Limits,
-        #[serde(default)]
-        roots: Option<Vec<String>>,
+    let (request, roots) = decode_model_request(input)?;
+    match roots {
+        Some(roots) => crate::analyze_roots(request, &roots),
+        None => crate::analyze(request),
     }
+}
+
+pub fn compile_json(input: &str) -> Result<String, RequestError> {
+    encode_compilation_report(&compile_request_json(input)?)
+}
+
+pub fn compile_request_json(input: &str) -> Result<CompilationReport, RequestError> {
+    let (request, roots) = decode_model_request(input)?;
+    crate::compile(request, roots.as_deref())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalysisInput {
+    sources: Vec<SourceInput>,
+    #[serde(default)]
+    limits: Limits,
+    #[serde(default)]
+    roots: Option<Vec<String>>,
+}
+
+fn decode_model_request(
+    input: &str,
+) -> Result<(CompileRequest, Option<Vec<String>>), RequestError> {
     let input: AnalysisInput = decode_request(input)?;
     let request = CompileRequest {
         sources: input.sources,
         limits: input.limits,
     };
-    match input.roots {
-        Some(roots) => crate::analyze_roots(request, &roots),
-        None => crate::analyze(request),
+    Ok((request, input.roots))
+}
+
+pub(crate) fn encode_compilation_report(
+    report: &CompilationReport,
+) -> Result<String, RequestError> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Output<'a> {
+        status: crate::CompilationStatus,
+        validation_scope: &'static str,
+        full_validation: bool,
+        diagnostics: Vec<DiagnosticOutput<'a>>,
+        schema: Option<GraphOutput<'a>>,
     }
+    bounded_json(&Output {
+        status: report.status(),
+        validation_scope: "model",
+        full_validation: report.schema().is_some(),
+        diagnostics: diagnostic_output(report.diagnostics(), report.sources()),
+        schema: report.schema().map(|schema| GraphOutput {
+            graph: schema.graph(),
+            sources: report.sources(),
+        }),
+    })
 }
 
 /// Strict JSON request to a bounded JSON syntax report.

@@ -3,6 +3,12 @@ export const limited = JSON.stringify({ sources: [{ name: 'a', text: 'ab' }], li
 export const escapedRequest = request.replaceAll('😀', '\\ud83d\\ude00');
 export const badRequests = ['{', '{"sources":[],"sources":[]}', '{"sources":[],"unknown":0}', '\uD800', '{"sources":[{"name":"a","text":"\\ud800"}]}', 42, null];
 const syntaxRequest = (text) => JSON.stringify({ sources: [{ name: 'syntax', text }] });
+export const compileCases = [
+  [request, 'compiled', 0],
+  [syntaxRequest('INTERLIS 2.4; MODEL Broken AT "x" VERSION "1" = IMPORTS Missing; END Broken.'), 'rejected', 1],
+  [syntaxRequest('INTERLIS 2.4; MODEL Model AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate (Year/INTERLIS.XMLDate); END Model.'), 'incomplete', 4],
+  [limited, 'limit_exceeded', 5],
+];
 export const parseCases = [
   [request, 'parsed', 0],
   [syntaxRequest('INTERLIS 2.5; ? "foreign'), 'unsupported_version', 4],
@@ -46,19 +52,19 @@ export const syntaxCases = [
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=a:BOOLEAN := b AND c; END C; END T; END M.', 'rejected', 'ILI-PATH-NAME'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C=MANDATORY CONSTRAINT a AND; MANDATORY CONSTRAINT b ==; MANDATORY CONSTRAINT #true; END C; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN CONSTRAINTS c: Missing(THIS); END M.', 'rejected', 'ILI-FUNCTION-NAME'],
-  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[INTERLIS.rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [INTERLIS.m] {M.T.B.System[2]}; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = UNIT Turn=2*PI[INTERLIS.rad]; DOMAIN N=-0.1200E3..0.1201E3 CIRCULAR [INTERLIS.m] {M.T.B.System[2]}; END M.', 'rejected', 'ILI-METAOBJECT-REFERENCE'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN C=MULTICOORD NUMERIC,NUMERIC REFSYS "EPSG:2056"; L=DIRECTED MULTIPOLYLINE WITH (ARCS) VERTEX C WITHOUT OVERLAPS; STRUCTURE S=names:LIST OF TEXT*20; END S; END M.', 'rejected', 'ILI-DOMAIN-ABSTRACT'],
-  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = DOMAIN G=SURFACE LINE ATTRIBUTES INTERLIS.SurfaceEdge; END M.', 'rejected', 'ILI-GEOMETRY-ABSTRACT'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate ("😀" Year/4 "-" Month/INTERLIS.XMLDate); END M.', 'incomplete', 'ILI-UNSUPPORTED'],
   [classValues, 'checked_subset'],
   [population, 'checked_subset'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = CLASS C EXTENDS INTERLIS.BOOLEAN=END C; END M.', 'rejected', 'ILI-SYNTAX'],
-  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = STRUCTURE S=x:MANDATORY; PARAMETER p:MANDATORY; END S; END M.', 'rejected', 'ILI-ATTRIBUTE-TYPE'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; CONTEXT first=G=X; empty= END M.', 'rejected', 'ILI-CONTEXT-GENERIC'],
-  ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; SYMBOLOGY MODEL M AT "x" VERSION "1" = CLASS C (ABSTRACT) EXTENDS INTERLIS.SIGN=PARAMETER p:METAOBJECT OF INTERLIS.METAOBJECT; END C; END M.', 'checked_subset', null],
   ['INTERLIS 2.4; MODEL Original AT "x" VERSION "old" = END Original. CONTRACTED TYPE MODEL M (de) NOINCREMENTALTRANSFER AT "x" VERSION "1" // details // TRANSLATION OF Original ["old"] = CHARSET "UTF-8"; XMLNS "urn:x"; IMPORTS UNQUALIFIED Missing, INTERLIS; END M.', 'rejected', 'ILI-IMPORT-NOT-FOUND'],
   ['INTERLIS 2.3; MODEL M AT "x" VERSION "1" = TOPIC T=CLASS C=END C; ASSOCIATION = first -- {9007199254740993..*} C OR ANYCLASS; second -<#> {1} C; ATTRIBUTE flag:BOOLEAN; END; END T; END M.', 'rejected', 'ILI-ROLE-ALTERNATIVES'],
-  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; Y=BOOLEAN; CONTEXT first=G=X OR Y; TOPIC T=DEFERRED GENERICS G; CLASS C (ABSTRACT) EXTENDS INTERLIS.METAOBJECT = NO OID; ATTRIBUTE SUBDIVISION n (EXTENDED):BOOLEAN; PARAMETER p:METAOBJECT; END C; END T; END M.', 'incomplete', 'ILI-UNSUPPORTED'],
+  ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN G=BOOLEAN; X=BOOLEAN; Y=BOOLEAN; CONTEXT first=G=X OR Y; TOPIC T=DEFERRED GENERICS G; CLASS C (ABSTRACT) EXTENDS INTERLIS.METAOBJECT = NO OID; ATTRIBUTE SUBDIVISION n (EXTENDED):BOOLEAN; PARAMETER p:METAOBJECT; END C; END T; END M.', 'rejected', 'ILI-TOPIC-ABSTRACT'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = TOPIC T=ASSOCIATION = a -- {1..} C; END; END T; END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" = DOMAIN D=BOOLEAN; ? END M.', 'rejected', 'ILI-SYNTAX'],
   ['INTERLIS 2.4; MODEL M AT "x" VERSION "1" // open', 'rejected', 'ILI-SYNTAX'],

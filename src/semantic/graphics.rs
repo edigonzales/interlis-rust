@@ -269,7 +269,6 @@ impl Analyzer<'_, '_> {
                 None
             };
             let mut assignments = Vec::with_capacity(clause.assignments.len());
-            let mut seen = BTreeSet::new();
             for assignment in &clause.assignments {
                 let name = &assignment.parameter;
                 let Some(parameter) = self
@@ -282,13 +281,6 @@ impl Analyzer<'_, '_> {
                         &name.span,
                     );
                 };
-                if !seen.insert(parameter) {
-                    return self.graphic_error(
-                        "ILI-GRAPHIC-PARAMETER-DUPLICATE",
-                        "A signature parameter can only be assigned once in a clause",
-                        &name.span,
-                    );
-                }
                 let value = self.bind_drawing_value(id, scope, statements, &assignment.value)?;
                 self.check_drawing_value(scope, parameter, &value, &assignment.span)?;
                 assignments.push(DrawingAssignment {
@@ -342,6 +334,11 @@ impl Analyzer<'_, '_> {
                     );
                 };
                 let selector = self.record_expression(kind, value, Some(ty), &path.span);
+                let endpoint_type = if matches!(self.types[ty], TypeInfo::Enumeration { .. }) {
+                    self.new_enum_tree(ty, None)
+                } else {
+                    ty
+                };
                 let mut values = Vec::with_capacity(cases.len());
                 let mut others = false;
                 for case in cases {
@@ -363,10 +360,16 @@ impl Analyzer<'_, '_> {
                         others = true;
                         None
                     } else {
-                        Some(self.drawing_enum_endpoint(scope, statements, case.range.first, ty)?)
+                        Some(self.drawing_enum_endpoint(
+                            scope,
+                            statements,
+                            case.range.first,
+                            endpoint_type,
+                        )?)
                     };
                     let last = if let Some(last) = case.range.last {
-                        let last = self.drawing_enum_endpoint(scope, statements, last, ty)?;
+                        let last =
+                            self.drawing_enum_endpoint(scope, statements, last, endpoint_type)?;
                         self.drawing_enum_range(ty, first?, last, &case.range.span)?;
                         Some(last)
                     } else {

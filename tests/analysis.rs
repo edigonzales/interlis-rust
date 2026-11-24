@@ -7605,7 +7605,7 @@ fn graphics_bind_signature_assignments_enumeration_ranges_and_overrides() {
                     IMPORTS Design;
                     SIGN BASKET Palette~Design.Symbols OBJECTS OF Label:pin;
                     TOPIC T=CLASS Feature=
-                        label:TEXT*8; colour:(blue,red,green) ORDERED;
+                        label:TEXT*8; colour:(blue(azure,navy),red,green) ORDERED;
                     END Feature;
                     GRAPHIC Base BASED ON Feature=
                         draw OF Design.Symbols.Label: (
@@ -7676,6 +7676,67 @@ fn graphics_bind_signature_assignments_enumeration_ranges_and_overrides() {
             model("#blue..#red", "11"),
             Status::Rejected,
             Some("ILI-GRAPHIC-PARAMETER-TYPE"),
+        );
+    }
+}
+
+#[test]
+fn compile_only_exposes_a_schema_for_a_successfully_checked_closure() {
+    use interlis::{CompilationStatus, compile};
+    let sources = || {
+        request(vec![
+            ("base.ili", BASE.into()),
+            ("data.ili", DATA.replace("2.3", "2.4")),
+            ("unselected.ili", "INTERLIS 2.4; MODEL Ignored AT \"x\" VERSION \"1\" = IMPORTS Missing; END Ignored.".into()),
+        ])
+    };
+    let report = compile(sources(), Some(&["ProbeData".into()])).unwrap();
+    assert_eq!(report.status(), CompilationStatus::Compiled);
+    let graph = report.schema().unwrap().graph();
+    assert!(graph.declaration("ProbeBase.Label").is_some());
+    assert!(graph.declaration("ProbeData.Items.Item.label").is_some());
+    assert!(graph.declaration("Ignored").is_none());
+    assert_eq!(report.sources().files().len(), 3);
+    let rejected = compile(sources(), None).unwrap();
+    assert_eq!(rejected.status(), CompilationStatus::Rejected);
+    assert!(rejected.schema().is_none());
+    assert!(
+        rejected
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.code == "ILI-IMPORT-NOT-FOUND")
+    );
+    for (input, expected, diagnostic) in [
+        (
+            single("DOMAIN F=FORMAT BASED ON INTERLIS.GregorianDate (Year/INTERLIS.XMLDate);"),
+            CompilationStatus::Incomplete,
+            "ILI-UNSUPPORTED",
+        ),
+        (
+            request(vec![("old.ili", "INTERLIS 2.2;".into())]),
+            CompilationStatus::Rejected,
+            "ILI-VERSION",
+        ),
+        (
+            CompileRequest {
+                limits: Limits {
+                    max_source_bytes: 1,
+                    ..Limits::default()
+                },
+                ..single("")
+            },
+            CompilationStatus::LimitExceeded,
+            "ILI-LIMIT",
+        ),
+    ] {
+        let report = compile(input, None).unwrap();
+        assert_eq!(report.status(), expected);
+        assert!(report.schema().is_none());
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diag| diag.code == diagnostic)
         );
     }
 }

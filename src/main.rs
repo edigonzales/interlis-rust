@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
-use interlis::{AnalysisStatus, CompileRequest, Limits, SourceInput, SourceSet, SyntaxStatus};
+use interlis::{
+    AnalysisStatus, CompilationStatus, CompileRequest, Limits, SourceInput, SourceSet, SyntaxStatus,
+};
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -8,8 +10,8 @@ use std::{
     process::ExitCode,
 };
 
-const HELP: &str = "interlis-compiler (experimental; no full INTERLIS validation)\n\
-Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler probe [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
+const HELP: &str = "interlis-compiler (experimental)\n\
+Usage:\n  interlis-compiler help\n  interlis-compiler version\n  interlis-compiler compile [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler compile --request FILE.json --json\n  interlis-compiler probe [--json] [--root MODEL ...] FILE.ili [FILE.ili ...]\n  interlis-compiler probe --request FILE.json --json\n  interlis-compiler parse [--json] FILE.ili [FILE.ili ...]\n  interlis-compiler parse --request FILE.json --json\n";
 const MAX_HOST_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -170,8 +172,9 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<u8, CliError> {
             println!("{}", interlis::compiler_version());
             Ok(0)
         }
-        Some("probe") => compile(args, false),
-        Some("parse") => compile(args, true),
+        Some("compile") => run_request(args, Operation::Compile),
+        Some("probe") => run_request(args, Operation::Probe),
+        Some("parse") => run_request(args, Operation::Parse),
         _ => Err(usage(HELP)),
     }
 }
@@ -181,7 +184,17 @@ enum Input {
     Sources(CompileRequest),
 }
 
-fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Result<u8, CliError> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Operation {
+    Compile,
+    Probe,
+    Parse,
+}
+
+fn run_request(
+    mut args: impl Iterator<Item = OsString>,
+    operation: Operation,
+) -> Result<u8, CliError> {
     let mut json = false;
     let mut request = None;
     let mut paths = vec![];
@@ -195,7 +208,7 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
         match arg.to_str() {
             Some("--") => literal_paths = true,
             Some("--json") if !json => json = true,
-            Some("--root") if !syntax_only => {
+            Some("--root") if operation != Operation::Parse => {
                 roots.push(
                     args.next()
                         .and_then(|arg| arg.into_string().ok())
@@ -228,7 +241,7 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
             limits: Limits::default(),
         })
     };
-    if syntax_only {
+    if operation == Operation::Parse {
         let report = match input {
             Input::Json(text) => interlis::parse_request_json(&text),
             Input::Sources(request) => interlis::parse(request),
@@ -248,6 +261,30 @@ fn compile(mut args: impl Iterator<Item = OsString>, syntax_only: bool) -> Resul
             SyntaxStatus::Parsed => 0,
             SyntaxStatus::Invalid => 1,
             SyntaxStatus::UnsupportedVersion | SyntaxStatus::LimitExceeded => 4,
+        });
+    }
+    if operation == Operation::Compile {
+        let report = match input {
+            Input::Json(text) => interlis::compile_request_json(&text),
+            Input::Sources(request) => {
+                interlis::compile(request, (!roots.is_empty()).then_some(roots.as_slice()))
+            }
+        }
+        .map_err(|e| usage(&e.to_string()))?;
+        if json {
+            println!("{}", report.to_json().map_err(operational)?);
+        } else {
+            println!("{:?}", report.status());
+            for diagnostic in report.diagnostics() {
+                eprintln!("{}", render_diagnostic(report.sources(), diagnostic));
+            }
+        }
+        return Ok(match report.status() {
+            CompilationStatus::Compiled => 0,
+            CompilationStatus::Rejected => 1,
+            CompilationStatus::InternalError => 3,
+            CompilationStatus::Incomplete => 4,
+            CompilationStatus::LimitExceeded => 5,
         });
     }
     let report = match input {

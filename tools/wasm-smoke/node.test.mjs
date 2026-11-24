@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse } from './cases.mjs';
+import { request, escapedRequest, limited, badRequests, verify, syntaxCases, verifySyntax, semanticCases, verifySemantic, parseCases, verifyParse, compileCases } from './cases.mjs';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const wasm = createRequire(import.meta.url)(join(root, 'target/pkg-node/interlis.js'));
 test('generated Node package: boundary, Unicode, budget and subsequent calls', () => {
@@ -33,6 +33,18 @@ test('generated Node package: boundary, Unicode, budget and subsequent calls', (
       verifyParse(report, status);
       writeFileSync(path, input);
       const cli = spawnSync(resolve(root, `target/debug/interlis-compiler${process.platform === 'win32' ? '.exe' : ''}`), ['parse', '--request', path, '--json'], { encoding: 'utf8', timeout: 10_000 });
+      assert.ifError(cli.error);
+      assert.equal(cli.status, exit);
+      assert.equal(cli.stderr, '');
+      assert.deepEqual(JSON.parse(cli.stdout), report);
+    }
+    for (const [input, status, exit] of compileCases) {
+      const report = wasm.compile(JSON.parse(input));
+      assert.equal(report.status, status);
+      assert.equal(report.fullValidation, status === 'compiled');
+      assert.equal(report.schema !== null, status === 'compiled');
+      writeFileSync(path, input);
+      const cli = spawnSync(resolve(root, `target/debug/interlis-compiler${process.platform === 'win32' ? '.exe' : ''}`), ['compile', '--request', path, '--json'], { encoding: 'utf8', timeout: 10_000 });
       assert.ifError(cli.error);
       assert.equal(cli.status, exit);
       assert.equal(cli.stderr, '');

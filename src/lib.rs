@@ -1,4 +1,4 @@
-//! Experimental INTERLIS analysis. No request currently receives full validation.
+//! INTERLIS 2.3 and 2.4 parsing and model compilation.
 #![forbid(unsafe_code)]
 
 mod diagnostic;
@@ -36,7 +36,10 @@ pub use model::{
     DrawingAssignment, DrawingCase, DrawingClause, DrawingRuleInfo, DrawingValue, GraphicInfo,
 };
 pub use source::{Position, SourceFile, SourceInput, SourceLocation, SourceSet, Span};
-pub use wire::{analyze_json, analyze_request_json, parse_json, parse_request_json};
+pub use wire::{
+    analyze_json, analyze_request_json, compile_json, compile_request_json, parse_json,
+    parse_request_json,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +59,16 @@ pub enum AnalysisStatus {
     Rejected,
     Incomplete,
     LimitExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompilationStatus {
+    Compiled,
+    Rejected,
+    Incomplete,
+    LimitExceeded,
+    InternalError,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -96,6 +109,8 @@ pub struct AnalysisReport {
     status: AnalysisStatus,
     diagnostics: Vec<Diagnostic>,
     graph: Option<ModelGraph>,
+    unsupported_version: bool,
+    internal_error: bool,
 }
 
 impl AnalysisReport {
@@ -114,6 +129,44 @@ impl AnalysisReport {
     /// Canonical host projection, shared by native CLI and WASM.
     pub fn to_json(&self) -> Result<String, RequestError> {
         wire::encode_report(self)
+    }
+}
+
+/// A model graph produced by a successful semantic compilation.
+#[derive(Debug)]
+pub struct CompiledSchema {
+    graph: ModelGraph,
+}
+
+impl CompiledSchema {
+    pub fn graph(&self) -> &ModelGraph {
+        &self.graph
+    }
+}
+
+#[derive(Debug)]
+pub struct CompilationReport {
+    sources: SourceSet,
+    diagnostics: Vec<Diagnostic>,
+    status: CompilationStatus,
+    schema: Option<CompiledSchema>,
+}
+
+impl CompilationReport {
+    pub fn status(&self) -> CompilationStatus {
+        self.status
+    }
+    pub fn schema(&self) -> Option<&CompiledSchema> {
+        self.schema.as_ref()
+    }
+    pub fn sources(&self) -> &SourceSet {
+        &self.sources
+    }
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+    pub fn to_json(&self) -> Result<String, RequestError> {
+        wire::encode_compilation_report(self)
     }
 }
 
@@ -241,7 +294,7 @@ pub fn parse(request: CompileRequest) -> Result<SyntaxReport, RequestError> {
 }
 
 /// Checks the declared syntax/semantic subset with deterministic budgets.
-/// Unknown constructs remain incomplete; no request receives full validation. No host I/O.
+/// Returns a provisional graph for the probe contract. No host I/O.
 pub fn analyze(request: CompileRequest) -> Result<AnalysisReport, RequestError> {
     analyze_models(request, None)
 }
@@ -253,6 +306,59 @@ pub fn analyze_roots(
     roots: &[String],
 ) -> Result<AnalysisReport, RequestError> {
     analyze_models(request, Some(roots))
+}
+
+/// Compiles explicitly supplied sources. With roots, model checking covers
+/// those models and their transitive dependencies. Every source is parsed
+/// before selection. Only a successful compilation exposes a schema.
+pub fn compile(
+    request: CompileRequest,
+    roots: Option<&[String]>,
+) -> Result<CompilationReport, RequestError> {
+    let AnalysisReport {
+        sources,
+        mut diagnostics,
+        status,
+        graph,
+        unsupported_version,
+        internal_error,
+    } = analyze_models(request, roots)?;
+    let (status, schema) = match status {
+        AnalysisStatus::CheckedSubset => (
+            CompilationStatus::Compiled,
+            Some(CompiledSchema {
+                graph: graph.expect("checked report has a graph"),
+            }),
+        ),
+        AnalysisStatus::LimitExceeded => (CompilationStatus::LimitExceeded, None),
+        _ if unsupported_version => {
+            for diagnostic in &mut diagnostics {
+                if diagnostic.code == "ILI-UNSUPPORTED" {
+                    diagnostic.code = "ILI-VERSION".into();
+                    diagnostic.severity = Severity::Error;
+                }
+            }
+            (CompilationStatus::Rejected, None)
+        }
+        AnalysisStatus::Rejected => (CompilationStatus::Rejected, None),
+        AnalysisStatus::Incomplete if internal_error => {
+            diagnostics.push(Diagnostic {
+                code: "ILI-INTERNAL".into(),
+                message: "Model checking did not produce a graph or a language diagnostic".into(),
+                severity: Severity::Error,
+                primary: None,
+                related: Vec::new(),
+            });
+            (CompilationStatus::InternalError, None)
+        }
+        AnalysisStatus::Incomplete => (CompilationStatus::Incomplete, None),
+    };
+    Ok(CompilationReport {
+        sources,
+        diagnostics,
+        status,
+        schema,
+    })
 }
 
 fn analyze_models(
@@ -305,6 +411,8 @@ fn analyze_models(
     Ok(AnalysisReport {
         sources: frontend.sources,
         status,
+        unsupported_version: diagnostics.unsupported_version,
+        internal_error: status == AnalysisStatus::Incomplete && !diagnostics.incomplete,
         diagnostics: diagnostics.into_sorted(),
         graph,
     })

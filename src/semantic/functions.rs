@@ -3,8 +3,7 @@ use super::{
     collections::{compare_count, structure_targets},
     expressions::{scalar_type, underlying_expression},
     object_references::object_targets,
-    paths::RestrictionMatch,
-    units::unit_extends,
+    units::{unit_extends, units_convertible},
 };
 use crate::{
     AttributePathOwner, AttributePathType, BoundExpressionKind, ClassValueKind, ClassValueType,
@@ -431,7 +430,8 @@ impl Analyzer<'_, '_> {
         let expected = match target {
             BoundName::Declared(id) => self.symbols[id].declaration.function()?.arguments.len(),
             BoundName::Predefined(
-                "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount" | "myClass",
+                "len" | "lenM" | "trim" | "trimM" | "objectCount" | "elementCount" | "myClass"
+                | "convertUnit",
                 _,
             ) => 1,
             BoundName::Predefined("length" | "multilength" | "surface" | "multisurface", _) => 1,
@@ -467,6 +467,23 @@ impl Analyzer<'_, '_> {
         }
         let argument = arguments[0];
         let at = self.expressions[argument.0 as usize].span.clone();
+        if name == "convertUnit" {
+            let value = underlying_expression(&self.expressions, argument);
+            return match value.value_type {
+                ExpressionType::Numeric => value
+                    .type_id
+                    .or_else(|| Some(self.unbounded_numeric_type())),
+                ExpressionType::Undefined => Some(self.unbounded_numeric_type()),
+                _ => {
+                    self.diagnostics.push(
+                        "ILI-FUNCTION-ARGUMENT",
+                        "convertUnit expects a numeric argument",
+                        Some(at),
+                    );
+                    None
+                }
+            };
+        }
         if matches!(name, "length" | "multilength" | "surface" | "multisurface") {
             let value = &self.expressions[argument.0 as usize];
             let accepted = match value.type_id.map(|ty| &self.types[ty]) {
@@ -709,6 +726,7 @@ impl Analyzer<'_, '_> {
         mandatory: bool,
         context: AssignmentContext,
     ) -> Option<bool> {
+        self.contextual_convert_unit(expression, target)?;
         if self.is_enum_type(target) {
             self.bind_enum_literal(expression, target)?;
         } else if matches!(self.types[target], TypeInfo::EnumArgument { .. }) {
@@ -741,6 +759,23 @@ impl Analyzer<'_, '_> {
             }
         }
         let actual = underlying_expression(&self.expressions, expression);
+        if let Some(source) = actual.type_id {
+            let at = actual.span.clone();
+            match (&self.types[source], &self.types[target]) {
+                (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
+                    return self.geometry_value_fits(source, target, &at);
+                }
+                (TypeInfo::Coordinate(_), TypeInfo::Coordinate(_)) => {
+                    return self.coordinate_value_fits(
+                        source,
+                        target,
+                        self.expression_language(owner),
+                        &at,
+                    );
+                }
+                _ => {}
+            }
+        }
         if let Some(source) = actual.type_id
             && matches!(
                 (&self.types[source], &self.types[target]),
@@ -748,14 +783,7 @@ impl Analyzer<'_, '_> {
             )
         {
             let at = actual.span.clone();
-            return match self.attribute_type_match(owner, source, target, &at, Some(expression))? {
-                RestrictionMatch::Fits => Some(true),
-                RestrictionMatch::Outside => Some(false),
-                RestrictionMatch::Unchecked => {
-                    self.unsupported_expression(&at);
-                    None
-                }
-            };
+            return self.attribute_type_match(owner, source, target, &at, Some(expression));
         }
         match self.argument_fits(owner, expression, target, mandatory, context) {
             Ok(Some(result)) => Some(result),
@@ -782,6 +810,73 @@ impl Analyzer<'_, '_> {
             direction: None,
         }));
         result
+    }
+
+    fn contextual_convert_unit(&mut self, expression: ExpressionId, target: usize) -> Option<()> {
+        let TypeInfo::Numeric(destination) = &self.types[target] else {
+            return Some(());
+        };
+        if destination.unit.is_none() && destination.bounds.is_none() {
+            return Some(());
+        }
+        let actual = underlying_expression(&self.expressions, expression);
+        let BoundExpressionKind::Call {
+            function,
+            arguments,
+        } = &actual.kind
+        else {
+            return Some(());
+        };
+        if function.target_name() != "INTERLIS.convertUnit" {
+            return Some(());
+        }
+        let argument = arguments[0];
+        let at = actual.span.clone();
+        let operand = underlying_expression(&self.expressions, argument);
+        let origin = if operand.value_type == ExpressionType::Numeric {
+            super::expressions::numeric_operand(&self.expressions, &self.types, argument).unit
+        } else {
+            None
+        };
+        let compatible = match (origin, destination.unit.as_ref()) {
+            _ if operand.value_type == ExpressionType::Undefined => Ok(true),
+            (Some(origin), Some(destination)) => units_convertible(
+                &self.symbols,
+                &self.names,
+                origin,
+                destination,
+                &mut self.work,
+            ),
+            (None, None) => Ok(true),
+            _ => Ok(false),
+        };
+        match compatible {
+            Ok(true) => {
+                let mut id = expression;
+                loop {
+                    let value = &mut self.expressions[id.0 as usize];
+                    value.type_id = Some(target);
+                    if let BoundExpressionKind::Group { expression } = value.kind {
+                        id = expression;
+                    } else {
+                        break;
+                    }
+                }
+                Some(())
+            }
+            Ok(false) => {
+                self.diagnostics.push(
+                    "ILI-CONVERT-UNIT",
+                    "The source and destination must share a conversion unit",
+                    Some(at),
+                );
+                None
+            }
+            Err(error) => {
+                self.number_error(error, &at);
+                None
+            }
+        }
     }
 
     fn argument_fits(

@@ -368,38 +368,7 @@ impl Analyzer<'_, '_> {
         base: &TypeReference,
         language: LanguageVersion,
     ) -> Option<()> {
-        let actual = self.geometry_coordinate(vertex)?;
-        let expected = self.geometry_coordinate(base)?;
-        let narrower = match (actual, expected) {
-            (_, None) => true,
-            (None, Some(_)) => false,
-            (Some(actual), Some(expected)) => {
-                let check = self
-                    .check_unit_specialization(actual, expected, false)
-                    .and_then(|unit| {
-                        if unit.is_some() {
-                            Ok(unit)
-                        } else {
-                            scalar_extension(
-                                &self.types[actual],
-                                &self.types[expected],
-                                language,
-                                self.limits,
-                                &mut self.work,
-                                false,
-                            )
-                        }
-                    });
-                match check {
-                    Ok(result) => result.is_none(),
-                    Err(error) => {
-                        self.number_error(error, &vertex.span);
-                        return None;
-                    }
-                }
-            }
-        };
-        if narrower {
+        if self.vertex_specializes(vertex, base, language)? {
             Some(())
         } else {
             self.diagnostics.push(
@@ -408,6 +377,201 @@ impl Analyzer<'_, '_> {
                 Some(vertex.span.clone()),
             );
             None
+        }
+    }
+
+    fn vertex_specializes(
+        &mut self,
+        vertex: &TypeReference,
+        base: &TypeReference,
+        language: LanguageVersion,
+    ) -> Option<bool> {
+        let actual = self.geometry_coordinate(vertex)?;
+        let expected = self.geometry_coordinate(base)?;
+        match (actual, expected) {
+            (_, None) => Some(true),
+            (None, Some(_)) => Some(false),
+            (Some(actual), Some(expected)) => {
+                self.coordinate_value_fits(actual, expected, language, &vertex.span)
+            }
+        }
+    }
+
+    pub(super) fn coordinate_value_fits(
+        &mut self,
+        actual: usize,
+        expected: usize,
+        language: LanguageVersion,
+        at: &Span,
+    ) -> Option<bool> {
+        let checked = self
+            .check_unit_specialization(actual, expected, false)
+            .and_then(|unit| {
+                if unit.is_some() {
+                    Ok(unit)
+                } else {
+                    scalar_extension(
+                        &self.types[actual],
+                        &self.types[expected],
+                        language,
+                        self.limits,
+                        &mut self.work,
+                        false,
+                    )
+                }
+            });
+        match checked {
+            Ok(mismatch) => Some(mismatch.is_none()),
+            Err(error) => {
+                self.number_error(error, at);
+                None
+            }
+        }
+    }
+
+    pub(super) fn geometry_value_fits(
+        &mut self,
+        actual: usize,
+        expected: usize,
+        at: &Span,
+    ) -> Option<bool> {
+        let (TypeInfo::Geometry(actual), TypeInfo::Geometry(expected)) =
+            (&self.types[actual], &self.types[expected])
+        else {
+            return Some(false);
+        };
+        let same_family = actual.geometry_kind == expected.geometry_kind
+            || matches!(
+                (actual.geometry_kind, expected.geometry_kind),
+                (GeometryKind::Area, GeometryKind::Surface)
+                    | (GeometryKind::MultiArea, GeometryKind::MultiSurface)
+            );
+        let line_work = actual
+            .line_forms
+            .len()
+            .saturating_mul(expected.line_forms.len());
+        if self
+            .work
+            .charge(u32::try_from(line_work.saturating_add(1)).unwrap_or(u32::MAX))
+            .is_err()
+        {
+            self.diagnostics
+                .limit("Semantic work budget exceeded", Some(at.clone()));
+            return None;
+        }
+        let language = expected.language;
+        let valid = same_family
+            && (!expected.directed || actual.directed)
+            && (!expected.without_overlaps || actual.without_overlaps)
+            && (expected.line_forms.is_empty()
+                || !actual.line_forms.is_empty()
+                    && actual.line_forms.iter().all(|actual| {
+                        expected
+                            .line_forms
+                            .iter()
+                            .any(|expected| form_name(actual) == form_name(expected))
+                    }));
+        let line_attributes = (
+            actual.line_attributes.clone(),
+            expected.line_attributes.clone(),
+        );
+        let vertices = (actual.vertex.clone(), expected.vertex.clone());
+        let tolerances = (actual.tolerance.clone(), expected.tolerance.clone());
+        if !valid
+            || (vertices.0.is_none() && vertices.1.is_some())
+            || (line_attributes.0.is_none() && line_attributes.1.is_some())
+        {
+            return Some(false);
+        }
+        if let (Some(actual), Some(expected)) = vertices
+            && !self.vertex_specializes(&actual, &expected, language)?
+        {
+            return Some(false);
+        }
+        if let Some(expected) = &tolerances.1
+            && !self.tolerance_fits(tolerances.0.as_ref(), expected, at)?
+        {
+            return Some(false);
+        }
+        if let (Some(actual), Some(expected)) = line_attributes {
+            return self.specializes_symbol(
+                self.names[actual.target_name()],
+                self.names[expected.target_name()],
+                at,
+            );
+        }
+        Some(true)
+    }
+
+    fn tolerance_fits(
+        &mut self,
+        actual: Option<&OverlapTolerance>,
+        expected: &OverlapTolerance,
+        at: &Span,
+    ) -> Option<bool> {
+        use num_bigint::BigUint;
+        let Some((mut expected, expected_scale)) = self.squared_tolerance(expected, at)? else {
+            // An abstract coordinate domain does not specify a track width.
+            return Some(true);
+        };
+        let Some(actual) = actual else {
+            return Some(false);
+        };
+        let Some((mut actual, actual_scale)) = self.squared_tolerance(actual, at)? else {
+            return Some(false);
+        };
+        let difference = actual_scale.abs_diff(expected_scale);
+        if difference != 0 {
+            if !self.step(difference as usize, at) {
+                return None;
+            }
+            let scale = BigUint::from(10_u8).pow(difference);
+            if actual_scale < expected_scale {
+                actual *= scale;
+            } else {
+                expected *= scale;
+            }
+        }
+        Some(actual <= expected)
+    }
+
+    fn squared_tolerance(
+        &mut self,
+        tolerance: &OverlapTolerance,
+        at: &Span,
+    ) -> Option<Option<(num_bigint::BigUint, i32)>> {
+        use num_bigint::BigUint;
+        // Compare 2*t². A track width gives q², with q the coordinate quantum.
+        match tolerance {
+            OverlapTolerance::Explicit(value) => {
+                let size = value.coefficient().len();
+                if !self.step(size.saturating_mul(size), at) {
+                    return None;
+                }
+                let coefficient = BigUint::parse_bytes(value.coefficient().as_bytes(), 10)?;
+                Some(Some((
+                    (&coefficient * &coefficient) * 2_u8,
+                    2 * value.scale(),
+                )))
+            }
+            OverlapTolerance::TrackWidth(reference) => {
+                let coordinates = if let Some(reference) = reference {
+                    self.geometry_coordinate(reference)?
+                } else {
+                    None
+                };
+                Some(coordinates.and_then(|id| {
+                    match &self.types[id] {
+                        TypeInfo::Coordinate(coordinate) => coordinate
+                            .axes
+                            .first()?
+                            .bounds
+                            .as_ref()
+                            .map(|bounds| (BigUint::from(1_u8), 2 * bounds.lower.scale())),
+                        _ => None,
+                    }
+                }))
+            }
         }
     }
 

@@ -1,9 +1,9 @@
-import init, { analyzeJson, compilerVersion, parseJson } from '/pkg/interlis.js';
+import init, { analyzeJson, compile, compilerVersion, parseJson } from '/pkg/interlis.js';
 await init();
+const operations = { probe: analyzeJson, parse: parseJson, compile };
 self.onmessage = ({ data }) => {
   try {
-    const operation = data.syntaxOnly ? parseJson : analyzeJson;
-    self.postMessage({ id: data.id, ok: true, response: operation(data.request) });
+    self.postMessage({ id: data.id, ok: true, response: operations[data.operation](data.request) });
   }
   catch (error) {
     const fatal = error instanceof WebAssembly.RuntimeError;

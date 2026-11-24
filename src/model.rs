@@ -1,4 +1,4 @@
-//! Owned provisional model data for the declared subset; never a full-schema seal.
+//! Model declarations, types and bound expressions shared by analysis and compilation.
 use crate::Span;
 use serde::Serialize;
 use std::collections::BTreeMap;

@@ -23,19 +23,6 @@ pub(super) enum PathContext {
     UniquePrefix(LanguageVersion),
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum RestrictionMatch {
-    Fits,
-    Outside,
-    Unchecked,
-}
-
-impl From<bool> for RestrictionMatch {
-    fn from(fits: bool) -> Self {
-        if fits { Self::Fits } else { Self::Outside }
-    }
-}
-
 impl Analyzer<'_, '_> {
     pub(super) fn attribute_path_type(
         &mut self,
@@ -261,24 +248,6 @@ impl Analyzer<'_, '_> {
         at: &Span,
         value: Option<ExpressionId>,
     ) -> Option<bool> {
-        match self.attribute_path_match(owner, actual, expected, at, value)? {
-            RestrictionMatch::Fits => Some(true),
-            RestrictionMatch::Outside => Some(false),
-            RestrictionMatch::Unchecked => {
-                self.unsupported_expression(at);
-                None
-            }
-        }
-    }
-
-    fn attribute_path_match(
-        &mut self,
-        owner: usize,
-        actual: usize,
-        expected: usize,
-        at: &Span,
-        value: Option<ExpressionId>,
-    ) -> Option<RestrictionMatch> {
         // The declared selector starts at the object containing the value's attribute.
         let prefix = value
             .and_then(|id| {
@@ -290,12 +259,12 @@ impl Analyzer<'_, '_> {
             })
             .unwrap_or_default();
         if actual == expected && prefix.is_empty() {
-            return Some(RestrictionMatch::Fits);
+            return Some(true);
         }
         let (TypeInfo::AttributePath(source), TypeInfo::AttributePath(target)) =
             (&self.types[actual], &self.types[expected])
         else {
-            return Some(RestrictionMatch::Outside);
+            return Some(false);
         };
         let same_owner = match (&source.owner, &target.owner) {
             (_, None) => true,
@@ -368,13 +337,13 @@ impl Analyzer<'_, '_> {
             _ => false,
         };
         if !same_owner {
-            return Some(RestrictionMatch::Outside);
+            return Some(false);
         }
         if target.restrictions.is_empty() {
-            return Some(RestrictionMatch::Fits);
+            return Some(true);
         }
         if source.restrictions.is_empty() {
-            return Some(RestrictionMatch::Outside);
+            return Some(false);
         }
         if !self.step(source.restrictions.len() + target.restrictions.len(), at) {
             return None;
@@ -386,29 +355,21 @@ impl Analyzer<'_, '_> {
         };
         let sources = source.restrictions.clone();
         let targets = target.restrictions.clone();
-        let mut all = RestrictionMatch::Fits;
         for &source in &sources {
-            let mut alternatives = RestrictionMatch::Outside;
+            let mut fits = false;
             for &target in &targets {
-                if target.mandatory && !source.mandatory {
-                    continue;
-                }
-                match self.attribute_type_match(owner, source.ty, target.ty, at, value)? {
-                    RestrictionMatch::Fits => {
-                        alternatives = RestrictionMatch::Fits;
-                        break;
-                    }
-                    RestrictionMatch::Unchecked => alternatives = RestrictionMatch::Unchecked,
-                    RestrictionMatch::Outside => {}
+                if (!target.mandatory || source.mandatory)
+                    && self.attribute_type_match(owner, source.ty, target.ty, at, value)?
+                {
+                    fits = true;
+                    break;
                 }
             }
-            match alternatives {
-                RestrictionMatch::Fits => {}
-                RestrictionMatch::Unchecked => all = RestrictionMatch::Unchecked,
-                RestrictionMatch::Outside => return Some(RestrictionMatch::Outside),
+            if !fits {
+                return Some(false);
             }
         }
-        Some(all)
+        Some(true)
     }
 
     pub(super) fn attribute_type_match(
@@ -418,7 +379,7 @@ impl Analyzer<'_, '_> {
         target: usize,
         at: &Span,
         value: Option<ExpressionId>,
-    ) -> Option<RestrictionMatch> {
+    ) -> Option<bool> {
         if !self.step(1, at) {
             return None;
         }
@@ -429,10 +390,10 @@ impl Analyzer<'_, '_> {
                     TypeInfo::AttributePath(_) | TypeInfo::Collection(_)
                 ))
         {
-            return Some(RestrictionMatch::Fits);
+            return Some(true);
         }
         if self.is_enum_type(source) && self.is_enum_type(target) {
-            return self.enum_specializes(source, target, at).map(Into::into);
+            return self.enum_specializes(source, target, at);
         }
         if let Some((source_multi, source_max, source_format)) = text_details(&self.types[source])
             && let Some((target_multi, target_max, target_format)) =
@@ -443,27 +404,21 @@ impl Analyzer<'_, '_> {
                 && target_max.is_none_or(|max| {
                     source_max.is_some_and(|given| compare_count(given, max) != Ordering::Greater)
                 });
-            return Some(fits.into());
+            return Some(fits);
         }
         match (&self.types[source], &self.types[target]) {
             (TypeInfo::Reference(_), TypeInfo::Reference(_)) => {
-                return self
-                    .reference_specializes(source, target, at)
-                    .map(Into::into);
+                return self.reference_specializes(source, target, at);
             }
             (TypeInfo::Structure(_), TypeInfo::Structure(_)) => {
-                return self
-                    .structure_specializes(source, target, at)
-                    .map(Into::into);
+                return self.structure_specializes(source, target, at);
             }
             (TypeInfo::ClassValue(_), TypeInfo::ClassValue(_)) => {
-                return self
-                    .class_value_specializes(source, target, at, false)
-                    .map(Into::into);
+                return self.class_value_specializes(source, target, at, false);
             }
             (TypeInfo::Oid(a), TypeInfo::Oid(b)) => {
                 return match super::oid::oid_value_fits(a, b, &mut self.work) {
-                    Ok(fits) => Some(fits.into()),
+                    Ok(fits) => Some(fits),
                     Err(error) => {
                         self.number_error(error, at);
                         None
@@ -474,7 +429,7 @@ impl Analyzer<'_, '_> {
                 TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
                 TypeInfo::Temporal(_) | TypeInfo::TemporalRange(_),
             ) => {
-                return Some(self.preserves_temporal_layout(source, target).into());
+                return Some(self.preserves_temporal_layout(source, target));
             }
             (TypeInfo::Collection(source), TypeInfo::Collection(target)) => {
                 let cardinality =
@@ -488,15 +443,15 @@ impl Analyzer<'_, '_> {
                 if !cardinality
                     || (source.kind != target.kind && target.kind != CollectionKind::Bag)
                 {
-                    return Some(RestrictionMatch::Outside);
+                    return Some(false);
                 }
                 return self.attribute_type_match(owner, source.element, target.element, at, value);
             }
             (TypeInfo::AttributePath(_), TypeInfo::AttributePath(_)) => {
-                return self.attribute_path_match(owner, source, target, at, value);
+                return self.attribute_path_specializes(owner, source, target, at, value);
             }
             (TypeInfo::Geometry(_), TypeInfo::Geometry(_)) => {
-                return Some(RestrictionMatch::Unchecked);
+                return self.geometry_value_fits(source, target, at);
             }
             _ => {}
         }
@@ -518,7 +473,7 @@ impl Analyzer<'_, '_> {
                 }
             });
         match check {
-            Ok(reason) => Some(reason.is_none().into()),
+            Ok(reason) => Some(reason.is_none()),
             Err(error) => {
                 self.number_error(error, at);
                 None
