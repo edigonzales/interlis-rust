@@ -4886,6 +4886,35 @@ fn class_value_constraints_reject_wrong_targets_and_comparisons() {
 }
 
 #[test]
+fn anystructure_formals_accept_individual_object_paths() {
+    for version in ["2.3", "2.4"] {
+        outcome(
+            request(vec![(
+                "memory:///structures.ili",
+                format!(
+                    "INTERLIS {version}; CONTRACTED MODEL M AT \"x\" VERSION \"1\" =
+                     FUNCTION accepts(value:ANYSTRUCTURE):BOOLEAN;
+                     TOPIC T=CLASS Item=MANDATORY CONSTRAINT accepts(THIS); END Item;
+                     END T; END M."
+                ),
+            )]),
+            Status::CheckedSubset,
+            None,
+        );
+    }
+    outcome(
+        single(
+            "FUNCTION accepts(value:ANYSTRUCTURE):BOOLEAN;
+             TOPIC T=CLASS Item=END Item; CLASS Owner=END Owner;
+             ASSOCIATION Link=items -- {0..*} Item; owner -- {1} Owner; END Link;
+             CONSTRAINTS OF Owner=MANDATORY CONSTRAINT accepts(items); END; END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ARGUMENT"),
+    );
+}
+
+#[test]
 fn temporal_literals_bind_to_the_expected_layout_and_keep_components() {
     let report = outcome(
         request(vec![

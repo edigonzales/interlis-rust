@@ -14,6 +14,12 @@ use crate::{
 };
 use std::cmp::Ordering;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum AssignmentContext {
+    Attribute,
+    Function,
+}
+
 impl Analyzer<'_, '_> {
     pub(super) fn bind_functions(&mut self) -> Option<()> {
         for owner in 0..self.symbols.len() {
@@ -110,7 +116,13 @@ impl Analyzer<'_, '_> {
                     let ty = declaration.type_id?;
                     let mandatory = declaration.mandatory() == Some(true);
                     let at = self.expressions[argument.0 as usize].span.clone();
-                    if !self.value_fits(owner, argument, ty, mandatory)? {
+                    if !self.value_fits(
+                        owner,
+                        argument,
+                        ty,
+                        mandatory,
+                        AssignmentContext::Function,
+                    )? {
                         self.diagnostics.push_related(
                             "ILI-FUNCTION-ARGUMENT",
                             "The argument cannot be assigned to the declared parameter",
@@ -216,7 +228,7 @@ impl Analyzer<'_, '_> {
         };
         let formal = self.types.len();
         self.types.push(allowed);
-        if !self.value_fits(owner, argument, formal, false)? {
+        if !self.value_fits(owner, argument, formal, false, AssignmentContext::Function)? {
             self.diagnostics.push(
                 "ILI-FUNCTION-ARGUMENT",
                 "The argument cannot be assigned to the predefined parameter",
@@ -400,6 +412,7 @@ impl Analyzer<'_, '_> {
         expression: ExpressionId,
         target: usize,
         mandatory: bool,
+        context: AssignmentContext,
     ) -> Option<bool> {
         if self.is_enum_type(target) {
             self.bind_enum_literal(expression, target)?;
@@ -408,7 +421,7 @@ impl Analyzer<'_, '_> {
         } else {
             self.bind_temporal_literal(expression, target)?;
         }
-        match self.argument_fits(owner, expression, target, mandatory) {
+        match self.argument_fits(owner, expression, target, mandatory, context) {
             Ok(Some(result)) => Some(result),
             Ok(None) => {
                 let at = self.expressions[expression.0 as usize].span.clone();
@@ -441,6 +454,7 @@ impl Analyzer<'_, '_> {
         argument: ExpressionId,
         formal: usize,
         mandatory: bool,
+        context: AssignmentContext,
     ) -> Result<Option<bool>, NumberError> {
         let actual = underlying_expression(&self.expressions, argument);
         let formal_type = &self.types[formal];
@@ -477,15 +491,34 @@ impl Analyzer<'_, '_> {
                     .ok_or(NumberError::Work);
             }
         }
-        if let TypeInfo::ObjectSelection(target) = formal_type {
-            let sources = match ty {
-                Some(TypeInfo::Reference(reference)) => std::slice::from_ref(&reference.target),
-                Some(TypeInfo::ObjectSelection(source)) if target.plural || !source.plural => {
-                    &source.targets
+        let object_sources = match ty {
+            Some(TypeInfo::Reference(reference)) => {
+                Some((false, std::slice::from_ref(&reference.target)))
+            }
+            Some(TypeInfo::ObjectSelection(source)) => {
+                Some((source.plural, source.targets.as_slice()))
+            }
+            _ => None,
+        };
+        let object_formal = match formal_type {
+            TypeInfo::ObjectSelection(target) => {
+                Some((target.plural, object_targets(&target.targets[0])))
+            }
+            TypeInfo::Structure(target) if object_sources.is_some() => {
+                if context != AssignmentContext::Function {
+                    return Ok(Some(false));
                 }
-                _ => return Ok(Some(false)),
+                Some((false, structure_targets(target)))
+            }
+            _ => None,
+        };
+        if let Some((accepts_many, expected)) = object_formal {
+            let Some((source_many, sources)) = object_sources else {
+                return Ok(Some(false));
             };
-            let expected = object_targets(&target.targets[0]);
+            if source_many && !accepts_many {
+                return Ok(Some(false));
+            }
             if expected.is_empty() {
                 return Ok(Some(true));
             }

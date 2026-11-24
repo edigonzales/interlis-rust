@@ -1,6 +1,7 @@
 use super::{
     Analyzer, BoundName, Effective, Kind, LookupError, QualifiedName, SyntaxDecl, TypeSyntax,
     expressions::{ExpressionContext, underlying_expression},
+    functions::AssignmentContext,
 };
 use crate::{BoundExpressionKind, RelatedLocation, TypeReference, syntax};
 use std::collections::{BTreeMap, BTreeSet};
@@ -390,7 +391,7 @@ impl Analyzer<'_, '_> {
                 let value = self
                     .bind_expression(owner, statements, root, ExpressionContext::Value)
                     .and_then(|value| {
-                        self.value_fits(owner, value, ty, mandatory)
+                        self.value_fits(owner, value, ty, mandatory, AssignmentContext::Attribute)
                             .map(|fits| (value, fits))
                     });
                 match value {
