@@ -53,18 +53,12 @@ impl Analyzer<'_, '_> {
     pub(super) fn bind_call(
         &mut self,
         owner: usize,
+        target: BoundName,
         function: &QualifiedName,
         arguments: Vec<ExpressionId>,
-        span: &Span,
     ) -> Option<(BoundExpressionKind, ExpressionType, Option<usize>)> {
-        let target =
-            self.expression_name(owner, function, &[Kind::Function], "ILI-FUNCTION-NAME")?;
         let result = match target {
             BoundName::Declared(target) => {
-                let count = self.symbols[target].declaration.function()?.arguments.len();
-                if !self.function_arity(count, arguments.len(), span) {
-                    return None;
-                }
                 for (position, argument) in arguments.iter().copied().enumerate() {
                     let formal = self.symbols[target].declaration.function()?.arguments[position];
                     let declaration = &self.symbols[formal].declaration;
@@ -97,7 +91,7 @@ impl Analyzer<'_, '_> {
                 }
                 self.symbols[target].declaration.type_id?
             }
-            BoundName::Predefined(name, _) => self.bind_predefined_call(name, &arguments, span)?,
+            BoundName::Predefined(name, _) => self.bind_predefined_call(name, arguments[0])?,
         };
         let reference = self.bound_reference(owner, function, target)?;
         Some((
@@ -110,38 +104,42 @@ impl Analyzer<'_, '_> {
         ))
     }
 
-    fn function_arity(&mut self, expected: usize, given: usize, span: &Span) -> bool {
-        if expected == given {
-            return true;
-        }
-        self.diagnostics.push(
-            "ILI-FUNCTION-ARITY",
-            &format!("Function expects {expected} arguments but received {given}"),
-            Some(span.clone()),
-        );
-        false
-    }
-
-    fn bind_predefined_call(
+    pub(super) fn resolve_call(
         &mut self,
-        name: &str,
-        arguments: &[ExpressionId],
+        owner: usize,
+        function: &QualifiedName,
+        given: usize,
         span: &Span,
-    ) -> Option<usize> {
-        let allowed = match name {
-            "len" | "trim" => TypeInfo::UnboundedText,
-            "lenM" | "trimM" => TypeInfo::MultilineText { max_length: None },
-            _ => {
+    ) -> Option<BoundName> {
+        let target =
+            self.expression_name(owner, function, &[Kind::Function], "ILI-FUNCTION-NAME")?;
+        let expected = match target {
+            BoundName::Declared(id) => self.symbols[id].declaration.function()?.arguments.len(),
+            BoundName::Predefined("len" | "lenM" | "trim" | "trimM", _) => 1,
+            BoundName::Predefined(..) => {
                 self.unsupported_expression(span);
                 return None;
             }
         };
-        if !self.function_arity(1, arguments.len(), span) {
+        if expected != given {
+            self.diagnostics.push(
+                "ILI-FUNCTION-ARITY",
+                &format!("Function expects {expected} arguments but received {given}"),
+                Some(span.clone()),
+            );
             return None;
         }
+        Some(target)
+    }
+
+    fn bind_predefined_call(&mut self, name: &str, argument: ExpressionId) -> Option<usize> {
+        let allowed = match name {
+            "len" | "trim" => TypeInfo::UnboundedText,
+            "lenM" | "trimM" => TypeInfo::MultilineText { max_length: None },
+            _ => unreachable!("unsupported predefined functions are gated"),
+        };
         let formal = self.types.len();
         self.types.push(allowed);
-        let argument = arguments[0];
         let at = self.expressions[argument.0 as usize].span.clone();
         match self.argument_fits(argument, formal, false) {
             Ok(Some(true)) => {}
@@ -287,7 +285,11 @@ fn text_argument_fits(
             actual_max.is_some_and(|given| compare_count(given, max) != Ordering::Greater)
         }));
     }
-    let BoundExpressionKind::Text { value } = &actual.kind else {
+    let BoundExpressionKind::Text {
+        value,
+        canonical_length,
+    } = &actual.kind
+    else {
         return None;
     };
     if required_format.is_some() {
@@ -296,7 +298,7 @@ fn text_argument_fits(
     Some(
         (required_multi || !value.contains(['\r', '\n']))
             && required_max.is_none_or(|max| {
-                compare_count(&value.chars().count().to_string(), max) != Ordering::Greater
+                compare_count(&canonical_length.to_string(), max) != Ordering::Greater
             }),
     )
 }

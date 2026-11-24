@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use std::collections::BTreeMap;
+use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
 
 pub(super) fn supported_constraint(constraint: &ConstraintSyntax) -> bool {
     matches!(
@@ -189,37 +190,61 @@ impl Analyzer<'_, '_> {
         expressions: &[Expression],
         root: ExprId,
     ) -> Option<ExpressionId> {
-        let mut pending = vec![(root, false)];
+        enum Visit {
+            Start(ExprId),
+            Finish(ExprId, Option<BoundName>),
+        }
+        let mut pending = vec![Visit::Start(root)];
         let mut bound = BTreeMap::new();
-        while let Some((id, visited)) = pending.pop() {
+        while let Some(visit) = pending.pop() {
+            let id = match visit {
+                Visit::Start(id) | Visit::Finish(id, _) => id,
+            };
             let expression = &expressions[id.0 as usize];
             if !self.step(1, &expression.span) {
                 return None;
             }
-            if !visited {
-                pending.push((id, true));
-                match expression.kind {
-                    ExpressionKind::Binary { left, right, .. } => {
-                        pending.push((right, false));
-                        pending.push((left, false));
-                    }
-                    ExpressionKind::Unary { operand, .. }
-                    | ExpressionKind::Parenthesized {
-                        expression: operand,
-                    }
-                    | ExpressionKind::Defined {
-                        expression: operand,
-                    } => pending.push((operand, false)),
-                    ExpressionKind::Call { ref arguments, .. } => {
-                        if !self.step(arguments.len(), &expression.span) {
-                            return None;
+            let target = match visit {
+                Visit::Finish(_, target) => target,
+                Visit::Start(_) => {
+                    let target = if let ExpressionKind::Call {
+                        function,
+                        arguments,
+                    } = &expression.kind
+                    {
+                        Some(self.resolve_call(
+                            owner,
+                            function,
+                            arguments.len(),
+                            &expression.span,
+                        )?)
+                    } else {
+                        None
+                    };
+                    pending.push(Visit::Finish(id, target));
+                    match expression.kind {
+                        ExpressionKind::Binary { left, right, .. } => {
+                            pending.push(Visit::Start(right));
+                            pending.push(Visit::Start(left));
                         }
-                        pending.extend(arguments.iter().rev().map(|&argument| (argument, false)));
+                        ExpressionKind::Unary { operand, .. }
+                        | ExpressionKind::Parenthesized {
+                            expression: operand,
+                        }
+                        | ExpressionKind::Defined {
+                            expression: operand,
+                        } => pending.push(Visit::Start(operand)),
+                        ExpressionKind::Call { ref arguments, .. } => {
+                            if !self.step(arguments.len(), &expression.span) {
+                                return None;
+                            }
+                            pending.extend(arguments.iter().rev().copied().map(Visit::Start));
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                    continue;
                 }
-                continue;
-            }
+            };
             let (kind, value_type, type_id) = match &expression.kind {
                 ExpressionKind::Literal(literal) => {
                     self.expression_literal(owner, literal, &expression.span)?
@@ -230,12 +255,12 @@ impl Analyzer<'_, '_> {
                     arguments,
                 } => self.bind_call(
                     owner,
+                    target.expect("the function and arity were resolved before its arguments"),
                     function,
                     arguments
                         .iter()
                         .map(|argument| bound[&argument.0])
                         .collect(),
-                    &expression.span,
                 )?,
                 ExpressionKind::RuntimeParameter(name) => {
                     let BoundName::Declared(target) = self.expression_name(
@@ -356,11 +381,23 @@ impl Analyzer<'_, '_> {
                 if !self.step(text.value.len(), &text.span) {
                     return None;
                 }
+                let mut canonical_length = 0;
+                for character in text.value.chars() {
+                    decompose_canonical(character, |part| {
+                        canonical_length += usize::from(canonical_combining_class(part) == 0);
+                    });
+                }
+                let value_type = if canonical_length == 0 {
+                    ValueType::Undefined
+                } else {
+                    ValueType::Text
+                };
                 (
                     BoundKind::Text {
                         value: text.value.clone(),
+                        canonical_length,
                     },
-                    ValueType::Text,
+                    value_type,
                 )
             }
             LiteralSyntax::Enumeration { path, others: None }

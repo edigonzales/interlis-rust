@@ -282,6 +282,8 @@ pub enum BoundExpressionKind {
     },
     Text {
         value: String,
+        #[serde(rename = "canonicalLength")]
+        canonical_length: usize,
     },
     This,
     Attribute {

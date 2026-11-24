@@ -3705,6 +3705,7 @@ fn function_signatures_and_calls_bind_parameters_in_order() {
 fn function_arguments_and_23_contracts_have_specific_diagnostics() {
     for (call, code) in [
         ("check()", "ILI-FUNCTION-ARITY"),
+        ("check(#red,5)", "ILI-FUNCTION-ARITY"),
         ("check(#true)", "ILI-FUNCTION-ARGUMENT"),
         ("check(UNDEFINED)", "ILI-FUNCTION-ARGUMENT"),
         ("check(11)", "ILI-FUNCTION-ARGUMENT"),
@@ -3739,6 +3740,50 @@ fn function_arguments_and_23_contracts_have_specific_diagnostics() {
         ),
         Status::CheckedSubset,
         None,
+    );
+}
+
+#[test]
+fn function_text_arguments_use_canonical_length_and_undefined_values() {
+    for edition in ["2.3", "2.4"] {
+        for (source, status) in [
+            ("é", Status::CheckedSubset),
+            ("e\u{0301}", Status::CheckedSubset),
+            ("가", Status::Rejected),
+            ("", Status::Rejected),
+            ("\u{0301}", Status::Rejected),
+        ] {
+            let text = format!(
+                r#"INTERLIS {edition}; CONTRACTED MODEL M AT "issuer" VERSION "1" =
+                   FUNCTION check(value:MANDATORY TEXT*1):BOOLEAN;
+                   TOPIC T=CLASS Obj=MANDATORY CONSTRAINT check("{source}"); END Obj; END T; END M."#
+            );
+            let report = outcome(
+                request(vec![("text", text)]),
+                status,
+                (status == Status::Rejected).then_some("ILI-FUNCTION-ARGUMENT"),
+            );
+            if let Some(graph) = report.graph() {
+                let call = graph.declaration("M.T.Obj").unwrap().constraints()[0].expression;
+                let interlis::BoundExpressionKind::Call { arguments, .. } =
+                    &graph.expression(call).unwrap().kind
+                else {
+                    panic!("expected a function call");
+                };
+                assert!(matches!(
+                    &graph.expression(arguments[0]).unwrap().kind,
+                    interlis::BoundExpressionKind::Text { value, canonical_length: 1 } if value == source
+                ));
+            }
+        }
+    }
+    outcome(
+        single(
+            r#"FUNCTION check(value:MANDATORY NAME):BOOLEAN;
+                   TOPIC T=CLASS Obj=MANDATORY CONSTRAINT check(""); END Obj; END T;"#,
+        ),
+        Status::Rejected,
+        Some("ILI-FUNCTION-ARGUMENT"),
     );
 }
 
