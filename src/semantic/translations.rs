@@ -407,6 +407,7 @@ impl Analyzer<'_, '_> {
             if left.formation != right.formation
                 || left.bases.len() != right.bases.len()
                 || !pair_expressions(&mut expressions, &left.selections, &right.selections)
+                || !pair_expressions(&mut expressions, &left.grouping, &right.grouping)
             {
                 return Ok(Some(false));
             }

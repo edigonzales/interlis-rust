@@ -513,6 +513,8 @@ impl Serialize for DeclarationsOutput<'_> {
             formation: crate::ViewFormation,
             bases: Vec<&'a str>,
             selections: &'a [crate::ExpressionId],
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            grouping: &'a [crate::ExpressionId],
         }
         #[derive(Serialize)]
         struct Context<'a> {
@@ -640,6 +642,7 @@ impl Serialize for DeclarationsOutput<'_> {
                         .map(|&id| self.graph.declarations()[id].qualified_name())
                         .collect(),
                     selections: &view.selections,
+                    grouping: &view.grouping,
                 }),
                 derived_from: declaration
                     .derived_from()

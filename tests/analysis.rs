@@ -737,7 +737,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
         "TOPIC T=CLASS C=SET CONSTRAINT INTERLIS.areAreas(ALL, UNDEFINED, >>shape); END C; END T;",
-        "TOPIC T = CLASS X=END X; CLASS Y=END Y; VIEW V UNION OF X,Y; = END V; END T;",
+        "TOPIC T = STRUCTURE Part=END Part; CLASS X=parts:BAG OF Part; END X; VIEW V INSPECTION OF X->parts; = END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
     }
@@ -1720,6 +1720,93 @@ fn view_derivations_detect_cycles_and_optional_bases_through_other_members() {
         ),
         Status::Rejected,
         Some("ILI-VIEW-ATTRIBUTE-CYCLE"),
+    );
+}
+
+#[test]
+fn unions_bind_each_derivation_and_aggregations_bind_grouping_and_the_row_bag() {
+    for version in ["2.3", "2.4"] {
+        let input = |attributes: &str| {
+            request(vec![(
+                "views",
+                format!(
+                    "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" =
+                 TOPIC T =
+                    CLASS A=number:0..10; END A;
+                    CLASS B=index:0..10; END B;
+                    VIEW U UNION OF a0~A,b0~B; = {attributes} END U;
+                    VIEW Grouped AGGREGATION OF a0~A EQUAL(a0->number);
+                        = MANDATORY CONSTRAINT INTERLIS.elementCount(AGGREGATES) > 0;
+                    END Grouped;
+                 END T; END M."
+                ),
+            )])
+        };
+        let report = outcome(
+            input("key:MANDATORY 0..10 := a0->number,b0->index;"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let key = graph.declaration("M.T.U.key").unwrap();
+        assert_eq!(key.derivations().len(), 2);
+        let grouping = &graph
+            .declaration("M.T.Grouped")
+            .unwrap()
+            .view()
+            .unwrap()
+            .grouping;
+        let interlis::BoundExpressionKind::Path { steps } =
+            &graph.expression(grouping[0]).unwrap().kind
+        else {
+            panic!("expected a bound grouping path");
+        };
+        assert_eq!(steps[1].reference.target_name(), "M.T.A.number");
+        let Some(TypeInfo::Structure(row)) =
+            graph.collection_element_type("M.T.Grouped.AGGREGATES")
+        else {
+            panic!("expected a bag of source rows");
+        };
+        assert_eq!(row.target.as_ref().unwrap().target_name(), "M.T.A");
+        assert!(
+            graph
+                .effective_attributes("M.T.Grouped")
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        outcome(
+            input("key:MANDATORY 0..10 := a0->number;"),
+            Status::Rejected,
+            Some("ILI-VIEW-UNION-ATTRIBUTE"),
+        );
+        outcome(
+            input("ALL OF a0;"),
+            Status::Rejected,
+            Some("ILI-VIEW-ALL-OF"),
+        );
+        outcome(
+            input("key:0..10 := a0->number;"),
+            Status::CheckedSubset,
+            None,
+        );
+    }
+}
+
+#[test]
+fn cross_topic_view_extensions_need_the_effective_basis_dependency() {
+    let input = |dependency: &str| {
+        single(&format!(
+        "TOPIC Data=CLASS Item=END Item; END Data;
+         TOPIC Build=DEPENDS ON M.Data; VIEW Source PROJECTION OF M.Data.Item; = END Source; END Build;
+         TOPIC Result={dependency} VIEW Child EXTENDS M.Build.Source=END Child; END Result;"
+    ))
+    };
+    outcome(input("DEPENDS ON M.Data;"), Status::CheckedSubset, None);
+    outcome(
+        input("DEPENDS ON M.Build;"),
+        Status::Rejected,
+        Some("ILI-VIEW-TOPIC-DEPENDENCY"),
     );
 }
 

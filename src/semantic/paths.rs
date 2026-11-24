@@ -510,9 +510,20 @@ impl Analyzer<'_, '_> {
         let topic = self.containing_topic(owner);
         let mut plural_origin = None;
         for (position, element) in elements.iter().enumerate() {
-            let PathElement::Name { name, selector, .. } = element else {
-                self.unsupported_expression(&path.span);
-                return None;
+            let aggregate;
+            let (name, selector) = match element {
+                PathElement::Name { name, selector, .. } => (name, selector.as_ref()),
+                PathElement::Special(special) if special.value == SpecialPath::Aggregates => {
+                    aggregate = Name {
+                        value: "AGGREGATES".into(),
+                        span: special.span.clone(),
+                    };
+                    (&aggregate, None)
+                }
+                _ => {
+                    self.unsupported_expression(&path.span);
+                    return None;
+                }
             };
             if let Some(PathSelector::Association(association)) = selector {
                 self.unsupported_expression(&association.span);

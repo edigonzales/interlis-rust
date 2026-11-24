@@ -350,7 +350,9 @@ fn ensure_supported_semantics(
                         view.origin,
                         Some(syntax::ViewOrigin::Formation(syntax::Located {
                             value: syntax::ViewFormation::Projection(_)
-                                | syntax::ViewFormation::Join { .. },
+                                | syntax::ViewFormation::Join { .. }
+                                | syntax::ViewFormation::Union(_)
+                                | syntax::ViewFormation::Aggregation { .. },
                             ..
                         })) | Some(syntax::ViewOrigin::Extends(_))
                             | None

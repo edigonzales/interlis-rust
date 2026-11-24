@@ -3,15 +3,19 @@ use super::{
     expressions::{ExpressionContext, scalar_type, underlying_expression},
 };
 use crate::{
-    BoundExpressionKind, BoundPathStep, ExpressionId, ExpressionType, LanguageVersion,
-    NumericBounds, NumericRange, ObjectTarget, Span, UnitConstant, ViewFormation, ViewInfo,
-    syntax::{Expression, Property, RenamedViewable, ViewAttribute, ViewOrigin},
+    BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind, CollectionType, ExpressionId,
+    ExpressionType, LanguageVersion, NumericBounds, NumericRange, ObjectTarget, Span,
+    StructureType, UnitConstant, ViewFormation, ViewInfo,
+    syntax::{
+        AggregationGrouping, Expression, Property, RenamedViewable, ViewAttribute, ViewOrigin,
+    },
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 struct ViewAttributeDependencies {
     attributes: Vec<(usize, Span)>,
+    bases: BTreeSet<usize>,
     nullable: bool,
 }
 
@@ -52,6 +56,16 @@ impl Analyzer<'_, '_> {
                                 )?);
                             }
                             ViewFormation::Join
+                        }
+                        crate::syntax::ViewFormation::Union(sources) => {
+                            for base in sources {
+                                bases.push(self.bind_view_base(id, base, false)?);
+                            }
+                            ViewFormation::Union
+                        }
+                        crate::syntax::ViewFormation::Aggregation { base, .. } => {
+                            bases.push(self.bind_view_base(id, base, false)?);
+                            ViewFormation::Aggregation
                         }
                         _ => unreachable!("unsupported view formations are gated before binding"),
                     };
@@ -143,10 +157,11 @@ impl Analyzer<'_, '_> {
         };
         let mut bases = Vec::new();
         let mut selections = Vec::new();
+        let mut grouping = Vec::new();
         let formation = if let Some(parent) = self.symbols[id].base_scope {
             let inherited = self.symbols[parent].declaration.view()?;
             if !self.step(
-                inherited.bases.len() + inherited.selections.len(),
+                inherited.bases.len() + inherited.selections.len() + inherited.grouping.len(),
                 &syntax.name.span,
             ) {
                 return None;
@@ -154,7 +169,21 @@ impl Analyzer<'_, '_> {
             let inherited = self.symbols[parent].declaration.view()?;
             bases.extend_from_slice(&inherited.bases);
             selections.extend_from_slice(&inherited.selections);
-            inherited.formation
+            grouping.extend_from_slice(&inherited.grouping);
+            let formation = inherited.formation;
+            let at = self.symbols[id]
+                .declaration
+                .base_reference()?
+                .source_span()
+                .clone();
+            for &basis in &bases {
+                let source = self.names[self.symbols[basis]
+                    .declaration
+                    .type_reference()?
+                    .target_name()];
+                self.require_view_dependency(id, source, &at)?;
+            }
+            formation
         } else {
             formation?
         };
@@ -185,12 +214,13 @@ impl Analyzer<'_, '_> {
         let (formation_bases, extension_bases) = local.split_at(local.len() - count);
         bases.extend_from_slice(formation_bases);
         let mut candidates = extension_bases.iter().copied();
+        let mut available: BTreeSet<_> = bases.iter().copied().collect();
         for group in &syntax.base_extensions {
             let name = &group.base;
             let Some(original) = self
                 .visible_name(id, &name.value, Some(&[Kind::ViewBase]), &name.span)
                 .ok()?
-                .filter(|original| bases.contains(original))
+                .filter(|original| available.contains(original))
             else {
                 self.diagnostics.push(
                     "ILI-VIEW-BASE-EXTENSION",
@@ -219,6 +249,7 @@ impl Analyzer<'_, '_> {
                 }
                 self.symbols[candidate].declaration.base_reference =
                     Some(self.reference_to_symbol(candidate, original, name)?);
+                available.insert(candidate);
                 bases.push(candidate);
             }
         }
@@ -226,7 +257,62 @@ impl Analyzer<'_, '_> {
             formation,
             bases,
             selections,
+            grouping,
         }));
+        if let Some(ViewOrigin::Formation(formation)) = &syntax.origin
+            && let crate::syntax::ViewFormation::Aggregation { grouping, .. } = &formation.value
+        {
+            self.bind_aggregation(id, grouping, &formation.span)?;
+        }
+        Some(())
+    }
+
+    fn bind_aggregation(
+        &mut self,
+        owner: usize,
+        grouping: &AggregationGrouping,
+        at: &Span,
+    ) -> Option<()> {
+        let mut keys = Vec::new();
+        if let AggregationGrouping::Equal(paths) = grouping {
+            for path in &paths.value {
+                let (kind, value_type, ty) = self.expression_path(owner, path)?;
+                keys.push(self.record_expression(kind, value_type, ty, &path.span));
+            }
+        }
+        let decl = &mut self.symbols[owner].declaration;
+        let view = decl.view.as_mut()?;
+        view.grouping = keys;
+        let base = view.bases[0];
+        let target = self.symbols[base].declaration.type_reference()?.clone();
+        let element = self.types.len();
+        self.types.push(TypeInfo::Structure(StructureType {
+            target: Some(target),
+            restrictions: Vec::new(),
+        }));
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Collection(CollectionType {
+            kind: CollectionKind::Bag,
+            cardinality: Cardinality {
+                lower: "0".into(),
+                upper: None,
+            },
+            element,
+        }));
+        let name = crate::syntax::Name {
+            value: "AGGREGATES".into(),
+            span: at.clone(),
+        };
+        let id = self.add(
+            Kind::Attribute,
+            &name,
+            at,
+            Some(owner),
+            self.symbols[owner].model,
+            None,
+        )?;
+        self.symbols[id].declaration.type_id = Some(ty);
+        self.symbols[id].declaration.transient = true;
         Some(())
     }
 
@@ -246,18 +332,7 @@ impl Analyzer<'_, '_> {
             self.unsupported_expression(&base.span);
             return None;
         };
-        if let (Some(topic), Some(target)) =
-            (self.containing_topic(owner), self.containing_topic(source))
-            && !self.specializes_symbol(topic, target, &base.span)?
-            && !self.topic_has_dependency(topic, target, &base.span)?
-        {
-            self.diagnostics.push(
-                "ILI-VIEW-TOPIC-DEPENDENCY",
-                "A view using a basis from another topic requires DEPENDS ON that topic",
-                Some(base.target.span.clone()),
-            );
-            return None;
-        }
+        self.require_view_dependency(owner, source, &base.target.span)?;
         let name = base
             .alias
             .as_ref()
@@ -285,6 +360,22 @@ impl Analyzer<'_, '_> {
         Some(id)
     }
 
+    fn require_view_dependency(&mut self, owner: usize, source: usize, at: &Span) -> Option<()> {
+        if let (Some(topic), Some(target)) =
+            (self.containing_topic(owner), self.containing_topic(source))
+            && !self.specializes_symbol(topic, target, at)?
+            && !self.topic_has_dependency(topic, target, at)?
+        {
+            self.diagnostics.push(
+                "ILI-VIEW-TOPIC-DEPENDENCY",
+                "A view using a basis from another topic requires DEPENDS ON that topic",
+                Some(at.clone()),
+            );
+            return None;
+        }
+        Some(())
+    }
+
     fn bind_view_members(
         &mut self,
         id: usize,
@@ -297,6 +388,7 @@ impl Analyzer<'_, '_> {
             unreachable!("view order contains only views");
         };
         let statements = documents[&view.span.sort_key().0];
+        let union = self.symbols[id].declaration.view()?.formation == ViewFormation::Union;
         let mut attributes = Vec::new();
         if let Some(parent) = self.symbols[id].base_scope {
             let inherited = self.symbols[parent]
@@ -336,7 +428,7 @@ impl Analyzer<'_, '_> {
                     else {
                         unreachable!("typed view member has attribute syntax");
                     };
-                    if derivations.len() > 1 {
+                    if !union && derivations.len() > 1 {
                         self.unsupported_expression(item.span());
                         return None;
                     }
@@ -399,6 +491,14 @@ impl Analyzer<'_, '_> {
                     (member, position)
                 }
                 ViewAttribute::AllOf(all) => {
+                    if union {
+                        self.diagnostics.push(
+                            "ILI-VIEW-ALL-OF",
+                            "ALL OF cannot select attributes for a UNION",
+                            Some(all.span.clone()),
+                        );
+                        return None;
+                    }
                     let Some(base) = self
                         .visible_name(
                             id,
@@ -674,6 +774,7 @@ impl Analyzer<'_, '_> {
         }
         let mut state = vec![0; self.symbols.len()];
         let mut nullable = vec![false; self.symbols.len()];
+        let mut union_bases = BTreeMap::<usize, BTreeSet<usize>>::new();
         let mut stack = Vec::new();
         for &id in dependencies.keys() {
             if state[id] != 0 {
@@ -688,17 +789,53 @@ impl Analyzer<'_, '_> {
                     nullable[*member] =
                         dep.nullable || dep.attributes.iter().any(|(target, _)| nullable[*target]);
                     let decl = &self.symbols[*member].declaration;
-                    if nullable[*member] && decl.mandatory() == Some(true) {
-                        let at = decl.derivations().first().map_or_else(
+                    let at = decl
+                        .derivations()
+                        .first()
+                        .map_or_else(
                             || decl.source_span(),
                             |id| &self.expressions[id.0 as usize].span,
-                        );
+                        )
+                        .clone();
+                    if nullable[*member] && decl.mandatory() == Some(true) {
                         self.diagnostics.push(
                             "ILI-VIEW-NULLABLE-ATTRIBUTE",
                             "A mandatory view attribute cannot use an optional basis, including through another attribute",
-                            Some(at.clone()),
+                            Some(at),
                         );
                         return None;
+                    }
+                    let owner = decl.parent?;
+                    if let Some(view) = self.symbols[owner].declaration.view()
+                        && view.formation == ViewFormation::Union
+                    {
+                        if !self.step(view.bases.len() + dep.bases.len(), &at) {
+                            return None;
+                        }
+                        let mut covered = dep.bases.clone();
+                        for (target, _) in &dep.attributes {
+                            if let Some(inherited) = union_bases.get(target) {
+                                if !self.step(inherited.len(), &at) {
+                                    return None;
+                                }
+                                covered.extend(inherited);
+                            }
+                        }
+                        let view = self.symbols[owner].declaration.view()?;
+                        if self.symbols[*member].declaration.mandatory() == Some(true)
+                            && view.bases.iter().any(|basis| {
+                                self.symbols[*basis].declaration.base_reference().is_none()
+                                    && !covered.contains(basis)
+                            })
+                        {
+                            self.diagnostics.push(
+                                "ILI-VIEW-UNION-ATTRIBUTE",
+                                "A mandatory UNION attribute needs a derivation for every basis",
+                                Some(at),
+                            );
+                            return None;
+                        }
+                        union_bases.insert(*member, covered);
                     }
                     stack.pop();
                     continue;
@@ -729,6 +866,10 @@ impl Analyzer<'_, '_> {
 
     fn view_attribute_dependencies(&mut self, member: usize) -> Option<ViewAttributeDependencies> {
         let decl = &self.symbols[member].declaration;
+        let union = decl
+            .parent
+            .and_then(|owner| self.symbols[owner].declaration.view())
+            .is_some_and(|view| view.formation == ViewFormation::Union);
         let mut pending = decl.derivations().to_vec();
         let mut result = ViewAttributeDependencies::default();
         if let Some(parent) = self.symbols[member].base_scope {
@@ -747,6 +888,9 @@ impl Analyzer<'_, '_> {
                         let id = self.names[step.reference.target_name()];
                         let target = &self.symbols[id].declaration;
                         result.nullable |= target.is_nullable_view_base();
+                        if union && target.kind == Kind::ViewBase {
+                            result.bases.insert(id);
+                        }
                         if target.kind == Kind::Attribute
                             && target.parent.is_some_and(|owner| {
                                 self.symbols[owner].declaration.kind == Kind::View

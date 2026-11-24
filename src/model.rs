@@ -919,12 +919,15 @@ pub struct Declaration {
 pub enum ViewFormation {
     Projection,
     Join,
+    Union,
+    Aggregation,
 }
 
 #[derive(Debug)]
 pub struct ViewInfo {
     pub formation: ViewFormation,
     pub selections: Vec<ExpressionId>,
+    pub grouping: Vec<ExpressionId>,
     pub(crate) bases: Vec<usize>,
 }
 
