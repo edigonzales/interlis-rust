@@ -645,6 +645,8 @@ impl Serialize for DeclarationsOutput<'_> {
             path: crate::ExpressionId,
             element: Reference<'a>,
             parent: Reference<'a>,
+            source: Reference<'a>,
+            area: bool,
         }
         #[derive(Serialize)]
         struct Context<'a> {
@@ -788,6 +790,8 @@ impl Serialize for DeclarationsOutput<'_> {
                         path: info.path,
                         element: project_reference(&info.element, self.sources),
                         parent: project_reference(&info.parent, self.sources),
+                        source: project_reference(&info.source, self.sources),
+                        area: info.area,
                     }),
                 }),
                 derived_from: declaration

@@ -644,7 +644,7 @@ pub enum OverlapTolerance {
     TrackWidth(Option<TypeReference>),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeometryType {
     pub geometry_kind: GeometryKind,
@@ -1060,6 +1060,8 @@ pub struct InspectionInfo {
     pub path: ExpressionId,
     pub element: TypeReference,
     pub parent: TypeReference,
+    pub source: TypeReference,
+    pub area: bool,
     pub(crate) parent_type: Option<usize>,
 }
 

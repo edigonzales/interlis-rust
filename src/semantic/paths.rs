@@ -573,26 +573,42 @@ impl Analyzer<'_, '_> {
         let mut plural_origin = None;
         for (position, element) in elements.iter().enumerate() {
             if let PathElement::Special(special) = element
-                && special.value == SpecialPath::Parent
+                && matches!(
+                    special.value,
+                    SpecialPath::Parent | SpecialPath::ThisArea | SpecialPath::ThatArea
+                )
             {
+                let area = special.value != SpecialPath::Parent;
                 let Some(inspection) = self.symbols[owner]
                     .declaration
                     .view()
                     .and_then(|view| view.inspection.as_ref())
                     .filter(|inspection| {
-                        scope == owner || self.names[inspection.element.target_name()] == scope
+                        inspection.area == area
+                            && (scope == owner
+                                || self.names[inspection.element.target_name()] == scope)
                     })
                 else {
                     return self.path_error(
                         "ILI-INSPECTION-CONTEXT",
-                        "PARENT requires the element context of an ordinary inspection",
+                        if area {
+                            "THISAREA and THATAREA require the element context of an area inspection"
+                        } else {
+                            "PARENT requires the element context of an ordinary inspection"
+                        },
                         &special.span,
                     );
                 };
                 scope = self.names[inspection.parent.target_name()];
                 let parent_type = inspection.parent_type;
                 let name = Name {
-                    value: "PARENT".into(),
+                    value: match special.value {
+                        SpecialPath::Parent => "PARENT",
+                        SpecialPath::ThisArea => "THISAREA",
+                        SpecialPath::ThatArea => "THATAREA",
+                        _ => unreachable!(),
+                    }
+                    .into(),
                     span: special.span.clone(),
                 };
                 let reference = self.reference_to_symbol(owner, scope, &name)?;
@@ -645,15 +661,6 @@ impl Analyzer<'_, '_> {
                         span: special.span.clone(),
                     };
                     (&aggregate, None, false)
-                }
-                PathElement::Special(special)
-                    if matches!(special.value, SpecialPath::ThisArea | SpecialPath::ThatArea) =>
-                {
-                    return self.path_error(
-                        "ILI-INSPECTION-CONTEXT",
-                        "THISAREA and THATAREA are only available in an area inspection",
-                        &special.span,
-                    );
                 }
                 _ => {
                     self.unsupported_expression(&path.span);

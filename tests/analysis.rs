@@ -5666,6 +5666,32 @@ fn inherited_constraint_uses_the_edition_of_its_own_source() {
 }
 
 #[test]
+fn external_constraint_target_kinds_follow_the_source_edition() {
+    let body = "TOPIC T=CLASS A=END A;
+        STRUCTURE S=flag:BOOLEAN; END S;
+        VIEW V PROJECTION OF A;=flag:=#true; END V;
+        CONSTRAINTS OF $target=MANDATORY CONSTRAINT flag; END; END T;";
+    for target in ["S", "V"] {
+        for (version, status, code) in [
+            ("2.3", Status::Rejected, Some("ILI-CONSTRAINT-TARGET")),
+            ("2.4", Status::CheckedSubset, None),
+        ] {
+            outcome(
+                request(vec![(
+                    "targets",
+                    format!(
+                        "INTERLIS {version}; MODEL M AT \"x\" VERSION \"1\" = {} END M.",
+                        body.replace("$target", target)
+                    ),
+                )]),
+                status,
+                code,
+            );
+        }
+    }
+}
+
+#[test]
 fn derived_associations_bind_view_paths_and_require_effective_assignments() {
     for version in ["2.3", "2.4"] {
         let model = |basis: &str, members: &str| {
@@ -5713,6 +5739,14 @@ fn derived_associations_bind_view_paths_and_require_effective_assignments() {
             model(
                 "JoinView",
                 &members.replace("left -- A := row->A", "left -- A := row->B"),
+            ),
+            Status::Rejected,
+            Some("ILI-ROLE-DERIVATION-TYPE"),
+        );
+        outcome(
+            model(
+                "JoinView",
+                &members.replace("left -- A := row->A", "left -- ANYCLASS := row"),
             ),
             Status::Rejected,
             Some("ILI-ROLE-DERIVATION-TYPE"),
@@ -7312,4 +7346,101 @@ fn reopened_enumeration_elements_bind_their_local_annotations() {
         Status::Rejected,
         Some("ILI-METADATA-CONFLICT"),
     );
+}
+
+#[test]
+fn geometric_inspections_bind_area_sides_and_contextual_segment_types() {
+    for version in ["2.3", "2.4"] {
+        let model = |area_attributes: &str| {
+            request(vec![(
+                "geometry",
+                format!(
+                    r#"INTERLIS {version};
+                MODEL M AT "x" VERSION "1" =
+                DOMAIN XY=COORD 0.0..10.0,0.0..10.0;
+                TOPIC T=CLASS Zone=
+                   p:XY; flag:BOOLEAN;
+                   patch:AREA WITH (STRAIGHTS) VERTEX XY WITHOUT OVERLAPS > 0.1;
+                   track:POLYLINE WITH (STRAIGHTS,ARCS) VERTEX XY;
+                END Zone;
+                VIEW AreaSides
+                   AREA INSPECTION OF edge~Zone->patch;
+                   = {area_attributes}
+                END AreaSides;
+                VIEW RoadLine INSPECTION OF line~Zone->track; =
+                   MANDATORY CONSTRAINT line->Segments[FIRST]->SegmentEndPoint == PARENT->p;
+                END RoadLine;
+                END T; END M."#
+                ),
+            )])
+        };
+        let report = outcome(
+            model("firstSide:=THISAREA->flag; otherSide:=THATAREA->flag; line:=edge->Geometry;"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let area = graph
+            .declaration("M.T.AreaSides")
+            .unwrap()
+            .view()
+            .unwrap()
+            .inspection
+            .as_ref()
+            .unwrap();
+        assert!(area.area);
+        assert_eq!(area.source.target_name(), "M.T.Zone");
+        let edge = graph.declaration(area.element.target_name()).unwrap();
+        assert_eq!(edge.name(), "SurfaceEdge");
+        assert!(edge.derived_from().is_some());
+        assert!(report.sources().location(edge.source_span()).is_none());
+        let edge_member = format!("{}.Geometry", edge.qualified_name());
+        let TypeInfo::Geometry(geometry) = graph.effective_type(&edge_member).unwrap() else {
+            panic!("expected a contextual geometry");
+        };
+        assert!(geometry.directed);
+        assert_eq!(geometry.vertex.as_ref().unwrap().target_name(), "M.XY");
+        let constraint = &graph.declaration("M.T.RoadLine").unwrap().constraints()[0];
+        let interlis::BoundExpressionKind::Binary { left, .. } = &graph
+            .expression(constraint.expression.unwrap())
+            .unwrap()
+            .kind
+        else {
+            panic!("expected an endpoint comparison");
+        };
+        let interlis::BoundExpressionKind::Path { steps } = &graph.expression(*left).unwrap().kind
+        else {
+            panic!("expected a segment path");
+        };
+        let endpoint = graph
+            .declaration(steps.last().unwrap().reference.target_name())
+            .unwrap();
+        assert_eq!(endpoint.type_reference().unwrap().target_name(), "M.XY");
+        let row = graph
+            .declaration("M.T.RoadLine")
+            .unwrap()
+            .view()
+            .unwrap()
+            .inspection
+            .as_ref()
+            .unwrap();
+        let standard_check = &graph
+            .declaration(row.element.target_name())
+            .unwrap()
+            .constraints()[0];
+        assert!(matches!(
+            &graph.expression(standard_check.expression.unwrap()).unwrap().kind,
+            interlis::BoundExpressionKind::Call { function, .. } if function.target_name() == "INTERLIS.isOfClass"
+        ));
+        outcome(
+            model("bad:=PARENT->flag;"),
+            Status::Rejected,
+            Some("ILI-INSPECTION-CONTEXT"),
+        );
+        outcome(
+            model("ALL OF edge;"),
+            Status::Rejected,
+            Some("ILI-VIEW-ALL-OF"),
+        );
+    }
 }

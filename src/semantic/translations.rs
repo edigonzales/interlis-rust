@@ -446,7 +446,9 @@ impl Analyzer<'_, '_> {
             match (&left.inspection, &right.inspection) {
                 (Some(a), Some(b)) => {
                     if !comparison.reference(Some(&a.parent), Some(&b.parent))?
+                        || !comparison.reference(Some(&a.source), Some(&b.source))?
                         || !comparison.reference(Some(&a.element), Some(&b.element))?
+                        || a.area != b.area
                     {
                         return Ok(Some(false));
                     }
@@ -588,6 +590,10 @@ enum OriginalTarget<'a> {
     Predefined(&'a str),
 }
 
+fn inspection_selector(name: &str) -> Option<&str> {
+    matches!(name, "PARENT" | "THISAREA" | "THATAREA").then_some(name)
+}
+
 fn original_root(mut id: usize, originals: &[usize], work: &mut WorkBudget) -> Result<usize, ()> {
     while id != originals[id] {
         work.charge(1)?;
@@ -720,8 +726,8 @@ impl Comparison<'_> {
                     }
                     for (a, b) in a.iter().zip(b) {
                         if !equivalent_selector(a.selection.as_ref(), b.selection.as_ref())
-                            || (a.reference.declared_name() == "PARENT")
-                                != (b.reference.declared_name() == "PARENT")
+                            || inspection_selector(a.reference.declared_name())
+                                != inspection_selector(b.reference.declared_name())
                             || !self.reference(Some(&a.reference), Some(&b.reference))?
                         {
                             return Ok(Some(false));

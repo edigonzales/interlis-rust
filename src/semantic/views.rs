@@ -5,8 +5,8 @@ use super::{
 };
 use crate::{
     BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind, CollectionType, ExpressionId,
-    ExpressionType, InspectionInfo, LanguageVersion, NumericBounds, NumericRange, ObjectTarget,
-    Span, StructureType, UnitConstant, ViewFormation, ViewInfo,
+    ExpressionType, GeometryKind, InspectionInfo, LanguageVersion, NumericBounds, NumericRange,
+    ObjectTarget, Span, StructureType, UnitConstant, ViewFormation, ViewInfo,
     syntax::{
         AggregationGrouping, Expression, InlineInspection, Property, RenamedViewable,
         ViewAttribute, ViewOrigin,
@@ -328,22 +328,20 @@ impl Analyzer<'_, '_> {
         let mut row_type = None;
         let mut parent_type = None;
         let mut steps = Vec::with_capacity(inspection.attributes.len());
-        for name in &inspection.attributes {
+        for (position, name) in inspection.attributes.iter().enumerate() {
             if !self.step(1 + name.value.len(), &name.span) {
                 return None;
             }
             let attr = self.path_attribute(scope, name)?;
             let ty = self.symbols[attr].declaration.type_id?;
-            let element = match &self.types[ty] {
+            let mut element = match &self.types[ty] {
                 TypeInfo::Collection(collection) => collection.element,
                 _ => ty,
             };
+            let area = inspection.area.is_some() && position + 1 == inspection.attributes.len();
             if matches!(&self.types[element], TypeInfo::Geometry(_)) {
-                self.unsupported_expression(&name.span);
-                return None;
-            }
-            if inspection.area.is_some() || !matches!(&self.types[element], TypeInfo::Structure(_))
-            {
+                element = self.geometry_inspection_type(owner, element, area, &name.span)?;
+            } else if area || !matches!(&self.types[element], TypeInfo::Structure(_)) {
                 self.diagnostics.push(
                     "ILI-INSPECTION-TYPE",
                     "An inspection requires a structure or geometry attribute and AREA requires an area",
@@ -378,6 +376,8 @@ impl Analyzer<'_, '_> {
                 span: self.symbols[parent].name_span.clone(),
             },
         )?;
+        let source =
+            self.reference_to_symbol(owner, source, inspection.base.target.segments.last()?)?;
         let value_type = scalar_type(&self.types[value?]);
         let path = self.record_expression(
             BoundExpressionKind::Path { steps },
@@ -390,10 +390,93 @@ impl Analyzer<'_, '_> {
                 path,
                 element,
                 parent,
+                source,
+                area: inspection.area.is_some(),
                 parent_type,
             },
             row_type?,
         ))
+    }
+
+    fn geometry_inspection_type(
+        &mut self,
+        owner: usize,
+        ty: usize,
+        area: bool,
+        at: &Span,
+    ) -> Option<usize> {
+        let TypeInfo::Geometry(geometry) = &self.types[ty] else {
+            unreachable!("geometry inspection receives a geometry type");
+        };
+        if area
+            && !matches!(
+                geometry.geometry_kind,
+                GeometryKind::Area | GeometryKind::MultiArea
+            )
+        {
+            self.diagnostics.push(
+                "ILI-INSPECTION-TYPE",
+                "AREA INSPECTION requires an AREA or MULTIAREA attribute",
+                Some(at.clone()),
+            );
+            return None;
+        }
+        if geometry.vertex.is_none() {
+            self.unsupported_expression(at);
+            return None;
+        }
+        if matches!(
+            geometry.geometry_kind,
+            GeometryKind::Polyline | GeometryKind::MultiPolyline
+        ) {
+            return self.line_inspection_type(owner, ty, at);
+        }
+        let mut polyline = geometry.clone();
+        polyline.geometry_kind = GeometryKind::Polyline;
+        polyline.directed = true;
+        let line_attrs = polyline.line_attributes.clone();
+        let edge_template = self.predefined_geometry_structure(owner, "SurfaceEdge", at)?;
+        let edge = self.geometry_structure(
+            owner,
+            &format!("$SurfaceEdge{ty}"),
+            "SurfaceEdge",
+            Some(edge_template),
+        )?;
+        let geometry_ty = self.types.len();
+        self.types.push(TypeInfo::Geometry(polyline));
+        let mut edge_members = vec![self.contextual_geometry_attribute(
+            edge,
+            edge_template,
+            "Geometry",
+            geometry_ty,
+        )?];
+        if self.expression_language(owner) == LanguageVersion::V23 {
+            let ty = self.structure_type_id(line_attrs);
+            edge_members.push(self.contextual_geometry_attribute(
+                edge,
+                edge_template,
+                "LineAttrs",
+                ty,
+            )?);
+        }
+        self.symbols[edge].declaration.effective_attributes = Some(edge_members.into_boxed_slice());
+        let row = if area {
+            edge
+        } else {
+            let template = self.predefined_geometry_structure(owner, "SurfaceBoundary", at)?;
+            let boundary = self.geometry_structure(
+                owner,
+                &format!("$SurfaceBoundary{ty}"),
+                "SurfaceBoundary",
+                Some(template),
+            )?;
+            let list = self.geometry_structure_list(owner, edge)?;
+            let lines = self.contextual_geometry_attribute(boundary, template, "Lines", list)?;
+            self.symbols[boundary].declaration.effective_attributes = Some(Box::new([lines]));
+            boundary
+        };
+        let reference = self.geometry_symbol_reference(owner, row)?;
+        Some(self.structure_type_id(Some(reference)))
     }
 
     fn bind_aggregation(
@@ -626,10 +709,17 @@ impl Analyzer<'_, '_> {
                     (member, position)
                 }
                 ViewAttribute::AllOf(all) => {
-                    if union {
+                    if union
+                        || self.symbols[id]
+                            .declaration
+                            .view()?
+                            .inspection
+                            .as_ref()
+                            .is_some_and(|inspection| inspection.area)
+                    {
                         self.diagnostics.push(
                             "ILI-VIEW-ALL-OF",
-                            "ALL OF cannot select attributes for a UNION",
+                            "ALL OF cannot select attributes for a UNION or AREA INSPECTION",
                             Some(all.span.clone()),
                         );
                         return None;

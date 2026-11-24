@@ -1,11 +1,339 @@
 use super::{Analyzer, BoundName, Kind, Name};
 use crate::{
     BoundConstraint, BoundExpressionKind, BoundPathStep, Cardinality, CollectionKind,
-    CollectionType, ConstraintRule, ExpressionType, NumericRange, Span, StructureType, TypeInfo,
-    TypeReference,
+    CollectionType, ConstraintRule, ExpressionType, GeometryKind, GeometryType, LanguageVersion,
+    NumericRange, Span, StructureType, TypeInfo, TypeReference,
 };
 
 impl Analyzer<'_, '_> {
+    pub(super) fn predefined_geometry_structure(
+        &mut self,
+        owner: usize,
+        family: &str,
+        at: &Span,
+    ) -> Option<usize> {
+        let language = self.expression_language(owner);
+        let standard = format!("INTERLIS.{family}");
+        let versioned = match family {
+            "LineGeometry" => family.to_owned(),
+            "SurfaceEdge" | "SurfaceBoundary" => format!(
+                "{family}@{}",
+                if language == LanguageVersion::V23 {
+                    "2.3"
+                } else {
+                    "2.4"
+                }
+            ),
+            _ => return None,
+        };
+        let qualified = format!("INTERLIS.{versioned}");
+        if let Some(&id) = self.names.get(&qualified) {
+            return Some(id);
+        }
+        let template = self.predefined_namespace(self.symbols[owner].model)?;
+        let id = self.geometry_structure(template, &versioned, family, None)?;
+        self.names.entry(standard).or_insert(id);
+        let mut members = Vec::new();
+        if family == "SurfaceEdge" {
+            let ty = self.types.len();
+            self.types.push(TypeInfo::Geometry(GeometryType {
+                geometry_kind: GeometryKind::Polyline,
+                directed: true,
+                line_forms: Vec::new(),
+                vertex: None,
+                without_overlaps: false,
+                tolerance: None,
+                line_attributes: None,
+                language,
+                span: Span::predefined(),
+                base_vertex: None,
+                explicit_tolerance: false,
+            }));
+            members.push(self.predefined_attribute(id, "Geometry", ty, false, None)?);
+            if language == LanguageVersion::V23 {
+                let ty = self.structure_type_id(None);
+                members.push(self.predefined_attribute(id, "LineAttrs", ty, false, None)?);
+            }
+        } else {
+            let (attribute, element) = if family == "LineGeometry" {
+                (
+                    "Segments",
+                    self.predefined_segment(owner, "LineSegment", at)?,
+                )
+            } else {
+                (
+                    "Lines",
+                    self.predefined_geometry_structure(owner, "SurfaceEdge", at)?,
+                )
+            };
+            let ty = self.geometry_structure_list(owner, element)?;
+            let member = self.predefined_attribute(id, attribute, ty, false, None)?;
+            members.push(member);
+            if family == "LineGeometry" {
+                let start = self.predefined_segment(owner, "StartSegment", at)?;
+                self.geometry_start_constraint(owner, id, member, element, start)?;
+            }
+        }
+        self.symbols[id].declaration.effective_attributes = Some(members.into_boxed_slice());
+        Some(id)
+    }
+
+    pub(super) fn geometry_structure(
+        &mut self,
+        owner: usize,
+        key: &str,
+        family: &str,
+        template: Option<usize>,
+    ) -> Option<usize> {
+        let name = Name {
+            value: key.into(),
+            span: Span::predefined(),
+        };
+        if let Some(&existing) = self.names.get(&format!(
+            "{}.{}",
+            self.symbols[owner].declaration.qualified, key
+        )) {
+            return Some(existing);
+        }
+        let id = self.add(
+            Kind::Structure,
+            &name,
+            &name.span,
+            Some(owner),
+            self.symbols[owner].model,
+            None,
+        )?;
+        let origin = if let Some(template) = template {
+            Some(self.geometry_symbol_reference(owner, template)?)
+        } else {
+            None
+        };
+        let declaration = &mut self.symbols[id].declaration;
+        declaration.name = family.into();
+        declaration.predefined = template.is_none();
+        declaration.derived_from = origin;
+        Some(id)
+    }
+
+    pub(super) fn geometry_symbol_reference(
+        &mut self,
+        owner: usize,
+        id: usize,
+    ) -> Option<TypeReference> {
+        let name = Name {
+            value: self.symbols[id].declaration.name.clone(),
+            span: Span::predefined(),
+        };
+        self.reference_to_symbol(owner, id, &name)
+    }
+
+    pub(super) fn geometry_structure_list(&mut self, owner: usize, id: usize) -> Option<usize> {
+        let reference = self.geometry_symbol_reference(owner, id)?;
+        let element = self.structure_type_id(Some(reference));
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Collection(CollectionType {
+            kind: CollectionKind::List,
+            cardinality: Cardinality {
+                lower: "0".into(),
+                upper: None,
+            },
+            element,
+        }));
+        Some(ty)
+    }
+
+    pub(super) fn structure_type_id(&mut self, target: Option<TypeReference>) -> usize {
+        let ty = self.types.len();
+        self.types.push(TypeInfo::Structure(StructureType {
+            target,
+            restrictions: Vec::new(),
+        }));
+        ty
+    }
+
+    pub(super) fn contextual_geometry_attribute(
+        &mut self,
+        owner: usize,
+        template: usize,
+        name: &str,
+        ty: usize,
+    ) -> Option<usize> {
+        let reference = self
+            .visible_name(
+                template,
+                name,
+                Some(&[Kind::Attribute]),
+                &Span::predefined(),
+            )
+            .ok()??;
+        let mandatory = self.symbols[reference].declaration.mandatory() == Some(true);
+        let origin = self.geometry_symbol_reference(owner, reference)?;
+        let id = self.predefined_attribute(owner, name, ty, mandatory, None)?;
+        let declaration = &mut self.symbols[id].declaration;
+        declaration.predefined = false;
+        declaration.derived_from = Some(origin);
+        Some(id)
+    }
+
+    pub(super) fn line_inspection_type(
+        &mut self,
+        owner: usize,
+        geometry: usize,
+        at: &Span,
+    ) -> Option<usize> {
+        let TypeInfo::Geometry(descriptor) = &self.types[geometry] else {
+            unreachable!("line inspections use a geometry");
+        };
+        if descriptor
+            .line_forms
+            .iter()
+            .any(|form| matches!(form, crate::LineForm::Named(_)))
+        {
+            self.diagnostics.push(
+                "ILI-UNSUPPORTED",
+                "Geometry inspection of a custom line form requires contextual segment binding",
+                Some(at.clone()),
+            );
+            return None;
+        }
+        let vertex = descriptor.vertex.as_ref()?.clone();
+        let Some(coordinates) = self.geometry_coordinate(&vertex)? else {
+            self.unsupported_expression(at);
+            return None;
+        };
+        let template = self.predefined_geometry_structure(owner, "LineGeometry", at)?;
+        let row = self.geometry_structure(
+            owner,
+            &format!("$LineGeometry{geometry}"),
+            "LineGeometry",
+            Some(template),
+        )?;
+        if self.symbols[row].declaration.effective_attributes.is_none() {
+            let mut base_segment = None;
+            let mut start = None;
+            for family in [
+                "LineSegment",
+                "StartSegment",
+                "StraightSegment",
+                "ArcSegment",
+            ] {
+                let template = self.predefined_segment(owner, family, at)?;
+                let segment = self.geometry_structure(row, family, family, Some(template))?;
+                let mut members = Vec::new();
+                if let Some(base) = base_segment {
+                    let reference = self.geometry_symbol_reference(owner, base)?;
+                    self.symbols[segment].base_scope = Some(base);
+                    self.symbols[segment].declaration.base_reference = Some(reference);
+                    members.extend_from_slice(
+                        self.symbols[base]
+                            .declaration
+                            .effective_attributes
+                            .as_deref()?,
+                    );
+                }
+                self.symbols[segment].declaration.final_declaration =
+                    self.symbols[template].declaration.is_final();
+                self.symbols[segment].declaration.abstract_declaration =
+                    self.symbols[template].declaration.is_abstract();
+                let originals = self.symbols[template]
+                    .declaration
+                    .effective_attributes
+                    .as_deref()?
+                    .to_vec();
+                for original in originals {
+                    if self.symbols[original].declaration.parent != Some(template) {
+                        continue;
+                    }
+                    let name = self.symbols[original].declaration.name.clone();
+                    let specialize = matches!(name.as_str(), "SegmentEndPoint" | "ArcPoint");
+                    let ty = if specialize {
+                        coordinates
+                    } else {
+                        self.symbols[original].declaration.type_id?
+                    };
+                    let attr = self.contextual_geometry_attribute(segment, template, &name, ty)?;
+                    if specialize {
+                        self.symbols[attr].declaration.reference = Some(vertex.clone());
+                    }
+                    members.push(attr);
+                }
+                self.symbols[segment].declaration.effective_attributes =
+                    Some(members.into_boxed_slice());
+                if family == "LineSegment" {
+                    base_segment = Some(segment);
+                } else if family == "StartSegment" {
+                    start = Some(segment);
+                }
+            }
+            let segment = base_segment?;
+            let list = self.geometry_structure_list(owner, segment)?;
+            let member = self.contextual_geometry_attribute(row, template, "Segments", list)?;
+            self.symbols[row].declaration.effective_attributes = Some(Box::new([member]));
+            self.geometry_start_constraint(owner, row, member, segment, start?)?;
+        }
+        let reference = self.geometry_symbol_reference(owner, row)?;
+        Some(self.structure_type_id(Some(reference)))
+    }
+
+    fn geometry_start_constraint(
+        &mut self,
+        owner: usize,
+        structure: usize,
+        segments: usize,
+        segment: usize,
+        start: usize,
+    ) -> Option<()> {
+        let span = Span::predefined();
+        let reference = self.geometry_symbol_reference(owner, segments)?;
+        let segment_type = self.geometry_symbol_reference(owner, segment)?;
+        let ty = self.structure_type_id(Some(segment_type));
+        let first = self.record_expression(
+            BoundExpressionKind::Path {
+                steps: vec![BoundPathStep {
+                    reference,
+                    selection: Some(crate::PathSelection::First),
+                    selection_span: None,
+                    association_access: None,
+                }],
+            },
+            ExpressionType::Object,
+            Some(ty),
+            &span,
+        );
+        let reference = self.geometry_symbol_reference(owner, start)?;
+        let class_type = self.types.len();
+        self.types.push(TypeInfo::ClassValue(crate::ClassValueType {
+            kind: crate::ClassValueKind::Structure,
+            restrictions: vec![reference.clone()],
+        }));
+        let class = self.record_expression(
+            BoundExpressionKind::Class { reference },
+            ExpressionType::Class,
+            Some(class_type),
+            &span,
+        );
+        let function = self.predefined_reference(owner, "isOfClass");
+        let boolean = self.predefined_type(owner, "BOOLEAN", &span)?.ty;
+        let condition = self.record_expression(
+            BoundExpressionKind::Call {
+                function,
+                arguments: vec![first, class],
+            },
+            ExpressionType::Boolean,
+            Some(boolean),
+            &span,
+        );
+        self.symbols[structure].declaration.constraints = Some(Box::new([BoundConstraint {
+            name: None,
+            target: None,
+            rule: ConstraintRule::Mandatory,
+            expression: Some(condition),
+            span,
+            source_metadata: None,
+        }]));
+        Some(())
+    }
+
     pub(super) fn predefined_segment(
         &mut self,
         owner: usize,
@@ -387,6 +715,7 @@ impl Analyzer<'_, '_> {
                 if let Some(id) = self
                     .predefined_segment(owner, name, at)
                     .or_else(|| self.predefined_metadata(owner, name, at))
+                    .or_else(|| self.predefined_geometry_structure(owner, name, at))
                 {
                     Some(id)
                 } else {

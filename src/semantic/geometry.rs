@@ -348,6 +348,7 @@ impl Analyzer<'_, '_> {
             }
             if matches!(declaration.kind, Kind::Domain | Kind::Attribute)
                 && !declaration.is_abstract()
+                && !declaration.is_predefined()
                 && incomplete.contains(&actual)
             {
                 self.diagnostics.push(
@@ -410,7 +411,7 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn geometry_coordinate(&mut self, vertex: &TypeReference) -> Option<Option<usize>> {
+    pub(super) fn geometry_coordinate(&mut self, vertex: &TypeReference) -> Option<Option<usize>> {
         if vertex.target_name() == "INTERLIS.LineCoord" {
             return Some(None);
         }

@@ -126,7 +126,28 @@ impl Analyzer<'_, '_> {
                         restrictions,
                     },
                 );
-                if !self.value_fits(owner, value, ty, true, AssignmentContext::Function)? {
+                let expression = underlying_expression(&self.expressions, value);
+                let sources = match expression.type_id.map(|ty| &self.types[ty]) {
+                    Some(crate::TypeInfo::ObjectSelection(selection)) => {
+                        selection.targets.as_slice()
+                    }
+                    Some(crate::TypeInfo::Reference(reference)) => {
+                        std::slice::from_ref(&reference.target)
+                    }
+                    _ => &[],
+                };
+                let object_targets_only = !sources.is_empty()
+                    && sources.iter().flat_map(object_targets).all(|link| {
+                        self.names.get(link.target_name()).is_some_and(|&id| {
+                            matches!(
+                                self.symbols[id].declaration.kind,
+                                Kind::Class | Kind::Association,
+                            )
+                        })
+                    });
+                if !object_targets_only
+                    || !self.value_fits(owner, value, ty, true, AssignmentContext::Function)?
+                {
                     self.diagnostics.push_related(
                         "ILI-ROLE-DERIVATION-TYPE",
                         "The view path must select one object accepted by the role",
