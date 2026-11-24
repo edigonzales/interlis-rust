@@ -8070,6 +8070,42 @@ fn nested_predefined_temporal_formats_preserve_layouts_and_reference_systems() {
 }
 
 #[test]
+fn nested_format_uses_one_effective_structure_for_all_its_fields() {
+    for edition in ["2.3", "2.4"] {
+        let input = |lower, constant| {
+            request(vec![(
+                "parts.ili",
+                format!(
+                    r#"INTERLIS {edition}; MODEL M AT "x" VERSION "1" =
+                STRUCTURE Part=major:0..99; minor:0..99; END Part;
+                STRUCTURE Early EXTENDS Part=major (EXTENDED):10..20; minor (EXTENDED):80..90; END Early;
+                STRUCTURE Late EXTENDS Part=major (EXTENDED):50..60; minor (EXTENDED):10..20; END Late;
+                DOMAIN Fields=FORMAT BASED ON Part (major/2 ":" minor/2);
+                STRUCTURE Box=inner:LIST {{1}} OF Part RESTRICTION (Early; Late); END Box;
+                DOMAIN Code=FORMAT BASED ON Box (inner/Fields) "{lower}".."60:20";
+                TOPIC T=CLASS Item=code:Code;
+                    MANDATORY CONSTRAINT code == "{constant}";
+                END Item; END T; END M."#
+                ),
+            )])
+        };
+        for constant in ["15:85", "55:15"] {
+            outcome(input("10:80", constant), Status::CheckedSubset, None);
+        }
+        outcome(
+            input("00:00", "15:85"),
+            Status::Rejected,
+            Some("ILI-FORMAT-BOUNDS"),
+        );
+        outcome(
+            input("10:80", "15:15"),
+            Status::Rejected,
+            Some("ILI-FORMAT-CONSTANT"),
+        );
+    }
+}
+
+#[test]
 fn formatted_constants_and_assignments_use_the_bound_components_and_ranges() {
     let input = |condition: &str, assignment: &str| {
         single(&format!(

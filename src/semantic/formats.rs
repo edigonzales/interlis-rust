@@ -625,38 +625,56 @@ impl Analyzer<'_, '_> {
 
     fn formatted_interval(&mut self, ty: usize, at: &Span) -> Option<FormatInterval> {
         let ranges = self.formatted_ranges(ty, at)?;
-        let result = (|| {
-            let operations =
-                format_operations(ty, &self.types, &self.symbols, &self.names, &mut self.work)?;
-            let mut interval = FormatInterval::default();
-            for operation in operations {
-                self.work.charge(1).map_err(|_| NumberError::Work)?;
-                match operation {
-                    FormatOperation::Literal(_) => {}
-                    FormatOperation::Numeric(number, _) => {
-                        interval
-                            .lower
-                            .push(number.bounds.as_ref().map(|range| range.lower.clone()));
-                        interval
-                            .upper
-                            .push(number.bounds.as_ref().map(|range| range.upper.clone()));
-                    }
-                    FormatOperation::Bounds {
-                        first,
-                        lower,
-                        upper,
-                    } => {
-                        interval.narrow(first, lower, upper, &mut self.work)?;
+        let mut combined = None;
+        let result = for_each_format_layout(
+            ty,
+            &self.types,
+            &self.symbols,
+            &self.names,
+            &mut self.work,
+            |operations, work| {
+                let mut interval = FormatInterval::default();
+                for operation in operations {
+                    work.charge(1).map_err(|_| NumberError::Work)?;
+                    match operation {
+                        FormatOperation::Literal(_) => {}
+                        FormatOperation::Numeric(number, _) => {
+                            interval
+                                .lower
+                                .push(number.bounds.as_ref().map(|range| range.lower.clone()));
+                            interval
+                                .upper
+                                .push(number.bounds.as_ref().map(|range| range.upper.clone()));
+                        }
+                        FormatOperation::Bounds {
+                            first,
+                            lower,
+                            upper,
+                        } => {
+                            interval.narrow(first, lower, upper, work)?;
+                        }
                     }
                 }
-            }
-            for (min, max) in &ranges {
-                interval.narrow(0, &min.components, &max.components, &mut self.work)?;
-            }
-            Ok(interval)
-        })();
+                for (min, max) in &ranges {
+                    interval.narrow(0, &min.components, &max.components, work)?;
+                }
+                if !interval.is_empty(work)? {
+                    match &mut combined {
+                        None => combined = Some(interval),
+                        Some(all) => all.include(interval, work)?,
+                    }
+                }
+                Ok(false)
+            },
+        );
         match result {
-            Ok(interval) => Some(interval),
+            Ok(()) => combined.or_else(|| {
+                self.format_error(
+                    "ILI-FORMAT-BOUNDS",
+                    "The format has no value in its effective range",
+                    at,
+                )
+            }),
             Err(error) => {
                 self.number_error(error, at);
                 None
@@ -765,25 +783,34 @@ impl Analyzer<'_, '_> {
         if !self.step(text.len(), at) {
             return None;
         }
-        let parts =
-            match format_operations(ty, &self.types, &self.symbols, &self.names, &mut self.work) {
-                Ok(parts) => parts,
-                Err(NumberError::Form) => {
-                    return self.format_error(
-                        "ILI-FORMAT-ATTRIBUTE",
-                        "The formatted layout requires compatible component attributes",
-                        at,
-                    );
+        let mut values = None;
+        let mut numeric_limit = false;
+        let result = for_each_format_layout(
+            ty,
+            &self.types,
+            &self.symbols,
+            &self.names,
+            &mut self.work,
+            |parts, work| {
+                match parse_value(&parts, text, self.limits, work) {
+                    Ok(parsed) => values = parsed,
+                    Err(NumberError::Limit) => numeric_limit = true,
+                    Err(error) => return Err(error),
                 }
-                Err(error) => {
-                    self.number_error(error, at);
-                    return None;
-                }
-            };
-        let result = parse_value(&parts, text, self.limits, &mut self.work);
+                Ok(values.is_some())
+            },
+        );
         match result {
-            Ok(values) => Some(values),
-            Err(NumberError::Form) => Some(None),
+            Ok(()) if values.is_some() || !numeric_limit => Some(values),
+            Ok(()) => {
+                self.number_error(NumberError::Limit, at);
+                None
+            }
+            Err(NumberError::Form) => self.format_error(
+                "ILI-FORMAT-ATTRIBUTE",
+                "The formatted layout requires compatible component attributes",
+                at,
+            ),
             Err(error) => {
                 self.number_error(error, at);
                 None
@@ -830,6 +857,31 @@ struct FormatInterval {
 }
 
 impl FormatInterval {
+    fn is_empty(&self, work: &mut WorkBudget) -> Result<bool, NumberError> {
+        for (lower, upper) in self.lower.iter().zip(&self.upper) {
+            let (Some(lower), Some(upper)) = (lower, upper) else {
+                return Ok(false);
+            };
+            match compare_decimal(lower, upper, work)? {
+                Ordering::Less => return Ok(false),
+                Ordering::Greater => return Ok(true),
+                Ordering::Equal => {}
+            }
+        }
+        Ok(false)
+    }
+
+    fn include(&mut self, other: Self, work: &mut WorkBudget) -> Result<(), NumberError> {
+        if compare_extrema(&other.lower, &self.lower, Ordering::Less, work)? == Ordering::Less {
+            self.lower = other.lower;
+        }
+        if compare_extrema(&other.upper, &self.upper, Ordering::Greater, work)? == Ordering::Greater
+        {
+            self.upper = other.upper;
+        }
+        Ok(())
+    }
+
     fn narrow(
         &mut self,
         first: usize,
@@ -882,14 +934,51 @@ enum FormatOperation<'a> {
     },
 }
 
-fn format_operations<'a>(
+enum FormatLayout<'a> {
+    Operations(Vec<FormatOperation<'a>>),
+    Alternatives(Vec<usize>),
+}
+
+fn for_each_format_layout<'a>(
     root: usize,
     types: &'a [TypeInfo],
     symbols: &[Symbol],
     names: &BTreeMap<String, usize>,
     work: &mut WorkBudget,
-) -> Result<Vec<FormatOperation<'a>>, NumberError> {
+    mut visit: impl FnMut(Vec<FormatOperation<'a>>, &mut WorkBudget) -> Result<bool, NumberError>,
+) -> Result<(), NumberError> {
+    let mut pending = vec![Vec::new()];
+    while let Some(scopes) = pending.pop() {
+        match format_operations(root, types, symbols, names, &scopes, work)? {
+            FormatLayout::Operations(operations) => {
+                if visit(operations, work)? {
+                    break;
+                }
+            }
+            FormatLayout::Alternatives(alternatives) => {
+                let cost = u32::try_from(scopes.len() + 1).map_err(|_| NumberError::Limit)?;
+                for scope in alternatives.into_iter().rev() {
+                    work.charge(cost).map_err(|_| NumberError::Work)?;
+                    let mut choice = scopes.clone();
+                    choice.push(scope);
+                    pending.push(choice);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn format_operations<'a>(
+    root: usize,
+    types: &'a [TypeInfo],
+    symbols: &[Symbol],
+    names: &BTreeMap<String, usize>,
+    scopes: &[usize],
+    work: &mut WorkBudget,
+) -> Result<FormatLayout<'a>, NumberError> {
     let mut pending = vec![(root, 0, 0, None)];
+    let mut scopes = scopes.iter();
     let mut operations = Vec::new();
     let mut components = 0;
     while let Some((ty, position, _, structure)) = pending.last_mut() {
@@ -925,7 +1014,21 @@ fn format_operations<'a>(
                 };
                 let scope = match structure_targets(actual) {
                     [single] => Some(names[single.target_name()]),
-                    _ => None,
+                    [] => return Err(NumberError::Form),
+                    alternatives => match scopes.next() {
+                        Some(&scope) => Some(scope),
+                        None => {
+                            let cost = u32::try_from(alternatives.len())
+                                .map_err(|_| NumberError::Limit)?;
+                            work.charge(cost).map_err(|_| NumberError::Work)?;
+                            return Ok(FormatLayout::Alternatives(
+                                alternatives
+                                    .iter()
+                                    .map(|target| names[target.target_name()])
+                                    .collect(),
+                            ));
+                        }
+                    },
                 };
                 pending.push((part.type_id, 0, components, scope));
             }
@@ -953,7 +1056,7 @@ fn format_operations<'a>(
             }
         }
     }
-    Ok(operations)
+    Ok(FormatLayout::Operations(operations))
 }
 
 fn format_attribute_type(
