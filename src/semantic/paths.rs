@@ -58,20 +58,39 @@ impl Analyzer<'_, '_> {
                 match self.visible_name(scope, &name.value, Some(&[Kind::Attribute]), &name.span) {
                     Ok(Some(member)) => member,
                     Err(LookupError::Limit) => return None,
-                    _ => match self.visible_role(scope, &name.value, &name.span) {
-                        Ok(Some(role)) => role,
-                        Err(LookupError::Limit) => return None,
-                        _ => {
-                            return self.path_error(
-                                "ILI-PATH-NAME",
-                                "The attribute or role is absent from this object context",
-                                &name.span,
+                    _ => {
+                        match self.path_role(
+                            owner,
+                            scope,
+                            name,
+                            position == 0 && elements.len() == path.elements.len(),
+                        ) {
+                            Ok(Some(role)) => role,
+                            Err(LookupError::Limit) => return None,
+                            Err(LookupError::Ambiguous(candidates)) => {
+                                self.diagnostics.push_related(
+                                "ILI-PATH-ROLE-AMBIGUOUS",
+                                "The role can be reached through more than one association access",
+                                Some(name.span.clone()),
+                                candidates.into_iter().map(|candidate| crate::RelatedLocation {
+                                    span: self.symbols[candidate].name_span.clone(),
+                                    message: "Candidate role access".into(),
+                                }).collect(),
                             );
+                                return None;
+                            }
+                            _ => {
+                                return self.path_error(
+                                    "ILI-PATH-NAME",
+                                    "The attribute or role is absent from this object context",
+                                    &name.span,
+                                );
+                            }
                         }
-                    },
+                    }
                 };
             let member_type = if self.symbols[member].declaration.kind == Kind::Role {
-                self.role_value_type(scope, member, &name.span)?
+                self.role_value_type(owner, scope, member, &name.span)?
             } else {
                 self.symbols[member].declaration.type_id?
             };
@@ -113,14 +132,56 @@ impl Analyzer<'_, '_> {
         }
     }
 
-    fn role_value_type(&mut self, scope: usize, role: usize, at: &Span) -> Option<usize> {
+    fn path_role(
+        &mut self,
+        owner: usize,
+        scope: usize,
+        name: &Name,
+        first: bool,
+    ) -> Result<Option<usize>, LookupError> {
+        if first {
+            self.visible_role(scope, &name.value, &name.span)
+        } else if let Some(role) =
+            self.visible_name(scope, &name.value, Some(&[Kind::Role]), &name.span)?
+        {
+            Ok(Some(role))
+        } else {
+            self.following_role(owner, scope, &name.value, &name.span)
+        }
+    }
+
+    fn role_value_type(
+        &mut self,
+        owner: usize,
+        scope: usize,
+        role: usize,
+        at: &Span,
+    ) -> Option<usize> {
+        let association = self.symbols[role].declaration.parent?;
+        if !self.association_precedes_path(association, owner, at) {
+            return self.path_error(
+                "ILI-PATH-ROLE-ORDER",
+                "The association must be declared before this role access",
+                at,
+            );
+        }
         let info = self.symbols[role].declaration.role()?;
-        let plural = self.symbols[scope].declaration.kind != Kind::Association
-            && info
-                .cardinality
-                .upper
-                .as_deref()
-                .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater);
+        let endpoint = self.symbols[scope]
+            .declaration
+            .association()
+            .is_some_and(|association| association.roles.contains(&role));
+        let degree = self.symbols[association]
+            .declaration
+            .association()?
+            .roles
+            .len();
+        let plural = !endpoint
+            && (degree != 2
+                || info
+                    .cardinality
+                    .upper
+                    .as_deref()
+                    .is_none_or(|upper| compare_count(upper, "1") == Ordering::Greater));
         let bytes = info
             .targets
             .iter()

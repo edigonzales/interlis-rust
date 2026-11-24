@@ -4136,6 +4136,58 @@ fn role_paths_distinguish_link_endpoints_from_collections_of_related_objects() {
 }
 
 #[test]
+fn role_paths_check_declaration_order_multiplicity_and_following_external_access() {
+    let base = "TOPIC T=OID AS INTERLIS.I32OID;
+        CLASS A=END A; CLASS B=active:BOOLEAN; END B; CLASS C=END C;";
+    outcome(
+        single(&format!(
+            "{base} ASSOCIATION Triple=origin -- {{0..1}} A;
+                 counterpart -- {{0..1}} B; auxiliary -- {{0..1}} C; END Triple;
+             CONSTRAINTS OF A=MANDATORY CONSTRAINT counterpart->active; END; END T;"
+        )),
+        Status::Rejected,
+        Some("ILI-PATH-MULTIPLICITY"),
+    );
+    outcome(
+        single(&format!(
+            "{base} ASSOCIATION Pair (OID)=origin -- {{0..1}} A; counterpart -- {{0..1}} C; END Pair;
+             ASSOCIATION Link=item -- {{0..1}} Pair; receivers -- {{0..*}} B; END Link;
+             CONSTRAINTS OF Pair=MANDATORY CONSTRAINT receivers->active; END; END T;"
+        )),
+        Status::Rejected, Some("ILI-PATH-MULTIPLICITY"),
+    );
+    outcome(
+        single(
+            "TOPIC T=CLASS A=MANDATORY CONSTRAINT counterpart->active; END A;
+            CLASS B=active:BOOLEAN; END B;
+            ASSOCIATION Pair=origin -- {0..1} A; counterpart -- {0..1} B; END Pair;
+            END T;",
+        ),
+        Status::Rejected,
+        Some("ILI-PATH-ROLE-ORDER"),
+    );
+    let relation = "TOPIC T=OID AS INTERLIS.I32OID;
+        CLASS Remote=END Remote; CLASS Local=active:BOOLEAN; END Local;
+        STRUCTURE Payload=target:REFERENCE TO Remote; END Payload;
+        CLASS Holder=data:Payload; END Holder;
+        ASSOCIATION Link=origin (EXTERNAL) -- {0..1} Remote; endpoint -- {0..1} Local; END Link;";
+    outcome(
+        single(&format!(
+            "{relation} CONSTRAINTS OF Holder=MANDATORY CONSTRAINT data->target->endpoint->active; END; END T;"
+        )),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        single(&format!(
+            "{relation} CONSTRAINTS OF Remote=MANDATORY CONSTRAINT endpoint->active; END; END T;"
+        )),
+        Status::Rejected,
+        Some("ILI-PATH-NAME"),
+    );
+}
+
+#[test]
 fn existence_constraints_bind_each_required_viewable_and_attribute_path() {
     let report = outcome(
         single(

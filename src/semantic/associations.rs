@@ -12,6 +12,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+#[derive(Clone, Copy)]
+struct AssociationAccess {
+    association: usize,
+    source: usize,
+    target: usize,
+}
+
 impl Analyzer<'_, '_> {
     pub(super) fn bind_associations(&mut self, viewables: &[usize]) -> Option<()> {
         for &owner in viewables {
@@ -533,6 +540,148 @@ impl Analyzer<'_, '_> {
             owner = base;
             key.0 = base;
         }
+    }
+
+    pub(super) fn following_role(
+        &mut self,
+        owner: usize,
+        scope: usize,
+        name: &str,
+        at: &Span,
+    ) -> Result<Option<usize>, super::LookupError> {
+        use super::LookupError;
+        let owner_topic = self.containing_topic(owner);
+        let object_topic = self.containing_topic(scope);
+        let mut candidates = Vec::new();
+        for association in 0..self.symbols.len() {
+            if !self.step(1, at) {
+                return Err(LookupError::Limit);
+            }
+            let Some(info) = self.symbols[association].declaration.association() else {
+                continue;
+            };
+            if !self.association_precedes_path(association, owner, at) {
+                continue;
+            }
+            let topic = self.containing_topic(association);
+            if topic.is_none()
+                && self.symbols[association].model != self.symbols[owner].model
+                && self.symbols[association].model != self.symbols[scope].model
+            {
+                continue;
+            }
+            let roles = info.roles.to_vec();
+            if !self.path_topic_available(owner_topic, topic, at)?
+                && !self.path_topic_available(object_topic, topic, at)?
+            {
+                continue;
+            }
+            for &target in &roles {
+                if self.symbols[target].declaration.name != name {
+                    continue;
+                }
+                for &source in &roles {
+                    if source == target {
+                        continue;
+                    }
+                    if !self.step(1, at) {
+                        return Err(LookupError::Limit);
+                    }
+                    let targets = self
+                        .role_target_ids(&self.symbols[source].declaration.role().unwrap().targets);
+                    let mut accepts = targets.is_empty();
+                    for root in targets {
+                        if self
+                            .specializes_symbol(scope, root, at)
+                            .ok_or(LookupError::Limit)?
+                        {
+                            accepts = true;
+                            break;
+                        }
+                    }
+                    if accepts {
+                        candidates.push(AssociationAccess {
+                            association,
+                            source,
+                            target,
+                        });
+                    }
+                }
+            }
+        }
+        let mut found = None;
+        for candidate in &candidates {
+            let mut hidden = false;
+            for other in &candidates {
+                if !self.step(1, at) {
+                    return Err(LookupError::Limit);
+                }
+                if candidate.association == other.association {
+                    continue;
+                }
+                if self
+                    .specializes_symbol(other.association, candidate.association, at)
+                    .ok_or(LookupError::Limit)?
+                    && self.replaces_role_access(*other)
+                    || self
+                        .specializes_symbol(candidate.association, other.association, at)
+                        .ok_or(LookupError::Limit)?
+                        && !self.replaces_role_access(*candidate)
+                {
+                    hidden = true;
+                    break;
+                }
+            }
+            if !hidden && let Some(previous) = found.replace(*candidate) {
+                return Err(LookupError::Ambiguous([previous.source, candidate.source]));
+            }
+        }
+        Ok(found.map(|candidate| candidate.target))
+    }
+
+    fn replaces_role_access(&self, access: AssociationAccess) -> bool {
+        self.symbols[access.source]
+            .declaration
+            .role()
+            .unwrap()
+            .hiding
+            || matches!(self.symbols[access.association].ast,
+                Some(SyntaxDecl::Association(association)) if association.properties.iter()
+                    .any(|property| property.value == syntax::Property::Extended))
+    }
+
+    fn path_topic_available(
+        &mut self,
+        from: Option<usize>,
+        target: Option<usize>,
+        at: &Span,
+    ) -> Result<bool, super::LookupError> {
+        let Some(target) = target else {
+            return Ok(true);
+        };
+        let Some(from) = from else {
+            return Ok(false);
+        };
+        let ancestor = self
+            .specializes_symbol(from, target, at)
+            .ok_or(super::LookupError::Limit)?;
+        Ok(ancestor
+            || self
+                .topic_has_dependency(from, target, at)
+                .ok_or(super::LookupError::Limit)?)
+    }
+
+    pub(super) fn association_precedes_path(
+        &self,
+        association: usize,
+        owner: usize,
+        at: &Span,
+    ) -> bool {
+        let declaration = &self.symbols[association];
+        let location = declaration.declaration.source_span();
+        declaration.model != self.symbols[owner].model
+            || location.sort_key().0 != at.sort_key().0
+            || location.sort_key() <= at.sort_key()
     }
 
     fn check_role_access(
