@@ -22,6 +22,12 @@ downstream components. Some features still report \`incomplete\`, including
 arithmetic and unit conversions whose result type or bounds cannot be
 established exactly.
 
+INTERLIS 2.4 arithmetic uses exact decimal addition, subtraction, multiplication
+and terminating division. A nonterminating quotient rounds to 50 significant
+digits with ties to even. Range division encloses possible results with
+outward rounding. The compiler uses the same arithmetic profile as the
+interlis-java validator for static range checks.
+
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,
 no control characters), with 1–4096 sources per request. Text is not normalized.

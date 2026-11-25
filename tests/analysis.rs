@@ -6668,7 +6668,14 @@ fn bounded_arithmetic_checks_assignments_and_keeps_exact_result_bounds() {
         Some("ILI-ATTRIBUTE-DERIVATION-TYPE"),
     );
     outcome(
-        single("TOPIC T=CLASS Item=x:0.00..1.00 := 1/3; END Item; END T;"),
+        single(
+            "TOPIC T=CLASS Item=x:0.00..1.00 := 1/3; decimal:0.3..0.3 := 0.1+0.2; END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+    outcome(
+        single("TOPIC T=CLASS Item=n:-1..1; x:0..10 := 1/n; END Item; END T;"),
         Status::Incomplete,
         Some("ILI-UNSUPPORTED"),
     );

@@ -8,6 +8,7 @@ pub(crate) enum NumberError {
     Limit,
     Work,
 }
+#[derive(Clone)]
 pub(crate) struct DecimalLiteral {
     pub info: DecimalInfo,
     value: BigInt,
@@ -222,142 +223,306 @@ impl DecimalLiteral {
     }
 }
 
-const GRID: i64 = 1024;
-const LIMIT: i64 = 2048 * GRID;
+const DIVISION_PRECISION: i32 = 50;
 
-struct ArithmeticInterval {
-    lower: i64,
-    upper: i64,
-    integral: bool,
+#[derive(Clone, Copy)]
+pub(crate) enum DivisionRounding {
+    Nearest,
+    Lower,
+    Upper,
 }
 
-/// Computes only ranges whose operands and results are exact across the
-/// IEEE-754 formats covered by the model's arithmetic profile.
+impl DecimalLiteral {
+    fn computed(
+        value: BigInt,
+        scale: i32,
+        limits: &Limits,
+        work: &mut WorkBudget,
+    ) -> Result<Self, NumberError> {
+        let coefficient = value.to_string();
+        let (_, digits) = coefficient.split_at(usize::from(value.sign() == Sign::Minus));
+        let trim = if value.sign() == Sign::NoSign {
+            scale.max(0) as usize
+        } else {
+            (scale.max(0) as usize).min(digits.len() - digits.trim_end_matches('0').len())
+        };
+        let scale = if value.sign() == Sign::NoSign {
+            0
+        } else {
+            scale - trim as i32
+        };
+        let coefficient = if value.sign() == Sign::NoSign {
+            "0".to_owned()
+        } else {
+            coefficient[..coefficient.len() - trim].to_owned()
+        };
+        let digits = coefficient.trim_start_matches('-');
+        if digits.len() > limits.max_numeric_digits as usize
+            || scale.unsigned_abs() > limits.max_abs_exponent
+        {
+            return Err(NumberError::Limit);
+        }
+        charge_decimal_work(work, coefficient.len() as u64)?;
+        let original = if scale == 0 {
+            coefficient.clone()
+        } else if (1..=256).contains(&scale) {
+            let sign = if value.sign() == Sign::Minus { "-" } else { "" };
+            let scale = scale as usize;
+            if digits.len() <= scale {
+                format!("{sign}0.{}{digits}", "0".repeat(scale - digits.len()))
+            } else {
+                let (integer, fraction) = digits.split_at(digits.len() - scale);
+                format!("{sign}{integer}.{fraction}")
+            }
+        } else {
+            format!("{coefficient}e{}", -scale)
+        };
+        let value = BigInt::parse_bytes(coefficient.as_bytes(), 10).ok_or(NumberError::Form)?;
+        Ok(Self {
+            info: DecimalInfo {
+                original,
+                coefficient,
+                fractional_digits: if (1..=256).contains(&scale) {
+                    scale as u32
+                } else {
+                    0
+                },
+                exponent: if (0..=256).contains(&scale) {
+                    0
+                } else {
+                    -scale
+                },
+                scaled: !(0..=256).contains(&scale),
+                computed: true,
+            },
+            value,
+        })
+    }
+
+    pub(crate) fn operate(
+        &self,
+        operator: BinaryOperator,
+        other: &Self,
+        rounding: DivisionRounding,
+        limits: &Limits,
+        work: &mut WorkBudget,
+    ) -> Result<Self, NumberError> {
+        use BinaryOperator::{Add, Divide, Multiply, Subtract};
+        let a = self.info.scale();
+        let b = other.info.scale();
+        let size = self
+            .info
+            .coefficient
+            .len()
+            .max(other.info.coefficient.len()) as u64;
+        charge_decimal_work(work, size)?;
+        let (value, scale) = match operator {
+            Add | Subtract => {
+                let scale = a.max(b);
+                let av = align_decimal(&self.value, (scale - a) as u32, work)?;
+                let bv = align_decimal(&other.value, (scale - b) as u32, work)?;
+                (if operator == Add { av + bv } else { av - bv }, scale)
+            }
+            Multiply => {
+                charge_decimal_work(work, size.saturating_mul(size).div_ceil(32))?;
+                (&self.value * &other.value, a + b)
+            }
+            Divide => {
+                return divide_decimal(&self.value, &other.value, a - b, rounding, limits, work);
+            }
+            _ => unreachable!("only arithmetic operators have numeric bounds"),
+        };
+        Self::computed(value, scale, limits, work)
+    }
+}
+
+fn charge_decimal_work(work: &mut WorkBudget, cost: u64) -> Result<(), NumberError> {
+    work.charge(u32::try_from(cost).map_err(|_| NumberError::Limit)?)
+        .map_err(|_| NumberError::Work)
+}
+
+fn align_decimal(
+    value: &BigInt,
+    places: u32,
+    work: &mut WorkBudget,
+) -> Result<BigInt, NumberError> {
+    charge_decimal_work(work, u64::from(places))?;
+    Ok(if places == 0 || value.sign() == Sign::NoSign {
+        value.clone()
+    } else {
+        value * BigInt::from(10_u8).pow(places)
+    })
+}
+
+fn terminating_fraction(
+    numerator: &BigInt,
+    denominator: &BigInt,
+    work: &mut WorkBudget,
+) -> Result<Option<(BigInt, u32)>, NumberError> {
+    let mut common = numerator.magnitude().clone();
+    let mut remainder = denominator.magnitude().clone();
+    while remainder.bits() != 0 {
+        charge_decimal_work(work, common.bits().max(remainder.bits()).div_ceil(8))?;
+        let next = &common % &remainder;
+        common = remainder;
+        remainder = next;
+    }
+    let mut reduced = denominator.magnitude() / &common;
+    let twos = reduced.trailing_zeros().expect("nonzero denominator") as u32;
+    reduced >>= twos;
+    let mut fives = 0;
+    while &reduced % 5_u8 == 0_u8.into() {
+        charge_decimal_work(work, reduced.bits().div_ceil(8))?;
+        reduced /= 5_u8;
+        fives += 1;
+    }
+    if reduced != 1_u8.into() {
+        return Ok(None);
+    }
+    let places = twos.max(fives);
+    charge_decimal_work(work, u64::from(places))?;
+    let value = (numerator / BigInt::from(common))
+        * (BigInt::from(2_u8).pow(places - twos) * BigInt::from(5_u8).pow(places - fives));
+    Ok(Some((value, places)))
+}
+
+fn divide_decimal(
+    numerator: &BigInt,
+    denominator: &BigInt,
+    scale: i32,
+    rounding: DivisionRounding,
+    limits: &Limits,
+    work: &mut WorkBudget,
+) -> Result<DecimalLiteral, NumberError> {
+    debug_assert_ne!(denominator.sign(), Sign::NoSign);
+    if numerator.sign() == Sign::NoSign {
+        return DecimalLiteral::computed(BigInt::from(0), 0, limits, work);
+    }
+    let negative = numerator.sign() != denominator.sign();
+    if matches!(rounding, DivisionRounding::Nearest)
+        && let Some((value, places)) = terminating_fraction(numerator, denominator, work)?
+    {
+        let value = if denominator.sign() == Sign::Minus {
+            -value
+        } else {
+            value
+        };
+        return DecimalLiteral::computed(value, scale + places as i32, limits, work);
+    }
+    let numerator = BigInt::from(numerator.magnitude().clone());
+    let denominator = BigInt::from(denominator.magnitude().clone());
+    let mut order = numerator.to_string().len() as i32 - denominator.to_string().len() as i32;
+    let below_power = if order >= 0 {
+        numerator < align_decimal(&denominator, order as u32, work)?
+    } else {
+        align_decimal(&numerator, order.unsigned_abs(), work)? < denominator
+    };
+    if below_power {
+        order -= 1;
+    }
+    let places = DIVISION_PRECISION - 1 - order;
+    let (numerator, denominator) = if places >= 0 {
+        (align_decimal(&numerator, places as u32, work)?, denominator)
+    } else {
+        (
+            numerator,
+            align_decimal(&denominator, places.unsigned_abs(), work)?,
+        )
+    };
+    charge_decimal_work(work, numerator.bits().max(denominator.bits()).div_ceil(8))?;
+    let mut value = &numerator / &denominator;
+    let remainder = numerator % &denominator;
+    let round_up = remainder.sign() != Sign::NoSign
+        && match rounding {
+            DivisionRounding::Lower => negative,
+            DivisionRounding::Upper => !negative,
+            DivisionRounding::Nearest => match (&remainder * 2_u8).cmp(&denominator) {
+                Ordering::Greater => true,
+                Ordering::Equal => &value % 2_u8 != BigInt::from(0),
+                Ordering::Less => false,
+            },
+        };
+    if round_up {
+        value += 1;
+    }
+    if negative {
+        value = -value;
+    }
+    DecimalLiteral::computed(value, scale + places, limits, work)
+}
+
+/// Derives a numeric enclosure using the same decimal profile as evaluation.
+/// Division of an interval rounds outwards when some quotients may be rounded.
 pub(crate) fn arithmetic_bounds(
     operator: BinaryOperator,
     left: (&DecimalInfo, &DecimalInfo),
     right: (&DecimalInfo, &DecimalInfo),
+    limits: &Limits,
     work: &mut WorkBudget,
-) -> Result<Option<NumericBounds>, NumberError> {
-    let Some(x) = arithmetic_interval(left, work)? else {
-        return Ok(None);
-    };
-    let Some(y) = arithmetic_interval(right, work)? else {
-        return Ok(None);
-    };
-    let singleton = x.lower == x.upper && y.lower == y.upper;
-    let exact_division = y.lower == y.upper && (y.lower / GRID).unsigned_abs().is_power_of_two();
-    if !singleton
-        && (!x.integral || !y.integral || operator == BinaryOperator::Divide && !exact_division)
-    {
+) -> Result<Option<(NumericBounds, bool)>, NumberError> {
+    let a = [
+        DecimalLiteral::from_info(left.0, work)?,
+        DecimalLiteral::from_info(left.1, work)?,
+    ];
+    let b = [
+        DecimalLiteral::from_info(right.0, work)?,
+        DecimalLiteral::from_info(right.1, work)?,
+    ];
+    let divide = operator == BinaryOperator::Divide;
+    if divide && (b[0].value.sign() != b[1].value.sign() || b[0].value.sign() == Sign::NoSign) {
         return Ok(None);
     }
-    let mut minimum = i64::MAX;
-    let mut maximum = i64::MIN;
-    for a in [x.lower, x.upper] {
-        for b in [y.lower, y.upper] {
-            let (numerator, denominator) = match operator {
-                BinaryOperator::Add => (a + b, 1),
-                BinaryOperator::Subtract => (a - b, 1),
-                BinaryOperator::Multiply => (a * b, GRID),
-                BinaryOperator::Divide => (a * GRID, b),
-                _ => unreachable!("only arithmetic operators have numeric bounds"),
+    let exact = !divide
+        || b[0].compare_value(&b[1], work)? == Ordering::Equal
+            && (a[0].compare_value(&a[1], work)? == Ordering::Equal
+                || terminating_fraction(&BigInt::from(1), &b[0].value, work)?.is_some());
+    let mut rounded = false;
+    let mut minimum: Option<DecimalLiteral> = None;
+    let mut maximum: Option<DecimalLiteral> = None;
+    for left in &a {
+        for right in &b {
+            let lower = left.operate(
+                operator,
+                right,
+                if exact {
+                    DivisionRounding::Nearest
+                } else {
+                    DivisionRounding::Lower
+                },
+                limits,
+                work,
+            )?;
+            let upper = if exact {
+                lower.clone()
+            } else {
+                left.operate(operator, right, DivisionRounding::Upper, limits, work)?
             };
-            if denominator == 0 || numerator % denominator != 0 {
-                return Ok(None);
+            rounded |= lower.compare_value(&upper, work)? != Ordering::Equal;
+            if minimum
+                .as_ref()
+                .map(|value| lower.compare_value(value, work))
+                .transpose()?
+                != Some(Ordering::Greater)
+            {
+                minimum = Some(lower);
             }
-            let value = numerator / denominator;
-            if !exact_grid_value(value) {
-                return Ok(None);
+            if maximum
+                .as_ref()
+                .map(|value| upper.compare_value(value, work))
+                .transpose()?
+                != Some(Ordering::Less)
+            {
+                maximum = Some(upper);
             }
-            minimum = minimum.min(value);
-            maximum = maximum.max(value);
         }
     }
-    Ok(Some(NumericBounds {
-        lower: grid_decimal(minimum),
-        upper: grid_decimal(maximum),
-    }))
-}
-
-fn arithmetic_interval(
-    (low, high): (&DecimalInfo, &DecimalInfo),
-    work: &mut WorkBudget,
-) -> Result<Option<ArithmeticInterval>, NumberError> {
-    work.charge((low.coefficient().len() + high.coefficient().len()) as u32)
-        .map_err(|_| NumberError::Work)?;
-    let (Some(a), Some(b)) = (on_grid(low), on_grid(high)) else {
-        return Ok(None);
-    };
-    Ok(Some(ArithmeticInterval {
-        lower: a,
-        upper: b,
-        integral: a % GRID == 0
-            && b % GRID == 0
-            && (a == b || low.scale() <= 0 && high.scale() <= 0),
-    }))
-}
-
-fn on_grid(value: &DecimalInfo) -> Option<i64> {
-    let scaled = value
-        .coefficient()
-        .parse::<i128>()
-        .ok()?
-        .checked_mul(i128::from(GRID))?;
-    let power = 10_i128.checked_pow(value.scale().unsigned_abs())?;
-    let number = if value.scale() < 0 {
-        scaled.checked_mul(power)?
-    } else {
-        if scaled % power != 0 {
-            return None;
-        }
-        scaled / power
-    };
-    let grid = i64::try_from(number).ok()?;
-    exact_grid_value(grid).then_some(grid)
-}
-
-fn exact_grid_value(value: i64) -> bool {
-    let magnitude = value.unsigned_abs();
-    magnitude <= LIMIT as u64
-        && (magnitude == 0
-            || magnitude.ilog2() + 1 - magnitude.trailing_zeros() <= 11
-                && grid_coefficient(magnitude).0 <= 9_999_999)
-}
-
-fn grid_coefficient(magnitude: u64) -> (u64, u32) {
-    // 10^10 / 1024. The grid bound keeps this product within u64.
-    let mut coefficient = magnitude * 9_765_625;
-    let mut scale = 10;
-    while scale > 0 && coefficient.is_multiple_of(10) {
-        coefficient /= 10;
-        scale -= 1;
-    }
-    (coefficient, scale)
-}
-
-fn grid_decimal(value: i64) -> DecimalInfo {
-    let (coefficient, scale) = grid_coefficient(value.unsigned_abs());
-    let sign = if value < 0 { "-" } else { "" };
-    let original = if scale == 0 {
-        format!("{sign}{coefficient}")
-    } else {
-        let power = 10_u64.pow(scale);
-        format!(
-            "{sign}{}.{:0width$}",
-            coefficient / power,
-            coefficient % power,
-            width = scale as usize
-        )
-    };
-    DecimalInfo {
-        original,
-        coefficient: format!("{sign}{coefficient}"),
-        fractional_digits: scale,
-        exponent: 0,
-        scaled: false,
-        computed: true,
-    }
+    Ok(Some((
+        NumericBounds {
+            lower: minimum.expect("arithmetic has endpoints").info,
+            upper: maximum.expect("arithmetic has endpoints").info,
+        },
+        rounded,
+    )))
 }
 
 #[cfg(test)]

@@ -668,7 +668,11 @@ impl Analyzer<'_, '_> {
                 match (a_unit, b_unit) {
                     (Some(a), Some(b)) if a.target_name() == b.target_name() => Some(a),
                     _ => {
-                        self.unsupported_expression(at);
+                        self.invalid_operands(
+                            at,
+                            &[left, right],
+                            "Addition and subtraction require equal units",
+                        );
                         return None;
                     }
                 }
@@ -690,17 +694,31 @@ impl Analyzer<'_, '_> {
             }
         };
         let unit = unit.cloned();
-        let bounds = match (a.bounds, b.bounds) {
-            (Some(a), Some(b)) => match arithmetic_bounds(operator, a, b, &mut self.work) {
-                Ok(bounds) => bounds,
-                Err(error) => {
-                    self.number_error(error, at);
-                    return None;
+        let estimate = match (a.bounds, b.bounds) {
+            (Some(a), Some(b)) => {
+                match arithmetic_bounds(operator, a, b, self.limits, &mut self.work) {
+                    Ok(bounds) => bounds,
+                    Err(error) => {
+                        self.number_error(error, at);
+                        return None;
+                    }
                 }
-            },
+            }
             _ => None,
         };
         let type_id = self.types.len();
+        let bounds = estimate.map(|(bounds, rounded)| {
+            if rounded
+                || [left, right].iter().any(|operand| {
+                    self.expressions[operand.0 as usize]
+                        .type_id
+                        .is_some_and(|ty| self.rounded_numeric_ranges.contains(&ty))
+                })
+            {
+                self.rounded_numeric_ranges.insert(type_id);
+            }
+            bounds
+        });
         self.types.push(TypeInfo::Numeric(NumericRange {
             bounds,
             unit,

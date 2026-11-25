@@ -1294,6 +1294,17 @@ impl Analyzer<'_, '_> {
                     != Ordering::Less
                     && compare_decimal(upper, &target_bounds.upper, &mut self.work)?
                         != Ordering::Greater;
+                if !fits
+                    && actual
+                        .type_id
+                        .is_some_and(|ty| self.rounded_numeric_ranges.contains(&ty))
+                    && compare_decimal(upper, &target_bounds.lower, &mut self.work)?
+                        != Ordering::Less
+                    && compare_decimal(lower, &target_bounds.upper, &mut self.work)?
+                        != Ordering::Greater
+                {
+                    return Ok(None);
+                }
                 Ok(Some(fits))
             }
             _ => Ok(None),
