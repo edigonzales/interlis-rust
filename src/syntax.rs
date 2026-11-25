@@ -1236,7 +1236,7 @@ mod unsupported_regressions {
     #[test]
     fn known_valid_extensions_are_incomplete_without_claiming_support() {
         for language in ["2.3", "2.4"] {
-            let body = "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;";
+            let body = "TOPIC T (ABSTRACT)=CLASS C (ABSTRACT)=n (ABSTRACT):NUMERIC [INTERLIS.m]; distance:0..10 [INTERLIS.m] := INTERLIS.convertUnit(n); END C; END T;";
             let text = format!(
                 "INTERLIS {language}; MODEL A AT \"https://example.invalid\" VERSION \"1\" = {body} END A."
             );

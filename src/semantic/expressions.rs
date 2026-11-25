@@ -4,7 +4,7 @@ use crate::{
     BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ClassValueKind,
     ClassValueType, DecimalInfo, ExpressionId, ExpressionType as ValueType, LanguageVersion,
     NumericBounds, NumericRange, RelatedLocation, Span, TypeReference, UnitConstant,
-    number::arithmetic_bounds,
+    number::{arithmetic_bounds, constant_info},
     syntax::{DecimalConstant, ExprId, Expression, ExpressionKind, LiteralSyntax},
 };
 use std::collections::BTreeMap;
@@ -561,6 +561,26 @@ impl Analyzer<'_, '_> {
             return None;
         }
         if a == Numeric && b == Numeric && !logical {
+            if !arithmetic {
+                for (expression, counterpart) in [(left, right), (right, left)] {
+                    if !self.is_unit_conversion(expression) || self.is_unit_conversion(counterpart)
+                    {
+                        continue;
+                    }
+                    let operand = numeric_operand(&self.expressions, &self.types, counterpart);
+                    if let Some(unit) = operand.unit.cloned() {
+                        let target = self.types.len();
+                        self.types.push(TypeInfo::Numeric(NumericRange {
+                            bounds: None,
+                            unit: Some(unit),
+                            reference_system: None,
+                            circular: false,
+                            direction: None,
+                        }));
+                        self.contextual_convert_unit(expression, target, false)?;
+                    }
+                }
+            }
             if !matches!(operator, Multiply | Divide) {
                 for (typed, literal) in [(left, right), (right, left)] {
                     if let Some(unit) = numeric_operand(&self.expressions, &self.types, typed).unit
@@ -622,12 +642,9 @@ impl Analyzer<'_, '_> {
             return None;
         }
         let bounds = match &underlying_expression(&self.expressions, expression).kind {
-            BoundKind::Number {
-                value: UnitConstant::Decimal(value),
-                ..
-            } => Some(NumericBounds {
-                lower: value.clone(),
-                upper: value.clone(),
+            BoundKind::Number { value, .. } => Some(NumericBounds {
+                lower: constant_info(value).clone(),
+                upper: constant_info(value).clone(),
             }),
             _ => None,
         };
@@ -694,9 +711,23 @@ impl Analyzer<'_, '_> {
             }
         };
         let unit = unit.cloned();
+        let simple_attribute = |expression| {
+            let BoundKind::Path { steps } =
+                &underlying_expression(&self.expressions, expression).kind
+            else {
+                return None;
+            };
+            let [step] = steps.as_slice() else {
+                return None;
+            };
+            (step.association_access.is_none() && step.selection.is_none())
+                .then(|| step.reference.target_name())
+        };
+        let same_operand =
+            simple_attribute(left).is_some_and(|target| simple_attribute(right) == Some(target));
         let estimate = match (a.bounds, b.bounds) {
             (Some(a), Some(b)) => {
-                match arithmetic_bounds(operator, a, b, self.limits, &mut self.work) {
+                match arithmetic_bounds(operator, a, b, same_operand, self.limits, &mut self.work) {
                     Ok(bounds) => bounds,
                     Err(error) => {
                         self.number_error(error, at);
@@ -858,11 +889,7 @@ pub(super) fn numeric_operand<'a>(
         }
     } else if let BoundKind::Number { unit, value } = &expression.kind {
         NumericOperand {
-            bounds: if let UnitConstant::Decimal(value) = value {
-                Some((value, value))
-            } else {
-                None
-            },
+            bounds: Some((constant_info(value), constant_info(value))),
             unit: unit.as_ref(),
         }
     } else {

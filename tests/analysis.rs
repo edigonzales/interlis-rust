@@ -736,7 +736,7 @@ fn every_supplied_source_is_checked_and_mixed_languages_bind_by_model() {
     );
     assert!(empty.graph().unwrap().models().is_empty());
     for body in [
-        "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;",
+        "TOPIC T=CLASS C=n:-1..1; ratio:0..10 := 1/n; END C; END T;",
         "TOPIC T = CLASS X=route:POLYLINE; END X; VIEW V INSPECTION OF X->route; = END V; END T;",
     ] {
         outcome(single(body), Status::Incomplete, Some("ILI-UNSUPPORTED"));
@@ -6675,6 +6675,14 @@ fn bounded_arithmetic_checks_assignments_and_keeps_exact_result_bounds() {
         None,
     );
     outcome(
+        single(
+            "TOPIC T=CLASS Item=a:-10000..10000; zero:0..0 := a-a; square:0..100000000 := a*a; END Item; END T;",
+        ),
+        Status::CheckedSubset,
+        None,
+    );
+
+    outcome(
         single("TOPIC T=CLASS Item=n:-1..1; x:0..10 := 1/n; END Item; END T;"),
         Status::Incomplete,
         Some("ILI-UNSUPPORTED"),
@@ -7842,9 +7850,7 @@ fn compile_only_exposes_a_schema_for_a_successfully_checked_closure() {
     );
     for (input, expected, diagnostic) in [
         (
-            single(
-                "UNIT Turn=PI[INTERLIS.rad]; TOPIC T=CLASS C=angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]); END C; END T;",
-            ),
+            single("TOPIC T=CLASS C=n:-1..1; ratio:0..10 := 1/n; END C; END T;"),
             CompilationStatus::Incomplete,
             "ILI-UNSUPPORTED",
         ),
@@ -8058,6 +8064,60 @@ fn convert_unit_checks_exact_converted_bounds_and_mandatory_values() {
             input("0.10 [INTERLIS.s]"),
             Status::Rejected,
             Some("ILI-CONVERT-UNIT"),
+        );
+    }
+}
+
+#[test]
+fn convert_unit_binds_symbolic_function_and_negative_scales_in_their_context() {
+    for version in ["2.3", "2.4"] {
+        let input = |condition: &str| {
+            request(vec![(
+                "units.ili",
+                format!(
+                    r#"INTERLIS {version}; CONTRACTED MODEL M AT "x" VERSION "1" =
+            UNIT Turn = PI [INTERLIS.rad]; Negative = -2 [INTERLIS.m]; Twice = 2 [Negative];
+              Fahrenheit = FUNCTION // (Fahrenheit + 459.67) / 1.8 // [INTERLIS.K];
+              Centimeter = 0.01 [INTERLIS.m];
+            FUNCTION fits(value:0..10 [Centimeter]):BOOLEAN;
+            TOPIC T = CLASS C =
+                angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]);
+                temperature:0..1000 [INTERLIS.K] := INTERLIS.convertUnit(32 [Fahrenheit]);
+                x:0..2 [Twice]; meters:-8..0 [INTERLIS.m] := INTERLIS.convertUnit(x);
+                limit:0..1 [INTERLIS.m]; timeValue:0..1 [INTERLIS.s];
+                MANDATORY CONSTRAINT {condition};
+            END C; END T; END M."#
+                ),
+            )])
+        };
+        let report = outcome(
+            input("INTERLIS.convertUnit(2 [Twice]) < limit"),
+            Status::CheckedSubset,
+            None,
+        );
+        let graph = report.graph().unwrap();
+        let class = graph.declaration("M.T.C").unwrap();
+        let predicate = graph
+            .expression(class.constraints()[0].expression.unwrap())
+            .unwrap();
+        let interlis::BoundExpressionKind::Binary { left, .. } = predicate.kind else {
+            panic!("expected a binary comparison");
+        };
+        let Some(TypeInfo::Numeric(converted)) = graph.expression_declared_type(left) else {
+            panic!("expected a contextual numeric conversion");
+        };
+        assert!(converted.bounds.is_none());
+        assert_eq!(converted.unit.as_ref().unwrap().target_name(), "INTERLIS.m");
+
+        outcome(
+            input("INTERLIS.convertUnit(2 [Twice]) < timeValue"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT"),
+        );
+        outcome(
+            input("fits(INTERLIS.convertUnit(2 [INTERLIS.m]))"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT-RANGE"),
         );
     }
 }

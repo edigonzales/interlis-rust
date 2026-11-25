@@ -19,14 +19,19 @@ Model queries expose resolved declarations, member order, types, references,
 constraints, units, metadata and original locations. Compilation checks model
 definitions. Transfer-object validation and geometry topology belong to
 downstream components. Some features still report \`incomplete\`, including
-arithmetic and unit conversions whose result type or bounds cannot be
-established exactly.
+bounded numeric assignments whose result range cannot be established.
 
 INTERLIS 2.4 arithmetic uses exact decimal addition, subtraction, multiplication
 and terminating division. A nonterminating quotient rounds to 50 significant
 digits with ties to even. Range division encloses possible results with
 outward rounding. The compiler uses the same arithmetic profile as the
 interlis-java validator for static range checks.
+
+`INTERLIS.convertUnit` checks the common conversion basis and the converted
+range in assignments and function arguments when the scaling is computable.
+A comparison supplies the destination unit. A compatible `FUNCTION` conversion
+binds to the contextual destination type and defers calculation to evaluation.
+
 
 The library takes owned, explicit UTF-8 sources and never reads files or accesses
 the network. Logical source names are exact identifiers (1–1024 UTF-8 bytes,

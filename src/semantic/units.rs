@@ -1,7 +1,10 @@
 use super::{Analyzer, Kind, LookupError, QualifiedName, Symbol, SyntaxDecl};
 use crate::{
-    DecimalInfo, NumericBounds, Span, TypeReference, UnitConstant, UnitDefinition, UnitFactor,
-    UnitInfo, UnitOperator, UnitScale, UnitTerm, limits::WorkBudget, number::NumberError, syntax,
+    BinaryOperator, DecimalInfo, Limits, NumericBounds, Span, TypeReference, UnitConstant,
+    UnitDefinition, UnitFactor, UnitInfo, UnitOperator, UnitScale, UnitTerm,
+    limits::WorkBudget,
+    number::{DecimalLiteral, DivisionRounding, NumberError, constant_info},
+    syntax,
 };
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet};
@@ -408,70 +411,125 @@ pub(super) fn units_convertible(
     Ok(actual == expected)
 }
 
-pub(super) fn rational_conversion(
+/// Evaluate unit factors in declaration order, as in the decimal evaluator.
+pub(super) fn conversion_scales(
     symbols: &[Symbol<'_>],
     names: &BTreeMap<String, usize>,
-    actual: &TypeReference,
-    expected: &TypeReference,
+    source: &TypeReference,
+    destination: &TypeReference,
+    limits: &Limits,
     work: &mut WorkBudget,
-) -> Result<Option<(BigInt, BigInt)>, NumberError> {
-    let mut ratio = unit_product(
-        symbols,
-        names,
-        actual.target_name(),
-        ProductKind::Ratio,
-        work,
-    )?;
-    for (factor, power) in unit_product(
-        symbols,
-        names,
-        expected.target_name(),
-        ProductKind::Ratio,
-        work,
-    )? {
-        add_power(&mut ratio, factor, &power, UnitOperator::Divide, work)?;
+) -> Result<Option<(DecimalLiteral, DecimalLiteral)>, NumberError> {
+    let one = DecimalLiteral::parse("1", limits, work)?;
+    if source.target_name() == destination.target_name() {
+        return Ok(Some((one.clone(), one)));
     }
-    let mut numerator = BigInt::from(1);
-    let mut denominator = BigInt::from(1);
-    let mut scale = 0_i64;
-    for (factor, exponent) in ratio {
-        if exponent.bits() == 0 {
+    let mut resolved: BTreeMap<&str, Option<DecimalLiteral>> = BTreeMap::new();
+    let mut pending = vec![
+        (source.target_name(), false),
+        (destination.target_name(), false),
+    ];
+    while let Some((name, ready)) = pending.pop() {
+        work.charge(1).map_err(|_| NumberError::Work)?;
+        if resolved.contains_key(name) {
             continue;
         }
-        let Factor::Decimal(decimal_scale, coefficient) = factor else {
-            return Ok(None);
-        };
-        let exponent = i32::try_from(exponent).map_err(|_| NumberError::Limit)?;
-        let power = exponent.unsigned_abs();
-        charge_product_work(
-            (coefficient.len() as u64).saturating_mul(u64::from(power)),
-            work,
-        )?;
-        let value = BigInt::parse_bytes(coefficient.as_bytes(), 10)
-            .ok_or(NumberError::Form)?
-            .pow(power);
-        if exponent < 0 {
-            denominator *= value;
-        } else {
-            numerator *= value;
+        let definition = declared_unit(symbols, names, name).map(|unit| &unit.definition);
+        if !ready {
+            let first = match definition {
+                Some(UnitDefinition::Derived {
+                    target,
+                    scale: UnitScale::Factors(_),
+                }) => {
+                    pending.push((name, true));
+                    pending.push((target.target_name(), false));
+                    continue;
+                }
+                Some(UnitDefinition::Composed { terms }) => {
+                    pending.push((name, true));
+                    pending.extend(terms.iter().map(|term| (term.unit.target_name(), false)));
+                    continue;
+                }
+                Some(UnitDefinition::Derived {
+                    scale: UnitScale::Function(_),
+                    ..
+                }) => None,
+                _ => Some(match predefined_scale(name) {
+                    Some(factor) => DecimalLiteral::parse(factor, limits, work)?,
+                    None => one.clone(),
+                }),
+            };
+            resolved.insert(name, first);
+            continue;
         }
-        scale = scale
-            .checked_add(i64::from(decimal_scale) * i64::from(exponent))
-            .ok_or(NumberError::Limit)?;
+        let mut factor = match definition {
+            Some(UnitDefinition::Derived { target, .. }) => resolved[target.target_name()].clone(),
+            _ => Some(one.clone()),
+        };
+        match definition {
+            Some(UnitDefinition::Derived {
+                scale: UnitScale::Factors(factors),
+                ..
+            }) => {
+                for term in factors {
+                    let Some(current) = factor.take() else { break };
+                    let argument = DecimalLiteral::from_info(constant_info(&term.value), work)?;
+                    factor = Some(apply_scale(
+                        current,
+                        &argument,
+                        term.operator,
+                        limits,
+                        work,
+                    )?);
+                }
+            }
+            Some(UnitDefinition::Composed { terms }) => {
+                for term in terms {
+                    let (Some(current), Some(argument)) =
+                        (factor, &resolved[term.unit.target_name()])
+                    else {
+                        factor = None;
+                        break;
+                    };
+                    factor = Some(apply_scale(current, argument, term.operator, limits, work)?);
+                }
+            }
+            _ => unreachable!("only dependent scales are deferred"),
+        }
+        resolved.insert(name, factor);
     }
-    charge_product_work(scale.unsigned_abs(), work)?;
-    let power = u32::try_from(scale.unsigned_abs()).map_err(|_| NumberError::Limit)?;
-    let place = BigInt::from(10).pow(power);
-    if scale < 0 {
-        numerator *= place;
-    } else {
-        denominator *= place;
+    Ok(resolved
+        .remove(source.target_name())
+        .flatten()
+        .zip(resolved.remove(destination.target_name()).flatten()))
+}
+
+fn apply_scale(
+    current: DecimalLiteral,
+    argument: &DecimalLiteral,
+    operator: UnitOperator,
+    limits: &Limits,
+    work: &mut WorkBudget,
+) -> Result<DecimalLiteral, NumberError> {
+    current.operate(
+        match operator {
+            UnitOperator::Multiply => BinaryOperator::Multiply,
+            UnitOperator::Divide => BinaryOperator::Divide,
+        },
+        argument,
+        DivisionRounding::Nearest,
+        limits,
+        work,
+    )
+}
+
+fn predefined_scale(name: &str) -> Option<&'static str> {
+    match name {
+        "INTERLIS.min" => Some("60"),
+        "INTERLIS.h" => Some("3600"),
+        "INTERLIS.d" => Some("86400"),
+        _ => None,
     }
-    if denominator.sign() == num_bigint::Sign::Minus {
-        numerator = -numerator;
-        denominator = -denominator;
-    }
-    Ok(Some((numerator, denominator)))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -507,12 +565,7 @@ fn unit_product<'a>(
         }
         let unit = declared_unit(symbols, names, name);
         let definition = unit.map(|unit| &unit.definition);
-        let predefined_scale = match name {
-            "INTERLIS.min" => Some("60"),
-            "INTERLIS.h" => Some("3600"),
-            "INTERLIS.d" => Some("86400"),
-            _ => None,
-        };
+        let predefined_scale = predefined_scale(name);
         let alias = match (definition, kind) {
             (
                 Some(UnitDefinition::Derived {

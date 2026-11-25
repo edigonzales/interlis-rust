@@ -4,15 +4,15 @@ use super::{
     expressions::{scalar_type, underlying_expression},
     object_references::object_targets,
     paths::PathContext,
-    units::{rational_conversion, unit_extends, units_convertible},
+    units::{conversion_scales, unit_extends, units_convertible},
 };
 use crate::{
-    AttributePathOwner, AttributePathType, BoundExpressionKind, ClassValueKind, ClassValueType,
-    DecimalInfo, ExpressionId, ExpressionType, FunctionInfo, GeometryKind, NumericRange,
-    ObjectSelection, ObjectTarget, RelatedLocation, Span, UnitConstant,
+    AttributePathOwner, AttributePathType, BinaryOperator, BoundExpressionKind, ClassValueKind,
+    ClassValueType, DecimalInfo, ExpressionId, ExpressionType, FunctionInfo, GeometryKind,
+    NumericRange, ObjectSelection, ObjectTarget, RelatedLocation, Span,
     limits::WorkBudget,
     model::ArgumentBinding,
-    number::{DecimalLiteral, NumberError},
+    number::{DecimalLiteral, DivisionRounding, NumberError, arithmetic_bounds, constant_info},
     syntax::ArgumentType,
 };
 use std::cmp::Ordering;
@@ -988,7 +988,14 @@ impl Analyzer<'_, '_> {
         result
     }
 
-    fn contextual_convert_unit(
+    pub(super) fn is_unit_conversion(&self, expression: ExpressionId) -> bool {
+        matches!(
+            &underlying_expression(&self.expressions, expression).kind,
+            BoundExpressionKind::Call { function, .. } if function.target_name() == "INTERLIS.convertUnit"
+        )
+    }
+
+    pub(super) fn contextual_convert_unit(
         &mut self,
         expression: ExpressionId,
         target: usize,
@@ -1027,59 +1034,88 @@ impl Analyzer<'_, '_> {
         }
         let origin = super::expressions::numeric_operand(&self.expressions, &self.types, argument);
         let checked = (|| {
-            use num_bigint::BigInt;
-            let ratio = match (origin.unit, destination.unit.as_ref()) {
-                (Some(origin), Some(destination)) => {
-                    if !units_convertible(
+            match (origin.unit, destination.unit.as_ref()) {
+                (Some(origin), Some(destination))
+                    if units_convertible(
                         &self.symbols,
                         &self.names,
                         origin,
                         destination,
                         &mut self.work,
-                    )? {
-                        return Ok(Some("ILI-CONVERT-UNIT"));
-                    }
-                    if self.types[target].has_unbounded_range() {
-                        return Ok(None);
-                    }
-                    rational_conversion(
-                        &self.symbols,
-                        &self.names,
-                        origin,
-                        destination,
-                        &mut self.work,
-                    )?
-                }
-                (None, None) => Some((BigInt::from(1), BigInt::from(1))),
+                    )? => {}
+                (None, None) => {}
                 _ => return Ok(Some("ILI-CONVERT-UNIT")),
+            }
+            let Some(destination_bounds) = &destination.bounds else {
+                return Ok(None);
             };
-            if let Some(destination) = &destination.bounds {
-                let (Some((lower, upper)), Some((numerator, denominator))) = (origin.bounds, ratio)
-                else {
-                    return Ok(Some("ILI-UNSUPPORTED"));
-                };
-                let (lower, upper) = if numerator.sign() == num_bigint::Sign::Minus {
-                    (upper, lower)
-                } else {
-                    (lower, upper)
-                };
-                if compare_converted(
-                    lower,
-                    &destination.lower,
-                    &numerator,
-                    &denominator,
+            let scales = match (origin.unit, destination.unit.as_ref()) {
+                (Some(origin), Some(destination)) => conversion_scales(
+                    &self.symbols,
+                    &self.names,
+                    origin,
+                    destination,
+                    self.limits,
                     &mut self.work,
-                )? == Ordering::Less
-                    || compare_converted(
-                        upper,
-                        &destination.upper,
-                        &numerator,
-                        &denominator,
-                        &mut self.work,
-                    )? == Ordering::Greater
-                {
-                    return Ok(Some("ILI-CONVERT-UNIT-RANGE"));
+                )?,
+                _ => {
+                    let one = DecimalLiteral::parse("1", self.limits, &mut self.work)?;
+                    Some((one.clone(), one))
                 }
+            };
+            // A FUNCTION declaration provides the conversion relation. Only the evaluator
+            // can supply the corresponding operation and check its value.
+            let Some((source, target)) = scales else {
+                return Ok(None);
+            };
+            let Some((lower, upper)) = origin.bounds else {
+                return Ok(Some("ILI-UNSUPPORTED"));
+            };
+            let mut scaled = |bound| {
+                DecimalLiteral::from_info(bound, &mut self.work)?.operate(
+                    BinaryOperator::Multiply,
+                    &source,
+                    DivisionRounding::Nearest,
+                    self.limits,
+                    &mut self.work,
+                )
+            };
+            let mut lower = scaled(lower)?;
+            let mut upper = scaled(upper)?;
+            if lower.compare_value(&upper, &mut self.work)? == Ordering::Greater {
+                std::mem::swap(&mut lower, &mut upper);
+            }
+            let Some((converted, rounded)) = arithmetic_bounds(
+                BinaryOperator::Divide,
+                (&lower.info, &upper.info),
+                (&target.info, &target.info),
+                false,
+                self.limits,
+                &mut self.work,
+            )?
+            else {
+                return Ok(Some("ILI-UNSUPPORTED"));
+            };
+            let begins_before =
+                compare_decimal(&converted.lower, &destination_bounds.lower, &mut self.work)?
+                    == Ordering::Less;
+            let ends_after =
+                compare_decimal(&converted.upper, &destination_bounds.upper, &mut self.work)?
+                    == Ordering::Greater;
+            if begins_before || ends_after {
+                let estimate = rounded
+                    || operand
+                        .type_id
+                        .is_some_and(|ty| self.rounded_numeric_ranges.contains(&ty));
+                if estimate
+                    && compare_decimal(&converted.upper, &destination_bounds.lower, &mut self.work)?
+                        != Ordering::Less
+                    && compare_decimal(&converted.lower, &destination_bounds.upper, &mut self.work)?
+                        != Ordering::Greater
+                {
+                    return Ok(Some("ILI-UNSUPPORTED"));
+                }
+                return Ok(Some("ILI-CONVERT-UNIT-RANGE"));
             }
             Ok(None)
         })();
@@ -1096,7 +1132,7 @@ impl Analyzer<'_, '_> {
                 "ILI-CONVERT-UNIT-RANGE" => {
                     "The converted value can fall outside its destination range"
                 }
-                _ => "The converted range cannot be established exactly",
+                _ => "The converted range cannot be established",
             };
             self.diagnostics.push(code, message, Some(at));
             return None;
@@ -1285,8 +1321,8 @@ impl Analyzer<'_, '_> {
                         .then_some(false));
                     };
                     (&bounds.lower, &bounds.upper)
-                } else if let Some((UnitConstant::Decimal(value), _)) = constant {
-                    (value, value)
+                } else if let Some((value, _)) = constant {
+                    (constant_info(value), constant_info(value))
                 } else {
                     return Ok(None);
                 };
@@ -1320,36 +1356,6 @@ pub(super) fn compare_decimal(
     let left = DecimalLiteral::from_info(left, work)?;
     let right = DecimalLiteral::from_info(right, work)?;
     left.compare_value(&right, work)
-}
-
-fn compare_converted(
-    source: &DecimalInfo,
-    target: &DecimalInfo,
-    numerator: &num_bigint::BigInt,
-    denominator: &num_bigint::BigInt,
-    work: &mut WorkBudget,
-) -> Result<Ordering, NumberError> {
-    use num_bigint::BigInt;
-    let places = source.scale().abs_diff(target.scale());
-    let bytes = u64::from(places)
-        + numerator.bits().max(denominator.bits()).div_ceil(8)
-        + (source.coefficient().len() + target.coefficient().len()) as u64;
-    work.charge(u32::try_from(bytes).map_err(|_| NumberError::Limit)?)
-        .map_err(|_| NumberError::Work)?;
-    let coefficient = |number: &DecimalInfo| {
-        BigInt::parse_bytes(number.coefficient().as_bytes(), 10).ok_or(NumberError::Form)
-    };
-    let mut left = coefficient(source)? * numerator;
-    let mut right = coefficient(target)? * denominator;
-    if places > 0 {
-        let scale = BigInt::from(10).pow(places);
-        if source.scale() < target.scale() {
-            left *= scale;
-        } else {
-            right *= scale;
-        }
-    }
-    Ok(left.cmp(&right))
 }
 
 fn text_argument_fits(

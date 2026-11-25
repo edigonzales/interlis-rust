@@ -1,4 +1,6 @@
-use crate::{BinaryOperator, Limits, NumericBounds, limits::WorkBudget, model::DecimalInfo};
+use crate::{
+    BinaryOperator, Limits, NumericBounds, UnitConstant, limits::WorkBudget, model::DecimalInfo,
+};
 use num_bigint::{BigInt, Sign};
 use std::cmp::Ordering;
 
@@ -220,6 +222,30 @@ impl DecimalLiteral {
             }
         }
         Ok(rounded.cmp(&base.value))
+    }
+}
+
+pub(crate) fn constant_info(value: &UnitConstant) -> &DecimalInfo {
+    use std::sync::LazyLock;
+    fn predefined(text: &str) -> DecimalInfo {
+        let (_, fraction) = text.split_once('.').expect("predefined decimal");
+        DecimalInfo {
+            original: text.into(),
+            coefficient: text.replace('.', ""),
+            fractional_digits: fraction.len() as u32,
+            exponent: 0,
+            scaled: false,
+            computed: true,
+        }
+    }
+    static PI: LazyLock<DecimalInfo> =
+        LazyLock::new(|| predefined("3.1415926535897932384626433832795028841971693993751"));
+    static LNBASE: LazyLock<DecimalInfo> =
+        LazyLock::new(|| predefined("2.7182818284590452353602874713526624977572470937"));
+    match value {
+        UnitConstant::Decimal(value) => value,
+        UnitConstant::Pi => &PI,
+        UnitConstant::LnBase => &LNBASE,
     }
 }
 
@@ -457,6 +483,7 @@ pub(crate) fn arithmetic_bounds(
     operator: BinaryOperator,
     left: (&DecimalInfo, &DecimalInfo),
     right: (&DecimalInfo, &DecimalInfo),
+    same_operand: bool,
     limits: &Limits,
     work: &mut WorkBudget,
 ) -> Result<Option<(NumericBounds, bool)>, NumberError> {
@@ -479,8 +506,11 @@ pub(crate) fn arithmetic_bounds(
     let mut rounded = false;
     let mut minimum: Option<DecimalLiteral> = None;
     let mut maximum: Option<DecimalLiteral> = None;
-    for left in &a {
-        for right in &b {
+    for (i, left) in a.iter().enumerate() {
+        for (j, right) in b.iter().enumerate() {
+            if same_operand && i != j {
+                continue;
+            }
             let lower = left.operate(
                 operator,
                 right,
@@ -515,6 +545,13 @@ pub(crate) fn arithmetic_bounds(
                 maximum = Some(upper);
             }
         }
+    }
+    if same_operand
+        && operator == BinaryOperator::Multiply
+        && a[0].value.sign() != Sign::Plus
+        && a[1].value.sign() != Sign::Minus
+    {
+        minimum = Some(DecimalLiteral::computed(BigInt::from(0), 0, limits, work)?);
     }
     Ok(Some((
         NumericBounds {
