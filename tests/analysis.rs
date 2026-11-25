@@ -8078,13 +8078,16 @@ fn convert_unit_binds_symbolic_function_and_negative_scales_in_their_context() {
                     r#"INTERLIS {version}; CONTRACTED MODEL M AT "x" VERSION "1" =
             UNIT Turn = PI [INTERLIS.rad]; Negative = -2 [INTERLIS.m]; Twice = 2 [Negative];
               Fahrenheit = FUNCTION // (Fahrenheit + 459.67) / 1.8 // [INTERLIS.K];
-              Centimeter = 0.01 [INTERLIS.m];
+              Centimeter = 0.01 [INTERLIS.m]; CentimeterAlias = [Centimeter];
+              FahrenheitAlias = [Fahrenheit];
             FUNCTION fits(value:0..10 [Centimeter]):BOOLEAN;
             TOPIC T = CLASS C =
                 angle:0..10 [INTERLIS.rad] := INTERLIS.convertUnit(1 [Turn]);
-                temperature:0..1000 [INTERLIS.K] := INTERLIS.convertUnit(32 [Fahrenheit]);
+                temperature:0..1000 [INTERLIS.K] := INTERLIS.convertUnit(32 [FahrenheitAlias]);
+                measure:0.01..0.01 [INTERLIS.m] := INTERLIS.convertUnit(1 [CentimeterAlias]);
+                nested:100..100 [Centimeter] := INTERLIS.convertUnit(INTERLIS.convertUnit(1 [INTERLIS.m]));
                 x:0..2 [Twice]; meters:-8..0 [INTERLIS.m] := INTERLIS.convertUnit(x);
-                limit:0..1 [INTERLIS.m]; timeValue:0..1 [INTERLIS.s];
+                limit:0..1 [INTERLIS.m]; timeValue:0..1 [INTERLIS.s]; unitless:0..1;
                 MANDATORY CONSTRAINT {condition};
             END C; END T; END M."#
                 ),
@@ -8109,6 +8112,21 @@ fn convert_unit_binds_symbolic_function_and_negative_scales_in_their_context() {
         assert!(converted.bounds.is_none());
         assert_eq!(converted.unit.as_ref().unwrap().target_name(), "INTERLIS.m");
 
+        outcome(
+            input("INTERLIS.convertUnit(1 [INTERLIS.m]) > 0"),
+            Status::CheckedSubset,
+            None,
+        );
+        outcome(
+            input("INTERLIS.convertUnit(1 [INTERLIS.m]) > unitless"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT"),
+        );
+        outcome(
+            input("INTERLIS.convertUnit(1 [INTERLIS.m]) > INTERLIS.convertUnit(1 [INTERLIS.s])"),
+            Status::Rejected,
+            Some("ILI-CONVERT-UNIT"),
+        );
         outcome(
             input("INTERLIS.convertUnit(2 [Twice]) < timeValue"),
             Status::Rejected,

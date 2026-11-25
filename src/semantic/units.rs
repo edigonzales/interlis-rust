@@ -439,7 +439,7 @@ pub(super) fn conversion_scales(
             let first = match definition {
                 Some(UnitDefinition::Derived {
                     target,
-                    scale: UnitScale::Factors(_),
+                    scale: UnitScale::Factors(_) | UnitScale::Identity,
                 }) => {
                     pending.push((name, true));
                     pending.push((target.target_name(), false));
@@ -494,6 +494,10 @@ pub(super) fn conversion_scales(
                     factor = Some(apply_scale(current, argument, term.operator, limits, work)?);
                 }
             }
+            Some(UnitDefinition::Derived {
+                scale: UnitScale::Identity,
+                ..
+            }) => {}
             _ => unreachable!("only dependent scales are deferred"),
         }
         resolved.insert(name, factor);

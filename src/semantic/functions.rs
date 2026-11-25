@@ -18,6 +18,11 @@ use crate::{
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(super) enum ConversionContext {
+    Assignment { mandatory: bool },
+    Comparison,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum AssignmentContext {
     Attribute,
@@ -482,9 +487,29 @@ impl Analyzer<'_, '_> {
         if name == "convertUnit" {
             let value = underlying_expression(&self.expressions, argument);
             return match value.value_type {
-                ExpressionType::Numeric => value
-                    .type_id
-                    .or_else(|| Some(self.unbounded_numeric_type())),
+                ExpressionType::Numeric => {
+                    if let Some(ty) = value.type_id {
+                        return Some(ty);
+                    }
+                    let source = super::expressions::numeric_operand(
+                        &self.expressions,
+                        &self.types,
+                        argument,
+                    );
+                    let range = NumericRange {
+                        bounds: source.bounds.map(|(lower, upper)| crate::NumericBounds {
+                            lower: lower.clone(),
+                            upper: upper.clone(),
+                        }),
+                        unit: source.unit.cloned(),
+                        reference_system: None,
+                        circular: false,
+                        direction: None,
+                    };
+                    let ty = self.types.len();
+                    self.types.push(TypeInfo::Numeric(range));
+                    Some(ty)
+                }
                 ExpressionType::Undefined => Some(self.unbounded_numeric_type()),
                 _ => {
                     self.diagnostics.push(
@@ -896,7 +921,11 @@ impl Analyzer<'_, '_> {
         mandatory: bool,
         context: AssignmentContext,
     ) -> Option<bool> {
-        if self.contextual_convert_unit(expression, target, mandatory)? {
+        if self.contextual_convert_unit(
+            expression,
+            target,
+            ConversionContext::Assignment { mandatory },
+        )? {
             return Some(true);
         }
         if self.is_enum_type(target) {
@@ -999,7 +1028,7 @@ impl Analyzer<'_, '_> {
         &mut self,
         expression: ExpressionId,
         target: usize,
-        mandatory: bool,
+        context: ConversionContext,
     ) -> Option<bool> {
         let TypeInfo::Numeric(destination) = &self.types[target] else {
             return Some(false);
@@ -1019,7 +1048,7 @@ impl Analyzer<'_, '_> {
         let at = actual.span.clone();
         let operand = underlying_expression(&self.expressions, argument);
         if operand.value_type == ExpressionType::Undefined {
-            if mandatory {
+            if matches!(context, ConversionContext::Assignment { mandatory: true }) {
                 self.diagnostics.push(
                     "ILI-CONVERT-UNIT-UNDEFINED",
                     "An undefined conversion cannot supply a mandatory value",
@@ -1046,6 +1075,9 @@ impl Analyzer<'_, '_> {
                 (None, None) => {}
                 _ => return Ok(Some("ILI-CONVERT-UNIT")),
             }
+            let ConversionContext::Assignment { .. } = context else {
+                return Ok(None);
+            };
             let Some(destination_bounds) = &destination.bounds else {
                 return Ok(None);
             };
@@ -1137,21 +1169,24 @@ impl Analyzer<'_, '_> {
             self.diagnostics.push(code, message, Some(at));
             return None;
         }
-        if actual.type_id == operand.type_id
-            || operand.type_id.is_none()
-                && actual
-                    .type_id
-                    .is_some_and(|ty| self.types[ty].has_unbounded_range())
-        {
-            let mut id = expression;
-            loop {
-                let value = &mut self.expressions[id.0 as usize];
-                value.type_id = Some(target);
-                if let BoundExpressionKind::Group { expression } = value.kind {
-                    id = expression;
-                } else {
-                    break;
-                }
+        let target =
+            if matches!(context, ConversionContext::Comparison) && destination.bounds.is_some() {
+                let mut range = destination.clone();
+                range.bounds = None;
+                let ty = self.types.len();
+                self.types.push(TypeInfo::Numeric(range));
+                ty
+            } else {
+                target
+            };
+        let mut id = expression;
+        loop {
+            let value = &mut self.expressions[id.0 as usize];
+            value.type_id = Some(target);
+            if let BoundExpressionKind::Group { expression } = value.kind {
+                id = expression;
+            } else {
+                break;
             }
         }
         Some(true)

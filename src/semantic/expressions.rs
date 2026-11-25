@@ -1,4 +1,4 @@
-use super::functions::area_function;
+use super::functions::{ConversionContext, area_function};
 use super::{Analyzer, BoundName, Kind, LookupError, QualifiedName, TypeInfo};
 use crate::{
     BinaryOperator, BoundExpression, BoundExpressionKind as BoundKind, ClassValueKind,
@@ -561,15 +561,28 @@ impl Analyzer<'_, '_> {
             return None;
         }
         if a == Numeric && b == Numeric && !logical {
+            if !matches!(operator, Multiply | Divide) {
+                for (typed, literal) in [(left, right), (right, left)] {
+                    if let Some(unit) = numeric_operand(&self.expressions, &self.types, typed).unit
+                    {
+                        self.bind_numeric_literal_unit(literal, unit.clone())?;
+                    }
+                }
+            }
             if !arithmetic {
                 for (expression, counterpart) in [(left, right), (right, left)] {
-                    if !self.is_unit_conversion(expression) || self.is_unit_conversion(counterpart)
-                    {
+                    if !self.is_unit_conversion(expression) {
                         continue;
                     }
-                    let operand = numeric_operand(&self.expressions, &self.types, counterpart);
-                    if let Some(unit) = operand.unit.cloned() {
-                        let target = self.types.len();
+                    let target = if let Some(ty) = self.expressions[counterpart.0 as usize].type_id
+                    {
+                        ty
+                    } else {
+                        let operand = numeric_operand(&self.expressions, &self.types, counterpart);
+                        let Some(unit) = operand.unit.cloned() else {
+                            continue;
+                        };
+                        let ty = self.types.len();
                         self.types.push(TypeInfo::Numeric(NumericRange {
                             bounds: None,
                             unit: Some(unit),
@@ -577,16 +590,13 @@ impl Analyzer<'_, '_> {
                             circular: false,
                             direction: None,
                         }));
-                        self.contextual_convert_unit(expression, target, false)?;
-                    }
-                }
-            }
-            if !matches!(operator, Multiply | Divide) {
-                for (typed, literal) in [(left, right), (right, left)] {
-                    if let Some(unit) = numeric_operand(&self.expressions, &self.types, typed).unit
-                    {
-                        self.bind_numeric_literal_unit(literal, unit.clone())?;
-                    }
+                        ty
+                    };
+                    self.contextual_convert_unit(
+                        expression,
+                        target,
+                        ConversionContext::Comparison,
+                    )?;
                 }
             }
             return Some(if arithmetic { Numeric } else { Boolean });
